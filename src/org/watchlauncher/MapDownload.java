@@ -51,7 +51,7 @@ public class MapDownload {
 
     /** Tiles come in blocks of this many a side. 256 tiles a request turns a
      *  country from a hundred and fifty thousand round trips into six hundred. */
-    private static final int BLOCK = 16;
+    private static final int BLOCK = MapTiles.BLOCK;
 
     /** Measured mean for a z15 tile over a whole country, for the estimates.
      *  A city block runs nearer 2.3 kB and open water 192 bytes; this is the
@@ -270,12 +270,17 @@ public class MapDownload {
     private int blocksInner(MapTiles tiles, String country,
                             double minx, double miny, double maxx, double maxy,
                             int z, Progress p) {
-        int x0 = (int) Math.floor(Mercator.xOf(minx, z));
+        // Snapped out to whole blocks. A block is one file on the card now, so
+        // a request straddling two of them would write two partial files and
+        // neither could ever be called complete.
+        int x0 = ((int) Math.floor(Mercator.xOf(minx, z))) & ~(BLOCK - 1);
         int x1 = (int) Math.floor(Mercator.xOf(maxx, z));
-        int y0 = (int) Math.floor(Mercator.yOf(maxy, z));    // north is smaller
-        int y1 = (int) Math.floor(Mercator.yOf(miny, z));
+        int y0 = ((int) Math.floor(Mercator.yOf(maxy, z))) & ~(BLOCK - 1);
+        int y1 = (int) Math.floor(Mercator.yOf(miny, z));    // north is smaller
 
-        int total = (x1 - x0 + 1) * (y1 - y0 + 1);
+        int across = ((x1 - x0) / BLOCK) + 1;
+        int down = ((y1 - y0) / BLOCK) + 1;
+        int total = across * down * BLOCK * BLOCK;
         int done = 0, failed = 0;
         skipped = 0;
         MapTiles.writing(true);
@@ -287,16 +292,12 @@ public class MapDownload {
                 // should stop it, not quietly finish over cellular.
                 if (!tiles.onWifi()) return -1;
 
-                int w = Math.min(BLOCK, x1 - x + 1);
-                int h = Math.min(BLOCK, y1 - y + 1);
-                int tilesHere = w * h;
+                int tilesHere = BLOCK * BLOCK;
 
-                // Nothing already on the card is asked for again. This is what
-                // makes a download resumable: interrupted halfway, the second
-                // run skips everything the first one finished instead of
-                // fetching the country twice.
-                int already = tiles.haveInBlock(country, z, x, y, w, h);
-                if (already >= tilesHere) {
+                // A block already on the card is never asked for again, which
+                // is what makes a country download resumable. One file to
+                // stat now, rather than 256.
+                if (tiles.haveBlock(country, z, MapTiles.blockOf(x), MapTiles.blockOf(y))) {
                     done += tilesHere;
                     skipped += tilesHere;
                     pDone = Math.min(done, total); pTotal = total; pFailed = failed;
@@ -306,30 +307,17 @@ public class MapDownload {
                     continue;
                 }
 
-                int missing = tilesHere - already;
-                if (missing * 4 <= tilesHere) {
-                    // Only a few holes: individual requests move less data than
-                    // a whole block would, even counting the extra round trips.
-                    for (int i = 0; i < w; i++) {
-                        for (int j = 0; j < h; j++) {
-                            if (tiles.have(country, z, x + i, y + j)) continue;
-                            if (!tiles.fetch(country, z, x + i, y + j)) failed++;
-                        }
-                    }
-                    skipped += already;
-                } else {
-                    // One retry. A block is 256 tiles, so a single timeout or
-                    // a truncated response - a busy server, a moment of bad
-                    // wifi - otherwise reports 256 failures for what is very
-                    // often a transient fault the next attempt clears.
-                    int got = tiles.fetchPack(country, z, x, y, w, h);
-                    if (got < 0 && !cancelled) {
-                        try { Thread.sleep(1500); } catch (InterruptedException e) { }
-                        got = tiles.fetchPack(country, z, x, y, w, h);
-                    }
-                    if (got < 0) { failed += tilesHere; }
-                    skipped += already;
+                // One retry. A block is 256 tiles, so a single timeout or a
+                // truncated response - a busy server, a moment of bad wifi -
+                // otherwise reports 256 failures for what is very often a
+                // transient fault the next attempt clears.
+                int got = tiles.fetchPack(country, z, x, y, BLOCK, BLOCK);
+                if (got < 0 && !cancelled) {
+                    try { Thread.sleep(1500); } catch (InterruptedException e) { }
+                    got = tiles.fetchPack(country, z, x, y, BLOCK, BLOCK);
                 }
+                if (got < 0) failed += tilesHere;
+
                 done += tilesHere;
                 pDone = Math.min(done, total); pTotal = total; pFailed = failed;
                 if (p != null && !p.onProgress(Math.min(done, total), total, failed)) {

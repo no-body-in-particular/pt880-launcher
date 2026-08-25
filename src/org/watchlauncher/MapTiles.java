@@ -153,14 +153,120 @@ public class MapTiles {
 
     // ---------------------------------------------------------------- tiles
 
-    public static File fileFor(String country, int z, int x, int y) {
-        return new File(DIR + "/" + country + "/" + z + "/" + x + "/" + y + ".png");
+    /*
+     * A block of tiles is one file, not two hundred and fifty six.
+     *
+     * The card is FAT32 on slow flash. A country at z15 is about 150,000
+     * tiles averaging 515 bytes, and stored one per file that is 150,000
+     * directory entries, 150,000 allocations, and - since the cluster is far
+     * larger than the tile - most of the space wasted on slack. Writing them
+     * cost a measured half second per block of 256, which by the end was the
+     * largest single component of a download.
+     *
+     * So the download unit and the storage unit are the same thing: the 16x16
+     * block the server already packs. One file, one write, one directory
+     * entry, and a fixed index at the head so a single tile is still a seek
+     * and a read rather than a parse.
+     *
+     *     "WTB1"  u8 zoom  u8 bits  u32 baseX  u32 baseY  u32 count
+     *     index:  256 x (u32 offset, u32 length)     length 0 = no such tile
+     *     then the PNG bytes, in index order
+     *
+     * Offsets are from the start of the file. Big-endian, like everything
+     * else the watch reads.
+     */
+    static final int BLOCK_BITS = 4;
+    static final int BLOCK = 1 << BLOCK_BITS;              // 16
+    private static final int SLOTS = BLOCK * BLOCK;        // 256
+    private static final byte[] MAGIC = {'W', 'T', 'B', '1'};
+    private static final int HEAD_LEN = 4 + 1 + 1 + 4 + 4 + 4;
+    private static final int INDEX_LEN = SLOTS * 8;
+    private static final int DATA_AT = HEAD_LEN + INDEX_LEN;
+
+    /** Tiles live under b<zoom>, so a card written by the old one-file-per-tile
+     *  build is simply not found - and shows up under Clean up as reclaimable
+     *  rather than being deleted out from under a working map. */
+    static String zoomDir(int z) { return "b" + z; }
+
+    static File blockFile(String country, int z, int bx, int by) {
+        return new File(DIR + "/" + country + "/" + zoomDir(z) + "/" + bx + "_" + by + ".wtb");
+    }
+
+    static int blockOf(int tile) { return tile >> BLOCK_BITS; }
+
+    private static int slotOf(int x, int y) {
+        return ((x & (BLOCK - 1)) * BLOCK) + (y & (BLOCK - 1));
+    }
+
+    /**
+     * Block indexes, kept in memory.
+     *
+     * Two kilobytes each and read on every tile lookup, so a handful of the
+     * most recent ones save a seek per tile while the map is being drawn.
+     */
+    private final Map<String, int[]> indexes =
+            new LinkedHashMap<String, int[]>(8, 0.75f, true) {
+        protected boolean removeEldestEntry(Map.Entry<String, int[]> e) {
+            return size() > 8;
+        }
+    };
+
+    /** @return offset/length pairs by slot, or null if there is no such block */
+    private int[] index(String country, int z, int bx, int by) {
+        String key = country + "/" + z + "/" + bx + "_" + by;
+        synchronized (indexes) {
+            int[] got = indexes.get(key);
+            if (got != null) return got.length == 0 ? null : got;
+        }
+
+        int[] table = null;
+        File f = blockFile(country, z, bx, by);
+        if (f.isFile() && f.length() >= DATA_AT) {
+            java.io.RandomAccessFile r = null;
+            try {
+                r = new java.io.RandomAccessFile(f, "r");
+                byte[] head = new byte[HEAD_LEN];
+                r.readFully(head);
+                if (head[0] == MAGIC[0] && head[1] == MAGIC[1]
+                        && head[2] == MAGIC[2] && head[3] == MAGIC[3]) {
+                    byte[] idx = new byte[INDEX_LEN];
+                    r.readFully(idx);
+                    table = new int[SLOTS * 2];
+                    for (int i = 0; i < SLOTS * 2; i++) {
+                        int b = i * 4;
+                        table[i] = ((idx[b] & 0xFF) << 24) | ((idx[b + 1] & 0xFF) << 16)
+                                 | ((idx[b + 2] & 0xFF) << 8) | (idx[b + 3] & 0xFF);
+                    }
+                }
+            } catch (Exception e) {
+                table = null;
+            } finally {
+                try { if (r != null) r.close(); } catch (Exception e) { }
+            }
+        }
+        synchronized (indexes) {
+            indexes.put(key, table == null ? new int[0] : table);
+        }
+        return table;
+    }
+
+    private void forgetIndex(String country, int z, int bx, int by) {
+        synchronized (indexes) {
+            indexes.remove(country + "/" + z + "/" + bx + "_" + by);
+        }
     }
 
     public boolean have(String country, int z, int x, int y) {
         if (refreshing(country)) return false;      // drawn by an older renderer
-        File f = fileFor(country, z, x, y);
-        return f.isFile() && f.length() > 0;
+        int[] t = index(country, z, blockOf(x), blockOf(y));
+        if (t == null) return false;
+        return t[slotOf(x, y) * 2 + 1] > 0;
+    }
+
+    /** Whether the whole block is on the card already. */
+    public boolean haveBlock(String country, int z, int bx, int by) {
+        if (refreshing(country)) return false;
+        return index(country, z, bx, by) != null;
     }
 
     /** From memory, then the card. Never from the network: drawing happens on
@@ -170,41 +276,31 @@ public class MapTiles {
         Bitmap b = memory.get(key);
         if (b != null && !b.isRecycled()) return b;
 
-        File f = fileFor(country, z, x, y);
-        if (!f.isFile()) return null;
+        int bx = blockOf(x), by = blockOf(y);
+        int[] t = index(country, z, bx, by);
+        if (t == null) return null;
+        int slot = slotOf(x, y) * 2;
+        int off = t[slot], len = t[slot + 1];
+        if (len <= 0) return null;
+
+        java.io.RandomAccessFile r = null;
         try {
+            r = new java.io.RandomAccessFile(blockFile(country, z, bx, by), "r");
+            r.seek(off);
+            byte[] png = new byte[len];
+            r.readFully(png);
             BitmapFactory.Options o = new BitmapFactory.Options();
-            // The tiles are greyscale; 565 halves the memory against 8888 and
-            // loses nothing that sixteen greys could show.
+            // 565 halves the memory against 8888 and loses nothing that
+            // sixteen palette entries could show.
             o.inPreferredConfig = Bitmap.Config.RGB_565;
-            b = BitmapFactory.decodeFile(f.getAbsolutePath(), o);
+            b = BitmapFactory.decodeByteArray(png, 0, len, o);
             if (b != null) memory.put(key, b);
             return b;
         } catch (Exception e) {
             return null;
+        } finally {
+            try { if (r != null) r.close(); } catch (Exception e) { }
         }
-    }
-
-    /**
-     * How many tiles of this block are already on the card.
-     *
-     * One listing per x column rather than a stat per tile. The card is
-     * FAT32, where a name lookup is a linear scan of the directory, so asking
-     * about 16 files in the same directory one at a time scans it 16 times.
-     */
-    public int haveInBlock(String country, int z, int x, int y, int w, int h) {
-        if (refreshing(country)) return 0;
-        int n = 0;
-        for (int i = 0; i < w; i++) {
-            String[] names = new File(DIR + "/" + country + "/" + z + "/" + (x + i)).list();
-            if (names == null || names.length == 0) continue;
-            java.util.HashSet<String> here = new java.util.HashSet<String>(names.length * 2);
-            for (int k = 0; k < names.length; k++) here.add(names[k]);
-            for (int j = 0; j < h; j++) {
-                if (here.contains((y + j) + ".png")) n++;
-            }
-        }
-        return n;
     }
 
     /** Decode into the memory cache off the UI thread, so onDraw never has to.
@@ -214,19 +310,19 @@ public class MapTiles {
         if (have(country, z, x, y)) cached(country, z, x, y);
     }
 
-    /** Blocking. @return true if the tile is on the card afterwards. */
+    /**
+     * Blocking. @return true if the tile is on the card afterwards.
+     *
+     * Fetches the whole block containing it, because the block is the unit
+     * the card stores. Browsing therefore pulls rather more than the one tile
+     * being looked at - and then every neighbouring tile is already there,
+     * which is what panning wants anyway.
+     */
     public boolean fetch(String country, int z, int x, int y) {
         if (have(country, z, x, y)) return true;
-        String url = base() + "tile.php?c=" + country + "&z=" + z + "&x=" + x + "&y=" + y;
-        return download(url, fileFor(country, z, x, y));
-    }
-
-    /** The road vectors for a tile, alongside its picture. */
-    public boolean fetchRoads(String country, int z, int x, int y) {
-        File f = new File(DIR + "/" + country + "/" + z + "/" + x + "/" + y + ".rds");
-        if (f.isFile() && f.length() > 0) return true;
-        String url = base() + "roads.php?c=" + country + "&z=" + z + "&x=" + x + "&y=" + y;
-        return download(url, f);
+        int bx = blockOf(x), by = blockOf(y);
+        return fetchPack(country, z, bx << BLOCK_BITS, by << BLOCK_BITS,
+                BLOCK, BLOCK) > 0 && have(country, z, x, y);
     }
 
     /** Blocking download to a file, written via a temporary name so an
@@ -347,62 +443,75 @@ public class MapTiles {
             int count = in.readInt();
             if (count < 0 || count > 4096) return -1;
 
-            int written = 0;
+            // Read the whole block into memory first. It is a few hundred
+            // kilobytes at worst, and the index has to know every offset
+            // before the first byte can be written.
             long netMs = 0, writeMs = 0;
-            String madeDir = null;
-            boolean restyle = refreshing(country);
+            long t0 = System.currentTimeMillis();
+
+            int bx = blockOf(x), by = blockOf(y);
+            int[] table = new int[SLOTS * 2];
+            byte[][] png = new byte[SLOTS][];
+            int written = 0;
+            int payload = 0;
 
             for (int i = 0; i < count; i++) {
-                long t0 = System.currentTimeMillis();
                 int tx = in.readInt();
                 int ty = in.readInt();
                 int len = in.readInt();
                 if (len < 0 || len > 1048576) return -1;
-                byte[] png = new byte[len];
-                in.readFully(png);
-                netMs += System.currentTimeMillis() - t0;
-
-                t0 = System.currentTimeMillis();
-                File out = fileFor(country, z, tx, ty);
-                // The size check alone is not enough during a style refresh:
-                // recolouring changes no index and no length, so every stale
-                // tile matches byte for byte in size and would be skipped.
-                if (!restyle && out.isFile() && out.length() == len) {
-                    written++;
-                    writeMs += System.currentTimeMillis() - t0;
-                    continue;
-                }
-
-                // One directory check per column rather than per tile. Every
-                // tile in a pack shares a handful of parents, and on FAT32 a
-                // stat is a linear scan of the directory.
-                File dir = out.getParentFile();
-                if (dir != null) {
-                    String path = dir.getPath();
-                    if (!path.equals(madeDir)) {
-                        if (!dir.isDirectory() && !dir.mkdirs()) continue;
-                        madeDir = path;
-                    }
-                }
-
-                // Written straight to its name, not via a temporary one.
-                // Create-plus-rename is two directory updates per tile, and a
-                // pack is 256 tiles - which on this card was most of the cost
-                // of a block. A torn write leaves a short file, and a short
-                // file is refetched, so the rename was buying less than it
-                // charged.
-                FileOutputStream os = null;
-                try {
-                    os = new FileOutputStream(out);
-                    os.write(png);
-                    written++;
-                } catch (Exception e) {
-                    out.delete();
-                } finally {
-                    if (os != null) try { os.close(); } catch (Exception e) { }
-                }
-                writeMs += System.currentTimeMillis() - t0;
+                byte[] bytes = new byte[len];
+                in.readFully(bytes);
+                // A tile outside this block would corrupt the index; the
+                // server is asked for an aligned block, so this is a guard
+                // against a reply that does not match the request.
+                if (blockOf(tx) != bx || blockOf(ty) != by) continue;
+                int slot = slotOf(tx, ty);
+                png[slot] = bytes;
+                payload += len;
+                written++;
             }
+            netMs = System.currentTimeMillis() - t0;
+
+            t0 = System.currentTimeMillis();
+            int at = DATA_AT;
+            for (int slot = 0; slot < SLOTS; slot++) {
+                if (png[slot] == null) continue;
+                table[slot * 2] = at;
+                table[slot * 2 + 1] = png[slot].length;
+                at += png[slot].length;
+            }
+
+            File out = blockFile(country, z, bx, by);
+            File dir = out.getParentFile();
+            if (dir != null && !dir.isDirectory() && !dir.mkdirs()) return -1;
+
+            java.io.BufferedOutputStream os = null;
+            try {
+                os = new java.io.BufferedOutputStream(
+                        new FileOutputStream(out), 32768);
+                os.write(MAGIC);
+                os.write(z);
+                os.write(BLOCK_BITS);
+                writeInt(os, bx << BLOCK_BITS);
+                writeInt(os, by << BLOCK_BITS);
+                writeInt(os, written);
+                for (int i = 0; i < SLOTS * 2; i++) writeInt(os, table[i]);
+                for (int slot = 0; slot < SLOTS; slot++) {
+                    if (png[slot] != null) os.write(png[slot]);
+                }
+                os.flush();
+            } catch (Exception e) {
+                try { if (os != null) os.close(); } catch (Exception ignored) { }
+                os = null;
+                out.delete();
+                return -1;
+            } finally {
+                try { if (os != null) os.close(); } catch (Exception e) { }
+            }
+            forgetIndex(country, z, bx, by);
+            writeMs = System.currentTimeMillis() - t0;
+
             lastNetMs = netMs;
             lastWriteMs = writeMs;
             drained = true;                 // whole body read: reusable
@@ -418,6 +527,13 @@ public class MapTiles {
 
     /** Why the last request failed, in one word, for the screen. */
     private String lastError = null;
+
+    private static void writeInt(java.io.OutputStream os, int v) throws java.io.IOException {
+        os.write((v >>> 24) & 0xFF);
+        os.write((v >>> 16) & 0xFF);
+        os.write((v >>> 8) & 0xFF);
+        os.write(v & 0xFF);
+    }
 
     public String lastError() { return lastError; }
 
@@ -526,10 +642,12 @@ public class MapTiles {
                             if (zooms == null) continue;
                             for (int j = 0; j < zooms.length; j++) {
                                 if (!zooms[j].isDirectory()) continue;
-                                if (!zooms[j].getName().equals(String.valueOf(keepZoom))) {
-                                    // A zoom nothing draws any more - the z13
-                                    // overviews from before a country was
-                                    // measured small enough to keep at z15.
+                                if (!zooms[j].getName().equals(zoomDir(keepZoom))) {
+                                    // Anything this build does not read: the
+                                    // z13 overviews from before a country was
+                                    // measured small enough to keep at z15,
+                                    // and the one-file-per-tile trees from
+                                    // before blocks were stored whole.
                                     stale += size(zooms[j]);
                                 }
                             }
@@ -576,7 +694,7 @@ public class MapTiles {
             if (zooms == null) continue;
             for (int j = 0; j < zooms.length; j++) {
                 if (!zooms[j].isDirectory()) continue;
-                if (keepZoom > 0 && !zooms[j].getName().equals(String.valueOf(keepZoom))) {
+                if (keepZoom > 0 && !zooms[j].getName().equals(zoomDir(keepZoom))) {
                     freed += delete(zooms[j]);
                 }
             }
@@ -607,7 +725,7 @@ public class MapTiles {
      * seam between them, and nothing would ever replace the old half, because
      * as far as the downloader is concerned those tiles are present.
      */
-    public static final int STYLE = 2;
+    public static final int STYLE = 3;
 
     /**
      * The country being re-rendered, if any.

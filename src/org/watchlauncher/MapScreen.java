@@ -469,12 +469,8 @@ public class MapScreen extends Screen implements LocationListener {
     @Override
     public String hint() {
         if (Double.isNaN(lat)) return "waiting for a fix   hold:menu";
-        if (route != null) {
-            Route.Turn t = route.nextTurn(lat, lon);
-            if (t != null) {
-                return Route.turnWord(t.kind) + " in " + route.metresTo(lat, lon, t) + "m";
-            }
-        }
+        // The next turn is drawn on the map itself now, so this line is free
+        // to say how far there is left to go.
         if (target != null) {
             int m = (int) Route.metresBetween(lat, lon, target.lat, target.lon);
             return target.name + "  " + (m >= 1000 ? ((m / 100) / 10.0 + " km") : (m + " m"));
@@ -548,6 +544,7 @@ public class MapScreen extends Screen implements LocationListener {
             drawTiles(canvas, w, h, cx, cy);
             drawRoute(canvas, w, h, cx, cy);
             drawMe(canvas, w, h);
+            drawTurn(canvas, w, h);
             drawOverlay(canvas, w, h);
         }
 
@@ -627,6 +624,37 @@ public class MapScreen extends Screen implements LocationListener {
             }
         }
 
+        /**
+         * The next turn, along the bottom of the map.
+         *
+         * On its own band rather than over the map, because a line of text
+         * laid straight on top of roads at this size is unreadable against
+         * half the backgrounds it lands on. Amber, matching the route it
+         * refers to, so it is obvious which line the instruction is about.
+         */
+        private void drawTurn(Canvas canvas, int w, int h) {
+            if (route == null || Double.isNaN(lat)) return;
+            String say = route.screenInstruction(lat, lon);
+            if (say == null) return;
+
+            final int band = 20;
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(0xD0000000);                 // dark, but not opaque
+            canvas.drawRect(0, h - band, w, h, paint);
+
+            paint.setColor(approximate ? Ui.MUTED : Ui.ROUTE);
+            paint.setTextSize(13);
+            paint.setTextAlign(Paint.Align.CENTER);
+
+            // Shrink rather than clip: "in 1.2 km turn sharp right" is longer
+            // than 240px at 13px, and half an instruction is worse than a
+            // small one.
+            while (paint.measureText(say) > w - 6 && paint.getTextSize() > 9) {
+                paint.setTextSize(paint.getTextSize() - 1);
+            }
+            canvas.drawText(say, w / 2f, h - 6, paint);
+        }
+
         private void drawOverlay(Canvas canvas, int w, int h) {
             paint.setStyle(Paint.Style.FILL);
             paint.setTextSize(10);
@@ -640,7 +668,8 @@ public class MapScreen extends Screen implements LocationListener {
             if (approximate) {
                 paint.setColor(Ui.WARN);
                 paint.setTextAlign(Paint.Align.LEFT);
-                canvas.drawText("approx", 2, h - 2, paint);
+                canvas.drawText("approx", 2,
+                        (route != null ? h - 24 : h - 2), paint);
             }
             long age = (fixAt == 0) ? -1 : (System.currentTimeMillis() - fixAt) / 1000;
             if (age > 30) {

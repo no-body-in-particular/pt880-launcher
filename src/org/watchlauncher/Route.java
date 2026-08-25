@@ -200,21 +200,53 @@ public class Route {
         return best;
     }
 
-    private static String phrase(int kind, int metres) {
-        String turn;
+    /** What to do at a turn, as a phrase. Shared by the voice and the screen
+     *  so the two never word the same manoeuvre differently. */
+    public static String action(int kind) {
         switch (kind) {
-            case SLIGHT_LEFT:  turn = "bear left"; break;
-            case LEFT:         turn = "turn left"; break;
-            case SHARP_LEFT:   turn = "turn sharp left"; break;
-            case SLIGHT_RIGHT: turn = "bear right"; break;
-            case RIGHT:        turn = "turn right"; break;
-            case SHARP_RIGHT:  turn = "turn sharp right"; break;
-            case UTURN:        turn = "make a u turn"; break;
-            case ROUNDABOUT:   turn = "at the roundabout"; break;
-            case ARRIVE:       turn = "you have arrived"; break;
+            case SLIGHT_LEFT:  return "bear left";
+            case LEFT:         return "turn left";
+            case SHARP_LEFT:   return "turn sharp left";
+            case SLIGHT_RIGHT: return "bear right";
+            case RIGHT:        return "turn right";
+            case SHARP_RIGHT:  return "turn sharp right";
+            case UTURN:        return "make a u turn";
+            case ROUNDABOUT:   return "at the roundabout";
+            case ARRIVE:       return "you have arrived";
             case DEPART:       return null;
-            default:           turn = "continue straight ahead"; break;
+            default:           return "continue straight ahead";
         }
+    }
+
+    /** Short enough for a 240px line: "300 m", "1.2 km". */
+    public static String screenDistance(int m) {
+        if (m >= 1000) return (Math.round(m / 100.0) / 10.0) + " km";
+        if (m > 300) return (Math.round(m / 100.0) * 100) + " m";
+        if (m > 80) return (Math.round(m / 50.0) * 50) + " m";
+        return (Math.round(m / 10.0) * 10) + " m";
+    }
+
+    /**
+     * The next turn as a line for the map: "in 300 m turn left".
+     *
+     * @return null when there is no turn left to make
+     */
+    public String screenInstruction(double lat, double lon) {
+        Turn t = nextTurn(lat, lon);
+        if (t == null) return null;
+        String what = action(t.kind);
+        if (what == null) return null;
+        int m = metresTo(lat, lon, t);
+        if (t.kind == ARRIVE) return what;
+        if (m <= 20) return what;              // at it now, no distance
+        return "in " + screenDistance(m) + " " + what;
+    }
+
+    private static String phrase(int kind, int metres) {
+        String turn = action(kind);
+        if (turn == null) return null;
+        // Arrival is announced as itself; "in 300 metres, you have arrived"
+        // is not something a person says.
         if (kind == ARRIVE) return turn;
         if (metres <= 0) return turn;
         return "in " + spokenDistance(metres) + ", " + turn;
