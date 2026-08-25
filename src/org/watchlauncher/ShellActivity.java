@@ -142,6 +142,17 @@ public class ShellActivity extends Activity {
         // rather than stacking a second -- so re-arming on every start is the
         // cheapest way to recover from anything that stopped it.
         if (SleepLog.enabled(this)) SleepService.schedule(this, 10000);
+
+        // BouncyCastle registers a few hundred algorithms when it is first
+        // touched, which is a visible stall if it happens inside a screen
+        // opening. Done here, on a thread, so it is ready before anything
+        // wants a connection.
+        new Thread(new Runnable() {
+            public void run() {
+                try { Tls12SocketFactory.create(ShellActivity.this); }
+                catch (Throwable t) { /* the caller will find out */ }
+            }
+        }).start();
     }
 
     @Override

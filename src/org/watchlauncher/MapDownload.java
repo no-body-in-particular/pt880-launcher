@@ -62,6 +62,11 @@ public class MapDownload {
 
     private volatile boolean cancelled = false;
 
+    /** Tiles that were already on the card and not asked for again. */
+    private int skipped = 0;
+
+    public int skipped() { return skipped; }
+
     public void cancel() { cancelled = true; }
 
     /** One tile, as x/y at a zoom. */
@@ -140,6 +145,16 @@ public class MapDownload {
     private int blocks(MapTiles tiles, String country,
                        double minx, double miny, double maxx, double maxy,
                        int z, Progress p) {
+        try {
+            return blocksInner(tiles, country, minx, miny, maxx, maxy, z, p);
+        } finally {
+            MapTiles.writing(false);
+        }
+    }
+
+    private int blocksInner(MapTiles tiles, String country,
+                            double minx, double miny, double maxx, double maxy,
+                            int z, Progress p) {
         int x0 = (int) Math.floor(Mercator.xOf(minx, z));
         int x1 = (int) Math.floor(Mercator.xOf(maxx, z));
         int y0 = (int) Math.floor(Mercator.yOf(maxy, z));    // north is smaller
@@ -147,6 +162,8 @@ public class MapDownload {
 
         int total = (x1 - x0 + 1) * (y1 - y0 + 1);
         int done = 0, failed = 0;
+        skipped = 0;
+        MapTiles.writing(true);
 
         for (int x = x0; x <= x1; x += BLOCK) {
             for (int y = y0; y <= y1; y += BLOCK) {
@@ -157,9 +174,39 @@ public class MapDownload {
 
                 int w = Math.min(BLOCK, x1 - x + 1);
                 int h = Math.min(BLOCK, y1 - y + 1);
-                int got = tiles.fetchPack(country, z, x, y, w, h);
-                if (got < 0) { failed += w * h; } 
-                done += w * h;
+                int tilesHere = w * h;
+
+                // Nothing already on the card is asked for again. This is what
+                // makes a download resumable: interrupted halfway, the second
+                // run skips everything the first one finished instead of
+                // fetching the country twice.
+                int already = tiles.haveInBlock(country, z, x, y, w, h);
+                if (already >= tilesHere) {
+                    done += tilesHere;
+                    skipped += tilesHere;
+                    if (p != null && !p.onProgress(Math.min(done, total), total, failed)) {
+                        return failed;
+                    }
+                    continue;
+                }
+
+                int missing = tilesHere - already;
+                if (missing * 4 <= tilesHere) {
+                    // Only a few holes: individual requests move less data than
+                    // a whole block would, even counting the extra round trips.
+                    for (int i = 0; i < w; i++) {
+                        for (int j = 0; j < h; j++) {
+                            if (tiles.have(country, z, x + i, y + j)) continue;
+                            if (!tiles.fetch(country, z, x + i, y + j)) failed++;
+                        }
+                    }
+                    skipped += already;
+                } else {
+                    int got = tiles.fetchPack(country, z, x, y, w, h);
+                    if (got < 0) { failed += tilesHere; }
+                    skipped += already;
+                }
+                done += tilesHere;
                 if (p != null && !p.onProgress(Math.min(done, total), total, failed)) {
                     return failed;
                 }

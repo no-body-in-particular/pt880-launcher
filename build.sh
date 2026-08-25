@@ -76,12 +76,24 @@ echo "[1/6] resources + manifest + assets"
     -J "$(w "$OUT/gen")" \
     -F "$(w "$OUT/base.apk")"
 
+# BouncyCastle's pure-Java TLS, because this device's own stack has no AES-GCM
+# and cannot be given any: the cipher suites are absent from the system image,
+# not merely disabled. Without these the app can only reach a server willing to
+# speak 2013-era ciphers.
+JARS=""
+if [ -d "$HERE/libs" ]; then
+  for j in "$HERE"/libs/*.jar; do
+    [ -f "$j" ] || continue
+    JARS="$JARS$(w "$j"):"
+  done
+fi
+
 echo "[2/6] javac"
 find "$HERE/src" "$OUT/gen" -name '*.java' | wlist > "$OUT/sources.txt"
 javac -nowarn -encoding UTF-8 \
     -source 8 -target 8 \
     -bootclasspath "$(w "$AJAR")" \
-    -classpath "$(w "$AJAR")" \
+    -classpath "$JARS$(w "$AJAR")" \
     -d "$(w "$OUT/classes")" \
     @"$OUT/sources.txt" 2>&1 | grep -v "^warning:" || true
 
@@ -91,8 +103,14 @@ javac -nowarn -encoding UTF-8 \
 
 echo "[3/6] dex"
 find "$OUT/classes" -name '*.class' | wlist > "$OUT/classes.txt"
+# The jars go in alongside our own classes. All of BouncyCastle is about
+# 37,000 methods and the app a couple of thousand, so this still fits one dex
+# and needs no multidex support library - which pre-API-21 would otherwise
+# require.
+# shellcheck disable=SC2086
 "$BT/d8$BAT" --release --min-api 19 --lib "$(w "$AJAR")" \
-    --output "$(w "$OUT/dex")" @"$OUT/classes.txt"
+    --output "$(w "$OUT/dex")" @"$OUT/classes.txt" \
+    $(ls "$HERE"/libs/*.jar 2>/dev/null | while read -r j; do w "$j"; done | tr '\n' ' ')
 
 echo "[4/6] package dex into apk"
 ( cd "$OUT/dex" && "$BT/aapt$EXE" add -k "$(w "$OUT/base.apk")" classes.dex >/dev/null )

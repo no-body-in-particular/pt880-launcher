@@ -1,5 +1,8 @@
 package org.watchlauncher;
 
+import android.content.Context;
+import android.util.Log;
+
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileReader;
@@ -50,6 +53,18 @@ import javax.net.ssl.SSLSocketFactory;
  * one line, the whole URL. The repository keeps per-unit identifiers out of
  * git for exactly the same reason, and the token can be regenerated from the
  * tracker page if it ever gets out.
+ *
+ * <h3>Why this may report SSLHandshake</h3>
+ *
+ * This watch cannot complete a TLS handshake with a modern server: it offers
+ * only ECDHE with AES-GCM, and GCM arrived in Android's TLS stack at API 20
+ * while this device is 19. Bundled CA roots do not help, because the failure
+ * happens before any certificate is examined.
+ *
+ * The URL is deliberately not downgraded to http automatically. It carries a
+ * token that reads a location history, and quietly putting that on the wire is
+ * not a decision an app should make on its owner's behalf. Writing an http URL
+ * into tracker.txt is a decision the owner can make.
  */
 public class ServerFix {
 
@@ -73,11 +88,20 @@ public class ServerFix {
     public static final int TYPE_CELL = 1;
     public static final int TYPE_WIFI = 2;
 
+    /** Needed only to read the bundled CA roots out of the APK. This device's
+     *  trust store predates every ISRG root, so without them no https request
+     *  to a Let's Encrypt host completes at all. */
+    private final Context ctx;
+
     private float speed = -1;
     private double lat, lon;
     private long at = 0;
     private int type = -1;
     private String problem = null;
+
+    public ServerFix(Context c) {
+        ctx = (c == null) ? null : c.getApplicationContext();
+    }
 
     public float speed() { return speed; }
     public long at() { return at; }
@@ -126,8 +150,10 @@ public class ServerFix {
         String u = url();
         if (u == null) {
             problem = "no tracker.txt";
+            Log.w("watchmap", "ServerFix: no tracker.txt in any of the search paths");
             return;
         }
+        Log.i("watchmap", "ServerFix: GET " + u.replaceAll("viewonly=[^&]*", "viewonly=***"));
 
         HttpURLConnection c = null;
         BufferedReader r = null;
@@ -136,7 +162,7 @@ public class ServerFix {
             if (c instanceof HttpsURLConnection) {
                 // API 19 supports TLS 1.2 but does not enable it, and the
                 // server refuses everything older.
-                SSLSocketFactory f = Tls12SocketFactory.create();
+                SSLSocketFactory f = Tls12SocketFactory.create(ctx);
                 if (f != null) ((HttpsURLConnection) c).setSSLSocketFactory(f);
             }
             c.setConnectTimeout(CONNECT_MS);
@@ -145,7 +171,11 @@ public class ServerFix {
             c.setUseCaches(false);
 
             int code = c.getResponseCode();
-            if (code != 200) { problem = "server said " + code; return; }
+            if (code != 200) {
+                problem = "server said " + code;
+                Log.w("watchmap", "ServerFix: http " + code);
+                return;
+            }
 
             r = new BufferedReader(new InputStreamReader(c.getInputStream()));
             String line = r.readLine();
@@ -157,7 +187,17 @@ public class ServerFix {
                         ? "token rejected" : "bad reply";
             }
         } catch (Exception e) {
-            problem = "offline";
+            // The class name, not "offline". SSLHandshakeException,
+            // UnknownHostException and ConnectException are three entirely
+            // different faults with three different fixes, and collapsing them
+            // into one word cost an evening: a certificate the device was too
+            // old to trust looked exactly like having no signal.
+            problem = e.getClass().getSimpleName().replace("Exception", "");
+            // The class name is the useful half: SSLHandshakeException and
+            // UnknownHostException are entirely different problems and both
+            // read as "offline" without it.
+            Log.w("watchmap", "ServerFix: " + e.getClass().getSimpleName()
+                    + " " + String.valueOf(e.getMessage()));
         } finally {
             try { if (r != null) r.close(); } catch (Exception e) { /* ignore */ }
             if (c != null) c.disconnect();
@@ -179,6 +219,7 @@ public class ServerFix {
             String sp = f[3].trim();
             float s = (sp.length() == 0) ? -1 : Float.parseFloat(sp);
 
+            Log.i("watchmap", "ServerFix: parsed " + la + "," + lo + " type " + ty);
             at = when;
             lat = la;
             lon = lo;

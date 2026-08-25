@@ -63,7 +63,7 @@ public class SportsScreen extends Screen implements HeartRate.Listener {
         locations = (LocationManager) shell.getSystemService(Context.LOCATION_SERVICE);
         hr = new HeartRate(shell, this);
         log = new TrackerLog(shell, shell.root());
-        server = new ServerFix();
+        server = new ServerFix(shell);
 
         LinearLayout col = Ui.column(shell);
         col.setGravity(Gravity.CENTER_VERTICAL);

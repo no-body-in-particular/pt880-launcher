@@ -5,6 +5,7 @@ import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.net.ConnectivityManager;
 import android.net.NetworkInfo;
+import android.util.Log;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -36,8 +37,15 @@ import javax.net.ssl.SSLSocketFactory;
  */
 public class MapTiles {
 
-    /** Overridable, but not secret: unlike the tracker URL this carries no
-     *  identifier and no token, so a default in the source costs nothing. */
+    /**
+    /**
+     * https, which this device can only manage because the app brings its own
+     * TLS. The platform's has no AES-GCM at all -- the cipher suites are
+     * absent from the system image rather than disabled -- and a modern server
+     * offers nothing else. See {@link Tls12SocketFactory}.
+     *
+     * Overridable in /sdcard/Documents/map.txt.
+     */
     private static final String DEFAULT_BASE = "https://coredump.ws/map/";
     private static final String CONFIG = "/sdcard/Documents/map.txt";
 
@@ -149,6 +157,34 @@ public class MapTiles {
         }
     }
 
+    /**
+     * How many tiles of this block are already on the card.
+     *
+     * One listing per x column rather than a stat per tile. The card is
+     * FAT32, where a name lookup is a linear scan of the directory, so asking
+     * about 16 files in the same directory one at a time scans it 16 times.
+     */
+    public int haveInBlock(String country, int z, int x, int y, int w, int h) {
+        int n = 0;
+        for (int i = 0; i < w; i++) {
+            String[] names = new File(DIR + "/" + country + "/" + z + "/" + (x + i)).list();
+            if (names == null || names.length == 0) continue;
+            java.util.HashSet<String> here = new java.util.HashSet<String>(names.length * 2);
+            for (int k = 0; k < names.length; k++) here.add(names[k]);
+            for (int j = 0; j < h; j++) {
+                if (here.contains((y + j) + ".png")) n++;
+            }
+        }
+        return n;
+    }
+
+    /** Decode into the memory cache off the UI thread, so onDraw never has to.
+     *  A miss during drawing is a PNG decode inside a frame, which is exactly
+     *  the kind of thing that makes a map feel like treacle. */
+    public void warm(String country, int z, int x, int y) {
+        if (have(country, z, x, y)) cached(country, z, x, y);
+    }
+
     /** Blocking. @return true if the tile is on the card afterwards. */
     public boolean fetch(String country, int z, int x, int y) {
         if (have(country, z, x, y)) return true;
@@ -178,7 +214,7 @@ public class MapTiles {
             c = (HttpURLConnection) new URL(url).openConnection();
             if (c instanceof HttpsURLConnection) {
                 // API 19 supports TLS 1.2 but does not enable it.
-                SSLSocketFactory f = Tls12SocketFactory.create();
+                SSLSocketFactory f = Tls12SocketFactory.create(ctx);
                 if (f != null) ((HttpsURLConnection) c).setSSLSocketFactory(f);
             }
             c.setConnectTimeout(CONNECT_MS);
@@ -227,7 +263,7 @@ public class MapTiles {
         try {
             c = (HttpURLConnection) new URL(url).openConnection();
             if (c instanceof HttpsURLConnection) {
-                SSLSocketFactory f = Tls12SocketFactory.create();
+                SSLSocketFactory f = Tls12SocketFactory.create(ctx);
                 if (f != null) ((HttpsURLConnection) c).setSSLSocketFactory(f);
             }
             c.setConnectTimeout(CONNECT_MS);
@@ -277,13 +313,18 @@ public class MapTiles {
         }
     }
 
+    /** Why the last request failed, in one word, for the screen. */
+    private String lastError = null;
+
+    public String lastError() { return lastError; }
+
     /** Text from an endpoint, for the small answers. */
     public String get(String url) {
         HttpURLConnection c = null;
         try {
             c = (HttpURLConnection) new URL(url).openConnection();
             if (c instanceof HttpsURLConnection) {
-                SSLSocketFactory f = Tls12SocketFactory.create();
+                SSLSocketFactory f = Tls12SocketFactory.create(ctx);
                 if (f != null) ((HttpsURLConnection) c).setSSLSocketFactory(f);
             }
             c.setConnectTimeout(CONNECT_MS);
@@ -297,21 +338,174 @@ public class MapTiles {
             r.close();
             return b.toString();
         } catch (Exception e) {
+            lastError = e.getClass().getSimpleName().replace("Exception", "");
+            Log.w("watchmap", "GET " + url + " -> " + e.getClass().getSimpleName()
+                    + " " + String.valueOf(e.getMessage()));
             return null;
         } finally {
             if (c != null) c.disconnect();
         }
     }
 
-    /** How much of the card the maps are using. */
-    public static long bytesOnCard() {
-        return size(new File(DIR));
+    /**
+     * How much of the card the maps are using, and how much of that is dead.
+     *
+     * Both cached and computed on a thread. Walking the tile tree means
+     * stat-ing every file in it, and a downloaded country is a hundred and
+     * fifty thousand of them - which the map menu was doing on the UI thread
+     * every time it drew a row.
+     */
+    private static volatile long cachedBytes = -1;
+    private static volatile long cachedStale = -1;
+    private static volatile long cachedAt = 0;
+    private static volatile boolean counting = false;
+
+    /** Set while a bulk download is writing tiles. */
+    private static volatile boolean writing = false;
+
+    public static void writing(boolean on) {
+        writing = on;
+        if (!on) forgetSizes();
     }
 
+    /** What the last caller said was in use, so that a total asked for on its
+     *  own does not start a scan that reports nothing as reclaimable. */
+    private static volatile String keptCountry = null;
+    private static volatile int keptZoom = -1;
+
+    public static long bytesOnCard() {
+        scan(keptCountry, keptZoom);
+        return cachedBytes < 0 ? 0 : cachedBytes;
+    }
+
+    /** Bytes that {@link #cleanup} would free, given what is in use now. */
+    public static long reclaimable(String keepCountry, int keepZoom) {
+        scan(keepCountry, keepZoom);
+        return cachedStale < 0 ? 0 : cachedStale;
+    }
+
+    private static void scan(final String keepCountry, final int keepZoom) {
+        if (keepCountry != null && !keepCountry.equals(keptCountry)) {
+            keptCountry = keepCountry;
+            cachedAt = 0;                       // the answer was for elsewhere
+        }
+        if (keepZoom > 0) keptZoom = keepZoom;
+        long now = System.currentTimeMillis();
+        if (cachedBytes >= 0 && now - cachedAt < 60000) return;
+        if (counting) return;
+        // Not while a download is running. The walk costs two syscalls per
+        // tile already on the card, so it gets more expensive the further a
+        // country download gets - and it spends them on the same card the
+        // downloader is writing to, which is why downloads appeared to slow
+        // down as they progressed. The figure would be stale on arrival
+        // anyway, with the tree changing underneath it.
+        if (writing) return;
+        counting = true;
+        new Thread(new Runnable() {
+            public void run() {
+                long total = 0, stale = 0;
+                File root = new File(DIR);
+                File[] countries = root.listFiles();
+                if (countries != null) {
+                    for (int i = 0; i < countries.length; i++) {
+                        File c = countries[i];
+                        if (!c.isDirectory()) { total += c.length(); continue; }
+                        long here = size(c);
+                        total += here;
+                        if (keepCountry != null && !c.getName().equals(keepCountry)) {
+                            stale += here;                 // a country we left
+                            continue;
+                        }
+                        if (keepZoom > 0) {
+                            File[] zooms = c.listFiles();
+                            if (zooms == null) continue;
+                            for (int j = 0; j < zooms.length; j++) {
+                                if (!zooms[j].isDirectory()) continue;
+                                if (!zooms[j].getName().equals(String.valueOf(keepZoom))) {
+                                    // A zoom nothing draws any more - the z13
+                                    // overviews from before a country was
+                                    // measured small enough to keep at z15.
+                                    stale += size(zooms[j]);
+                                }
+                            }
+                        }
+                    }
+                }
+                cachedBytes = total;
+                cachedStale = stale;
+                cachedAt = System.currentTimeMillis();
+                counting = false;
+            }
+        }).start();
+    }
+
+    /** Forget the cached figures, so the next read counts again. */
+    public static void forgetSizes() {
+        cachedAt = 0;
+    }
+
+    /**
+     * Delete what is no longer drawn: other countries, and zoom levels this
+     * build does not use.
+     *
+     * Deliberately conservative. It never touches the country in use at the
+     * zoom in use, so it cannot delete the map under your feet, and it is
+     * reported in megabytes rather than done silently.
+     *
+     * @return bytes freed
+     */
+    public static long cleanup(String keepCountry, int keepZoom) {
+        long freed = 0;
+        File root = new File(DIR);
+        File[] countries = root.listFiles();
+        if (countries == null) return 0;
+
+        for (int i = 0; i < countries.length; i++) {
+            File c = countries[i];
+            if (!c.isDirectory()) continue;
+            if (keepCountry != null && !c.getName().equals(keepCountry)) {
+                freed += delete(c);
+                continue;
+            }
+            File[] zooms = c.listFiles();
+            if (zooms == null) continue;
+            for (int j = 0; j < zooms.length; j++) {
+                if (!zooms[j].isDirectory()) continue;
+                if (keepZoom > 0 && !zooms[j].getName().equals(String.valueOf(keepZoom))) {
+                    freed += delete(zooms[j]);
+                }
+            }
+        }
+        forgetSizes();
+        return freed;
+    }
+
+    private static long delete(File f) {
+        long n = 0;
+        if (f.isDirectory()) {
+            File[] kids = f.listFiles();
+            if (kids != null) {
+                for (int i = 0; i < kids.length; i++) n += delete(kids[i]);
+            }
+        } else {
+            n = f.length();
+        }
+        return f.delete() ? n : 0;
+    }
+
+    /** Megabytes, for a row on a 240px screen. */
+    public static String mb(long bytes) {
+        if (bytes >= 1048576L * 1024) return String.format("%.1f GB", bytes / 1073741824.0);
+        if (bytes >= 1048576L) return (bytes / 1048576L) + " MB";
+        if (bytes >= 1024) return (bytes / 1024) + " KB";
+        return bytes + " B";
+    }
+
+    /** Recursive size. listFiles() returns null for a plain file, which saves
+     *  an isFile() stat on every tile - and tiles are all of the entries. */
     private static long size(File f) {
-        if (f.isFile()) return f.length();
         File[] kids = f.listFiles();
-        if (kids == null) return 0;
+        if (kids == null) return f.length();
         long total = 0;
         for (int i = 0; i < kids.length; i++) total += size(kids[i]);
         return total;

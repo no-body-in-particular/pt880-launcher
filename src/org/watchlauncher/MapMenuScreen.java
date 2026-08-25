@@ -36,8 +36,13 @@ public class MapMenuScreen extends ListScreen {
         l.add(new Item("Download country",
                 map.country() == null ? "unknown" : map.country(), AppIcons.DEVICE));
         l.add(new Item("Download route", null, AppIcons.DEVICE));
-        l.add(new Item("Storage", MapDownload.estimate(
-                (int) (MapTiles.bytesOnCard() / 4096)), AppIcons.NONE, Ui.DIM));
+        l.add(new Item("Storage", MapTiles.mb(MapTiles.bytesOnCard()),
+                AppIcons.NONE, Ui.DIM));
+        long dead = MapTiles.reclaimable(map.country(), MapDownload.COUNTRY_ZOOM);
+        l.add(new Item("Clean up", dead > 0 ? ("free " + MapTiles.mb(dead)) : "nothing to free",
+                AppIcons.GEAR, dead > 0 ? Ui.FG : Ui.DIM));
+        l.add(new Item("Retry position", map.why().length() > 0 ? map.why() : "ok",
+                AppIcons.GEAR));
         l.add(new Item("Network", map.tiles().onWifi() ? "wifi"
                 : (map.tiles().online() ? "mobile" : "offline"),
                 AppIcons.NONE, Ui.DIM));
@@ -58,11 +63,42 @@ public class MapMenuScreen extends ListScreen {
                 break;
             case 2: downloadCountry(); break;
             case 3: downloadRoute(); break;
-            case 4: break;                       // readouts
-            case 5: break;
-            case 6: shell.pop(); break;
+            case 4: break;                       // a readout
+            case 5: cleanUp(); break;
+            case 6: map.retrySeed(); render(); break;
+            case 7: break;                       // a readout
+            case 8: shell.pop(); break;
             default: shell.popToRoot(); break;
         }
+    }
+
+    /**
+     * Delete maps nothing draws any more: other countries, and zoom levels
+     * this build does not use.
+     *
+     * It never touches the country in use at the zoom in use, so it cannot
+     * remove the map under your feet, and it says how much it freed rather
+     * than doing it quietly.
+     */
+    private void cleanUp() {
+        if (busy.length() > 0) return;
+        final String keep = map.country();
+        busy = "cleaning...";
+        render();
+        new Thread(new Runnable() {
+            public void run() {
+                final long freed = MapTiles.cleanup(keep, MapDownload.COUNTRY_ZOOM);
+                shell.runOnUiThread(new Runnable() {
+                    public void run() {
+                        busy = "";
+                        MapTiles.forgetSizes();
+                        shell.toast(freed > 0 ? ("freed " + MapTiles.mb(freed))
+                                              : "nothing to free");
+                        render();
+                    }
+                });
+            }
+        }).start();
     }
 
     private String makeExample() {
@@ -159,8 +195,16 @@ public class MapMenuScreen extends ListScreen {
                     if (r == null) { finish("no route yet"); return; }
                     failed = job.route(map.tiles(), country, r, p);
                 }
-                finish(failed < 0 ? "needs wifi"
-                        : (failed == 0 ? "map downloaded" : (failed + " tiles missing")));
+                String msg;
+                if (failed < 0) {
+                    msg = "needs wifi";
+                } else if (failed == 0) {
+                    int had = job.skipped();
+                    msg = had > 0 ? ("done, " + had + " already had") : "map downloaded";
+                } else {
+                    msg = failed + " tiles missing";
+                }
+                finish(msg);
             }
 
             private void finish(final String msg) {

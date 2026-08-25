@@ -11,6 +11,7 @@ import android.location.LocationListener;
 import android.location.LocationManager;
 import android.os.Bundle;
 import android.os.Handler;
+import android.util.Log;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.LinearLayout;
@@ -79,6 +80,11 @@ public class MapScreen extends Screen implements LocationListener {
     private boolean approximate = false;
     private boolean askedServer = false;
 
+    /** Why there is nothing on screen. A blank map with no explanation is the
+     *  least useful thing this could show, and every reason it can be blank
+     *  has a different fix. */
+    private String why = "";
+
     @Override
     public String title() { return "Map"; }
 
@@ -86,7 +92,7 @@ public class MapScreen extends Screen implements LocationListener {
     protected View build() {
         tiles = new MapTiles(shell);
         speech = new Speech(shell);
-        server = new ServerFix();
+        server = new ServerFix(shell);
         locations = (LocationManager) shell.getSystemService(Context.LOCATION_SERVICE);
         view = new MapView(shell);
 
@@ -116,10 +122,32 @@ public class MapScreen extends Screen implements LocationListener {
         if (speech != null) speech.stop();
     }
 
+    /**
+     * Redraw only when something has changed.
+     *
+     * The map used to repaint every second regardless. Nothing on it moves
+     * between fixes - which arrive every ten seconds - so nine of every ten
+     * repaints were redrawing an identical screen, and each one walks the
+     * visible tiles and the whole route polyline.
+     */
     @Override
     public void tick() {
-        view.invalidate();
+        boolean stale = (fixAt > 0) && (System.currentTimeMillis() - fixAt) > 30000;
+        if (dirty || stale != wasStale) {
+            wasStale = stale;
+            dirty = false;
+            view.invalidate();
+        }
         shell.renderHint();
+    }
+
+    private boolean dirty = true;
+    private boolean wasStale = false;
+
+    /** Something worth looking at again has changed. */
+    private void changed() {
+        dirty = true;
+        if (view != null) view.invalidate();
     }
 
     private void loadDestination() {
@@ -149,7 +177,10 @@ public class MapScreen extends Screen implements LocationListener {
                 } catch (Exception e) { /* not ours to use */ }
             }
         } catch (Exception e) { /* ignore */ }
-        if (!any) note = "no location provider enabled";
+        if (!any) {
+            note = "no location provider enabled";
+            Log.w("watchmap", "no location provider is enabled; only the server seed will work");
+        }
     }
 
     private void stopFixes() {
@@ -189,11 +220,26 @@ public class MapScreen extends Screen implements LocationListener {
                 server.refresh();
                 final double la = server.lat(), lo = server.lon();
                 final long at = server.at();
-                if (at == 0 || (la == 0 && lo == 0)) return;
+                final String problem = server.problem();
+                if (at == 0 || (la == 0 && lo == 0)) {
+                    ui.post(new Runnable() {
+                        public void run() {
+                            why = (problem == null) ? "no position from the server"
+                                                    : problem;
+                            Log.w("watchmap", "no seed: " + why);
+                            // Without a position there is still a map to pick,
+                            // if the server offers only one.
+                            adoptOnlyCountry();
+                            view.invalidate();
+                        }
+                    });
+                    return;
+                }
                 ui.post(new Runnable() {
                     public void run() {
                         // A real fix that arrived while we were asking wins.
                         if (!Double.isNaN(lat) && !approximate) return;
+                        why = "";
                         lat = la;
                         lon = lo;
                         fixAt = at;
@@ -202,7 +248,7 @@ public class MapScreen extends Screen implements LocationListener {
                         speedMs = -1;
                         if (!countryKnown) findCountry();
                         prefetchAround();
-                        view.invalidate();
+                        changed();
                     }
                 });
             }
@@ -216,6 +262,8 @@ public class MapScreen extends Screen implements LocationListener {
 
     private void take(Location l) {
         if (l == null) return;
+        Log.i("watchmap", "fix from " + l.getProvider() + ": "
+                + l.getLatitude() + "," + l.getLongitude());
         approximate = false;                 // this one is ours
         lat = l.getLatitude();
         lon = l.getLongitude();
@@ -229,7 +277,7 @@ public class MapScreen extends Screen implements LocationListener {
         }
         prefetchAround();
         follow();
-        view.invalidate();
+        changed();
     }
 
     /** Speak the next turn, notice arrival, notice leaving the route. */
@@ -304,6 +352,7 @@ public class MapScreen extends Screen implements LocationListener {
                         String[] f = first.split(",");
                         if (f.length < 5) return;
                         country = f[0];
+                        Log.i("watchmap", "country = " + country);
                         try {
                             cMinX = Double.parseDouble(f[1]);
                             cMinY = Double.parseDouble(f[2]);
@@ -311,6 +360,52 @@ public class MapScreen extends Screen implements LocationListener {
                             cMaxY = Double.parseDouble(f[4]);
                             countryKnown = true;
                         } catch (Exception e) { countryKnown = false; }
+                        view.invalidate();
+                    }
+                });
+            }
+        }).start();
+    }
+
+    /**
+     * With no position at all, a country still has to be chosen or nothing can
+     * be downloaded and the map stays blank for good.
+     *
+     * If the server offers exactly one, that is the answer - which is the
+     * common case here, and turns "country unknown" from a dead end into a map
+     * that can at least be filled and looked at.
+     */
+    private void adoptOnlyCountry() {
+        if (country != null || !tiles.online()) return;
+        new Thread(new Runnable() {
+            public void run() {
+                String all = tiles.get(tiles.base() + "country.php");
+                if (all == null) return;
+                String[] lines = all.trim().split("\n");
+                if (lines.length != 1 || lines[0].length() == 0) return;
+                final String[] f = lines[0].split(",");
+                if (f.length < 5) return;
+                ui.post(new Runnable() {
+                    public void run() {
+                        country = f[0];
+                        Log.i("watchmap", "country = " + country);
+                        try {
+                            cMinX = Double.parseDouble(f[1]);
+                            cMinY = Double.parseDouble(f[2]);
+                            cMaxX = Double.parseDouble(f[3]);
+                            cMaxY = Double.parseDouble(f[4]);
+                            countryKnown = true;
+                            // Centre on the middle of it, so there is a map to
+                            // look at while waiting for a real fix.
+                            if (Double.isNaN(lat)) {
+                                lat = (cMinY + cMaxY) / 2;
+                                lon = (cMinX + cMaxX) / 2;
+                                approximate = true;
+                                fixAt = System.currentTimeMillis();
+                                why = "no fix - showing " + country;
+                                prefetchAround();
+                            }
+                        } catch (Exception e) { /* leave it unknown */ }
                         view.invalidate();
                     }
                 });
@@ -343,10 +438,13 @@ public class MapScreen extends Screen implements LocationListener {
                 for (int dx = -1; dx <= 1; dx++) {
                     for (int dy = -1; dy <= 1; dy++) {
                         tiles.fetch(c, ZOOM, tx + dx, ty + dy);
+                        // Decoded here rather than in onDraw: this thread has
+                        // time and the frame does not.
+                        tiles.warm(c, ZOOM, tx + dx, ty + dy);
                     }
                 }
                 ui.post(new Runnable() {
-                    public void run() { view.invalidate(); }
+                    public void run() { changed(); }
                 });
             }
         }).start();
@@ -403,10 +501,22 @@ public class MapScreen extends Screen implements LocationListener {
             if (w <= 0 || h <= 0) return;
 
             if (Double.isNaN(lat)) {
+                paint.setTextAlign(Paint.Align.CENTER);
                 paint.setColor(Ui.MUTED);
                 paint.setTextSize(12);
-                paint.setTextAlign(Paint.Align.CENTER);
-                canvas.drawText("waiting for a fix", w / 2f, h / 2f, paint);
+                canvas.drawText("no position yet", w / 2f, h / 2f - 6, paint);
+                paint.setTextSize(9);
+                paint.setColor(Ui.FAINT);
+                // Every blank has a different cause and a different fix, so
+                // the cause goes on the screen rather than in a log nobody
+                // can reach on a watch.
+                String line = why.length() > 0 ? why
+                        : (tiles.lastError() != null ? tiles.lastError()
+                        : (tiles.online() ? "asking the tracker..." : "no network"));
+                canvas.drawText(line, w / 2f, h / 2f + 10, paint);
+                canvas.drawText(tiles.onWifi() ? "wifi"
+                        : (tiles.online() ? "mobile" : "no network"),
+                        w / 2f, h / 2f + 22, paint);
                 return;
             }
 
@@ -540,4 +650,15 @@ public class MapScreen extends Screen implements LocationListener {
     }
 
     void speak(String s) { speech.say(s); }
+
+    String why() { return why; }
+
+    /** For the menu, so a stuck map can be prodded without leaving it. */
+    void retrySeed() {
+        askedServer = false;
+        why = "";
+        seedFromServer();
+        adoptOnlyCountry();
+        view.invalidate();
+    }
 }

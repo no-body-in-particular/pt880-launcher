@@ -48,6 +48,8 @@ public class AboutScreen extends Screen {
         b.append("keyboard ").append(shell.keyboardAttached() ? "attached" : "none").append("\n");
         b.append("pointer ").append(shell.pointerAttached() ? "attached" : "none").append("\n");
         b.append("hid host ").append(shell.bt().hidHost()).append("\n");
+        b.append("tls     ").append(Tls12SocketFactory.stack()).append("\n");
+        b.append("        ").append(Tls12SocketFactory.describeSupport()).append("\n");
         b.append("buttons ").append(shell.twoButtons() ? "two" : "one").append("\n");
         b.append("oui db  ").append(OuiDb.get(shell).describe()).append("\n");
         body.setText(b.toString());
