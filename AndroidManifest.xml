@@ -1,0 +1,136 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="org.watchlauncher"
+    android:versionCode="8"
+    android:versionName="1.7">
+
+    <uses-sdk android:minSdkVersion="19" android:targetSdkVersion="19" />
+
+    <!-- Bluetooth: scan, bond and bring up A2DP for headphones and the HID
+         host profile for a keyboard. -->
+    <uses-permission android:name="android.permission.BLUETOOTH" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
+
+    <!-- Music from /sdcard, photos to /sdcard/DCIM, contacts.txt from
+         /sdcard/Documents. -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Sleep tracking has to survive a reboot; without this it would stop
+         the first time the battery ran out and never start again. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+
+    <uses-permission android:name="android.permission.CAMERA" />
+
+    <!-- Speed on the sports screen. The watch keeps its gps provider out of
+         Enabled Providers, so in practice this reaches the passive provider
+         and whatever the tracker's own fixes push through it. -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+
+    <!-- The sports screen asks the tracker server for the position it has
+         already resolved and the speed it has already computed. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- Calls: place them, see the ringing state, and read the log. -->
+    <uses-permission android:name="android.permission.CALL_PHONE" />
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <uses-permission android:name="android.permission.READ_CALL_LOG" />
+    <uses-permission android:name="android.permission.PROCESS_OUTGOING_CALLS" />
+
+    <!-- Nothing here is required: the watch has no touchscreen, and the
+         camera and modem must not gate installing the launcher. -->
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+    <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
+    <uses-feature android:name="android.hardware.telephony" android:required="false" />
+
+    <application
+        android:label="Watch"
+        android:icon="@drawable/ic_launcher"
+        android:allowBackup="false">
+
+        <!--
+            One activity for the whole watch. singleTask so that the media
+            button receiver, the phone-state receiver and `am start` all land
+            on the instance that is already running rather than stacking a
+            second copy of the launcher behind the first.
+
+            Note what is NOT here: the HOME category. See the alias below.
+        -->
+        <activity
+            android:name=".ShellActivity"
+            android:label="Watch"
+            android:launchMode="singleTask"
+            android:screenOrientation="portrait"
+            android:configChanges="orientation|keyboardHidden|screenSize|keyboard|navigation"
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+            Becoming the home screen, behind a switch that is off until asked.
+
+            A second HOME activity on a device with no touchscreen is a trap:
+            with two of them installed and no default chosen, the next boot
+            puts up the "which launcher?" chooser, and that dialog cannot be
+            answered without a finger. Recovering means adb.
+
+            So the HOME filter lives on an alias that ships disabled. Enabling
+            it and disabling the stock launcher happen together, in one step,
+            in set-as-home.sh, whose revert flag puts both back.
+        -->
+        <activity-alias
+            android:name=".HomeAlias"
+            android:targetActivity=".ShellActivity"
+            android:enabled="false"
+            android:exported="true"
+            android:label="Watch">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.HOME" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity-alias>
+
+        <service android:name=".MusicService" android:exported="false" />
+
+        <!-- Wakes every 30s overnight to sample the accelerometer. Short
+             lived by design: each burst is its own start, so being killed for
+             memory costs one epoch rather than the night. -->
+        <service android:name=".SleepService" android:exported="false" />
+
+        <receiver android:name=".BootReceiver" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <receiver android:name=".SleepAlarmReceiver" android:exported="false">
+            <intent-filter>
+                <action android:name="org.watchlauncher.SLEEP_BURST" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Priority above the stock music app, so the headphones' own
+             buttons reach this player rather than com.android.music. -->
+        <receiver android:name=".MediaButtonReceiver">
+            <intent-filter android:priority="1000">
+                <action android:name="android.intent.action.MEDIA_BUTTON" />
+            </intent-filter>
+        </receiver>
+
+        <receiver android:name=".PhoneStateReceiver">
+            <intent-filter android:priority="1000">
+                <action android:name="android.intent.action.PHONE_STATE" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>
