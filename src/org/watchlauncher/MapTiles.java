@@ -493,6 +493,55 @@ public class MapTiles {
         return f.delete() ? n : 0;
     }
 
+    /**
+     * Which rendering the tiles on the card were made with.
+     *
+     * Bumped when the server starts drawing tiles differently - the move from
+     * sixteen greys to sixteen colours, for instance. Without it a card holding
+     * half a country in the old style and half in the new shows the seam
+     * between them, and nothing would ever replace the old half, because as
+     * far as the downloader is concerned those tiles are present.
+     */
+    public static final int STYLE = 2;
+
+    private static File styleFile(String country) {
+        return new File(DIR + "/" + country + "/.style");
+    }
+
+    /** Drop a country's tiles if they were drawn by an older renderer.
+     *  Called when a download starts, so the refetch that follows fills the
+     *  gap immediately rather than leaving an empty map. */
+    public static void dropIfStale(String country) {
+        if (country == null) return;
+        File mark = styleFile(country);
+        int had = 0;
+        try {
+            if (mark.isFile()) {
+                byte[] b = new byte[16];
+                java.io.FileInputStream in = new java.io.FileInputStream(mark);
+                int n = in.read(b);
+                in.close();
+                if (n > 0) had = Integer.parseInt(new String(b, 0, n).trim());
+            }
+        } catch (Exception e) {
+            had = 0;
+        }
+        if (had == STYLE) return;
+
+        File dir = new File(DIR + "/" + country);
+        if (dir.isDirectory()) delete(dir);
+        forgetSizes();
+        try {
+            if (dir.mkdirs() || dir.isDirectory()) {
+                java.io.FileOutputStream o = new java.io.FileOutputStream(mark);
+                o.write(String.valueOf(STYLE).getBytes());
+                o.close();
+            }
+        } catch (Exception e) {
+            // Losing the marker only costs one extra refetch later.
+        }
+    }
+
     /** Megabytes, for a row on a 240px screen. */
     public static String mb(long bytes) {
         if (bytes >= 1048576L * 1024) return String.format("%.1f GB", bytes / 1073741824.0);

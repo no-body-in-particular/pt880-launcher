@@ -30,6 +30,17 @@ public final class Ui {
 
     /** The one accent. Selection, the clock, headings, charging. */
     public static final int ACCENT = 0xFF7FB3FF;
+
+    /** The driving route over the map.
+     *
+     *  The tiles are sixteen greys, so a saturated hue is something the map
+     *  itself can never produce and the line cannot be mistaken for a road.
+     *  Amber rather than the accent blue, which sits at about the luminance
+     *  of a main road and disappeared into one. The casing is drawn under it
+     *  so the route stays legible crossing both dark parkland and white
+     *  motorway. */
+    public static final int ROUTE = 0xFFFF9F1C;
+    public static final int ROUTE_CASING = 0xFF241300;
     public static final int FG = Color.WHITE;
     public static final int DIM = 0xFFBBBBBB;
     public static final int MUTED = 0xFF999999;

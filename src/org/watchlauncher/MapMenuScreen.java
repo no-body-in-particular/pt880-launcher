@@ -19,11 +19,15 @@ public class MapMenuScreen extends ListScreen {
     MapMenuScreen(MapScreen map) { this.map = map; }
 
     @Override
-    public String title() { return busy.length() > 0 ? busy : "Map"; }
+    public String title() {
+        if (busy.length() > 0) return busy;
+        String live = MapDownload.progress();
+        return live != null ? live : "Map";
+    }
 
     @Override
     public void tick() {
-        if (busy.length() > 0) render();
+        if (busy.length() > 0 || MapDownload.running()) render();
     }
 
     @Override
@@ -33,9 +37,18 @@ public class MapMenuScreen extends ListScreen {
         Destination d = map.target();
         l.add(new Item("Route to", d == null ? "no destination" : d.name, AppIcons.CALL));
         l.add(new Item("Reload destination", null, AppIcons.GEAR));
-        l.add(new Item("Download country",
-                map.country() == null ? "unknown" : map.country(), AppIcons.DEVICE));
-        l.add(new Item("Download route", null, AppIcons.DEVICE));
+        String live = MapDownload.progress();
+        if (live != null) {
+            // A download started from an earlier visit to this menu is still
+            // running. Show it, and let either row stop it - without this
+            // there is no way to call one off short of killing the app.
+            l.add(new Item("Stop download", live, AppIcons.DEVICE));
+            l.add(new Item("Stop download", "running", AppIcons.DEVICE, Ui.DIM));
+        } else {
+            l.add(new Item("Download country",
+                    map.country() == null ? "unknown" : map.country(), AppIcons.DEVICE));
+            l.add(new Item("Download route", null, AppIcons.DEVICE));
+        }
         l.add(new Item("Storage", MapTiles.mb(MapTiles.bytesOnCard()),
                 AppIcons.NONE, Ui.DIM));
         long dead = MapTiles.reclaimable(map.country(), MapDownload.COUNTRY_ZOOM);
@@ -147,6 +160,7 @@ public class MapMenuScreen extends ListScreen {
     // ---------------------------------------------------------------- bulk
 
     private void downloadCountry() {
+        if (MapDownload.running()) { bulk(true, null); return; }
         final String c = map.country();
         if (c == null) { shell.toast("country unknown"); return; }
         if (!map.tiles().onWifi()) { shell.toast("needs wifi"); return; }
@@ -155,6 +169,7 @@ public class MapMenuScreen extends ListScreen {
     }
 
     private void downloadRoute() {
+        if (MapDownload.running()) { bulk(false, null); return; }
         final String c = map.country();
         if (c == null) { shell.toast("country unknown"); return; }
         if (!map.tiles().onWifi()) { shell.toast("needs wifi"); return; }
@@ -163,9 +178,15 @@ public class MapMenuScreen extends ListScreen {
     }
 
     private void bulk(final boolean whole, final String country) {
+        final MapDownload job = MapDownload.claim();
+        if (job == null) {                      // one is already running
+            MapDownload.cancelCurrent();
+            shell.toast("stopping download");
+            render();
+            return;
+        }
         busy = "starting...";
         render();
-        final MapDownload job = new MapDownload();
 
         new Thread(new Runnable() {
             public void run() {
@@ -208,6 +229,7 @@ public class MapMenuScreen extends ListScreen {
             }
 
             private void finish(final String msg) {
+                job.release();
                 shell.runOnUiThread(new Runnable() {
                     public void run() {
                         busy = "";

@@ -304,7 +304,7 @@ public class MapScreen extends Screen implements LocationListener {
             }
         }
 
-        String say = route.instruction(lat, lon);
+        String say = route.instruction(lat, lon, speedMs);
         if (say != null) speech.say(say);
 
         if (route.offRouteMetres(lat, lon) > Route.OFF_ROUTE_M) {
@@ -488,6 +488,26 @@ public class MapScreen extends Screen implements LocationListener {
     private class MapView extends View {
 
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+        /** Kept apart from the shared paint: the route wants round joins, and
+         *  restoring them on every other user of that paint is one setter
+         *  away from a bug. */
+        private final Paint routeInk = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint casing = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+        {
+            routeInk.setStyle(Paint.Style.STROKE);
+            routeInk.setStrokeWidth(4);
+            routeInk.setStrokeJoin(Paint.Join.ROUND);
+            routeInk.setStrokeCap(Paint.Cap.ROUND);
+            routeInk.setColor(Ui.ROUTE);
+
+            casing.setStyle(Paint.Style.STROKE);
+            casing.setStrokeWidth(7);
+            casing.setStrokeJoin(Paint.Join.ROUND);
+            casing.setStrokeCap(Paint.Cap.ROUND);
+            casing.setColor(Ui.ROUTE_CASING);
+        }
         private final Path path = new Path();
 
         MapView(Context c) {
@@ -551,9 +571,6 @@ public class MapScreen extends Screen implements LocationListener {
 
         private void drawRoute(Canvas canvas, int w, int h, double cx, double cy) {
             if (route == null || route.line.size() < 2) return;
-            paint.setStyle(Paint.Style.STROKE);
-            paint.setStrokeWidth(3);
-            paint.setColor(Ui.ACCENT);
 
             path.reset();
             boolean first = true;
@@ -566,7 +583,12 @@ public class MapScreen extends Screen implements LocationListener {
                 if (first) { path.moveTo(px, py); first = false; }
                 else { path.lineTo(px, py); }
             }
-            canvas.drawPath(path, paint);
+
+            // Casing first, then the line on top of it. Two strokes of the
+            // same path is what keeps the route readable where it runs along
+            // a white road, which a single stroke of any colour does not.
+            canvas.drawPath(path, casing);
+            canvas.drawPath(path, routeInk);
         }
 
         /** The position, and which way it is moving. */

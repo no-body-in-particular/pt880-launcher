@@ -60,6 +60,51 @@ public class MapDownload {
         boolean onProgress(int done, int total, int failed);
     }
 
+    /*
+     * One download at a time, for the whole process.
+     *
+     * The guard used to be a field on the map menu, and the menu is rebuilt
+     * every time it is opened - so leaving the screen and coming back handed
+     * out a second downloader while the first was still running, with no way
+     * to stop either. The server log showed several interleaving request for
+     * request, each getting a share of the wifi and the card, which is what
+     * "the download gets slower the further it gets" actually was.
+     */
+    private static final Object LOCK = new Object();
+    private static MapDownload current = null;
+
+    /** @return a job, or null if one is already running. */
+    public static MapDownload claim() {
+        synchronized (LOCK) {
+            if (current != null) return null;
+            current = new MapDownload();
+            return current;
+        }
+    }
+
+    public static boolean running() {
+        synchronized (LOCK) { return current != null; }
+    }
+
+    public static void cancelCurrent() {
+        synchronized (LOCK) { if (current != null) current.cancel(); }
+    }
+
+    /** Live progress, readable by whichever screen happens to be showing. */
+    public static String progress() {
+        MapDownload j;
+        synchronized (LOCK) { j = current; }
+        if (j == null) return null;
+        if (j.pTotal <= 0) return "starting";
+        return j.pDone + "/" + j.pTotal + (j.pFailed > 0 ? (" " + j.pFailed + " failed") : "");
+    }
+
+    public void release() {
+        synchronized (LOCK) { if (current == this) current = null; }
+    }
+
+    private volatile int pDone = 0, pTotal = 0, pFailed = 0;
+
     private volatile boolean cancelled = false;
 
     /** Tiles that were already on the card and not asked for again. */
@@ -85,6 +130,9 @@ public class MapDownload {
     public int country(MapTiles tiles, String name,
                        double minx, double miny, double maxx, double maxy,
                        double atLat, double atLon, Progress p) {
+        // Tiles drawn by an older renderer go first, or the map ends up half
+        // in one style and half in the other with no way to finish the job.
+        MapTiles.dropIfStale(name);
         if (!tiles.onWifi()) return -1;
 
         // No separate detail pass around the position any more: the country
@@ -184,6 +232,7 @@ public class MapDownload {
                 if (already >= tilesHere) {
                     done += tilesHere;
                     skipped += tilesHere;
+                    pDone = Math.min(done, total); pTotal = total; pFailed = failed;
                     if (p != null && !p.onProgress(Math.min(done, total), total, failed)) {
                         return failed;
                     }
@@ -207,6 +256,7 @@ public class MapDownload {
                     skipped += already;
                 }
                 done += tilesHere;
+                pDone = Math.min(done, total); pTotal = total; pFailed = failed;
                 if (p != null && !p.onProgress(Math.min(done, total), total, failed)) {
                     return failed;
                 }

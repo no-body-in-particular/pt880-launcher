@@ -22,7 +22,8 @@ import java.util.List;
  * and the name is exactly what makes the sentence too long to finish before
  * the junction arrives.
  *
- * Each turn is announced twice: once far enough out to change lane, and once
+ * Each turn is announced as it comes up - a kilometre out, then five
+ * hundred metres, then two hundred, then at the junction - and once
  * on top of it. Distances are rounded to something a person would say, because
  * "in one hundred and eighty-seven metres" is not an instruction, it is a
  * reading.
@@ -34,8 +35,26 @@ public class Route {
             UTURN = 8, ROUNDABOUT = 9, ARRIVE = 10;
 
     /** Announced at this range, then again when it is imminent. */
-    private static final int WARN_M = 250;
-    private static final int NOW_M = 40;
+    /**
+     * How far ahead each notice is given, in metres, furthest first.
+     *
+     * One warning is not enough at road speed. The watch takes a fix every
+     * ten seconds, which at 100 km/h is 278 metres of ground - so a single
+     * window at 250 metres can be stepped straight over, leaving nothing but
+     * the one spoken at the junction itself, about a second and a half of
+     * notice. Several thresholds mean whichever one you happen to land inside
+     * still gets said.
+     */
+    private static final int[] STAGES = {1000, 500, 200};
+
+    /** Spoken at the junction itself, without a distance. */
+    private static final int NOW_M = 50;
+
+    /** Do not announce a turn further off than this in time, or a walker is
+     *  told about a corner ten minutes before reaching it. Speed is unknown
+     *  often enough that it has to have a sensible default. */
+    private static final int MAX_LOOKAHEAD_S = 200;
+    private static final float ASSUMED_MS = 8f;
 
     /** Past this from the line, the route is no longer being followed. */
     public static final int OFF_ROUTE_M = 80;
@@ -47,7 +66,10 @@ public class Route {
         public int kind;
         public int metres;          // length of the step that follows
         public double lat, lon;
-        boolean warned, announced;
+        /** Which advance notices have been given. Bit i is set once the
+         *  notice for STAGES[i] has been spoken for this turn. */
+        int spoken;
+        boolean announced;
     }
 
     public final List<Turn> turns = new ArrayList<Turn>();
@@ -107,6 +129,15 @@ public class Route {
      * not produce the same instruction on every fix.
      */
     public String instruction(double lat, double lon) {
+        return instruction(lat, lon, 0f);
+    }
+
+    /**
+     * What to say now, or null.
+     *
+     * @param speedMs ground speed, or 0 if not known
+     */
+    public String instruction(double lat, double lon, float speedMs) {
         Turn next = null;
         double best = Double.MAX_VALUE;
         for (int i = 0; i < turns.size(); i++) {
@@ -119,11 +150,22 @@ public class Route {
 
         if (best <= NOW_M) {
             next.announced = true;
-            next.warned = true;
+            next.spoken = -1;                       // every stage, done with
             return phrase(next.kind, 0);
         }
-        if (best <= WARN_M && !next.warned) {
-            next.warned = true;
+
+        float ms = speedMs > 0.5f ? speedMs : ASSUMED_MS;
+
+        // Furthest first, and the first one that is both due and unsaid wins.
+        // Crossing several between fixes therefore speaks only the nearest,
+        // rather than three notices in a row at one junction.
+        for (int i = 0; i < STAGES.length; i++) {
+            int bit = 1 << i;
+            if ((next.spoken & bit) != 0) continue;
+            if (best > STAGES[i]) continue;
+            // Everything further out is now moot whether or not it was said.
+            for (int j = 0; j <= i; j++) next.spoken |= (1 << j);
+            if (best / ms > MAX_LOOKAHEAD_S) return null;
             return phrase(next.kind, (int) best);
         }
         return null;
