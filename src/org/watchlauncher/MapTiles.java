@@ -77,6 +77,17 @@ public class MapTiles {
 
     Context context() { return ctx; }
 
+    /** Whether the backlight is on, for the download diagnostics. */
+    boolean screenOn() {
+        try {
+            android.os.PowerManager pm = (android.os.PowerManager)
+                    ctx.getSystemService(Context.POWER_SERVICE);
+            return pm.isScreenOn();
+        } catch (Exception e) {
+            return true;
+        }
+    }
+
     // ---------------------------------------------------------------- config
 
     public String base() {
@@ -260,8 +271,13 @@ public class MapTiles {
      * @return how many tiles were written, or -1 if the request failed
      */
     public int fetchPack(String country, int z, int x, int y, int w, int h) {
+        // The screen state rides along so the server log can measure the
+        // screen-on/screen-off gap against the real workload, rather than
+        // against a synthetic transfer that may not behave the same way.
+        // pack.php ignores it.
         String url = base() + "pack.php?c=" + country + "&z=" + z
-                + "&x=" + x + "&y=" + y + "&w=" + w + "&h=" + h;
+                + "&x=" + x + "&y=" + y + "&w=" + w + "&h=" + h
+                + "&s=" + (screenOn() ? 1 : 0);
         HttpURLConnection c = null;
         java.io.DataInputStream in = null;
         try {
