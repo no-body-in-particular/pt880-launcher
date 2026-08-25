@@ -73,9 +73,6 @@ public class BtScreen extends ListScreen implements BtHelper.Listener {
 
         l.add(new Item(h.scanning() ? "Scanning..." : "Scan for devices",
                 null, AppIcons.BLUETOOTH));
-        // Classic discovery never finds LE devices, and this build cannot bond
-        // them anyway. This is the other road in.
-        l.add(new Item("LE input (HID over GATT)", null, AppIcons.KEYBOARD));
 
         List<BtHelper.Dev> devs = h.devices();
         for (int i = 0; i < devs.size(); i++) {
@@ -110,10 +107,9 @@ public class BtScreen extends ListScreen implements BtHelper.Listener {
         if (!h.available()) { shell.pop(); return; }
 
         if (index == 0) { h.scan(); render(); return; }
-        if (index == 1) { shell.push(new LeInputScreen()); return; }
 
         List<BtHelper.Dev> devs = h.devices();
-        int di = index - 2;                    // scan row, then the LE row
+        int di = index - 1;                    // past the scan row
         if (di >= 0 && di < devs.size()) {
             BtHelper.Dev d = devs.get(di);
             if (d.lowEnergy) {
