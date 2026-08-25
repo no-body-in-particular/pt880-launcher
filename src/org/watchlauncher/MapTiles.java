@@ -205,6 +205,78 @@ public class MapTiles {
         }
     }
 
+    /**
+     * A block of tiles in one request, written straight to the card.
+     *
+     * A country at z15 is a hundred and fifty thousand tiles. One request each
+     * is that many round trips, and at even fifty milliseconds apiece the
+     * download is two hours of waiting for half-kilobyte files. A 16x16 block
+     * is 256 tiles in one response, so the transfer is bounded by the data
+     * rather than by the latency.
+     *
+     *   "WPK1"  u8 zoom  u32 count
+     *   per tile:  u32 x  u32 y  u32 length  bytes
+     *
+     * @return how many tiles were written, or -1 if the request failed
+     */
+    public int fetchPack(String country, int z, int x, int y, int w, int h) {
+        String url = base() + "pack.php?c=" + country + "&z=" + z
+                + "&x=" + x + "&y=" + y + "&w=" + w + "&h=" + h;
+        HttpURLConnection c = null;
+        java.io.DataInputStream in = null;
+        try {
+            c = (HttpURLConnection) new URL(url).openConnection();
+            if (c instanceof HttpsURLConnection) {
+                SSLSocketFactory f = Tls12SocketFactory.create();
+                if (f != null) ((HttpsURLConnection) c).setSSLSocketFactory(f);
+            }
+            c.setConnectTimeout(CONNECT_MS);
+            // Generous: the server may be rendering 256 tiles for the first
+            // time, which is a few seconds of work before a byte comes back.
+            c.setReadTimeout(60000);
+            c.setUseCaches(false);
+            if (c.getResponseCode() != 200) return -1;
+
+            in = new java.io.DataInputStream(
+                    new java.io.BufferedInputStream(c.getInputStream(), 32768));
+            byte[] magic = new byte[4];
+            in.readFully(magic);
+            if (magic[0] != 'W' || magic[1] != 'P' || magic[2] != 'K' || magic[3] != '1') {
+                return -1;
+            }
+            in.readUnsignedByte();                     // zoom, already known
+            int count = in.readInt();
+            if (count < 0 || count > 4096) return -1;
+
+            int written = 0;
+            for (int i = 0; i < count; i++) {
+                int tx = in.readInt();
+                int ty = in.readInt();
+                int len = in.readInt();
+                if (len < 0 || len > 1048576) return -1;
+                byte[] png = new byte[len];
+                in.readFully(png);
+
+                File out = fileFor(country, z, tx, ty);
+                if (out.isFile() && out.length() == len) { written++; continue; }
+                File dir = out.getParentFile();
+                if (dir != null && !dir.isDirectory() && !dir.mkdirs()) continue;
+                // Written under a temporary name and moved, so an interrupted
+                // pack cannot leave a half tile that looks cached.
+                File tmp = new File(out.getAbsolutePath() + ".part");
+                FileOutputStream os = new FileOutputStream(tmp);
+                try { os.write(png); } finally { os.close(); }
+                if (tmp.renameTo(out)) written++; else tmp.delete();
+            }
+            return written;
+        } catch (Exception e) {
+            return -1;
+        } finally {
+            try { if (in != null) in.close(); } catch (Exception e) { /* ignore */ }
+            if (c != null) c.disconnect();
+        }
+    }
+
     /** Text from an endpoint, for the small answers. */
     public String get(String url) {
         HttpURLConnection c = null;

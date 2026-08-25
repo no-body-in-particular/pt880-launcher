@@ -400,23 +400,41 @@ and the storage saved is spent on covering more ground instead. GD writes a
 palette PNG at the smallest bit depth that fits, so a sixteen-colour palette
 becomes a 4-bit file without being asked.
 
-### Why a country is z13 and a route is z15
+### How big a country actually is
 
-| | tiles | size |
-|---|---|---|
-| Netherlands at z13 | 9,464 | ~37 MB |
-| Netherlands at z15 | 149,760 | ~585 MB |
-| A 50 km route corridor at z15 | a few hundred | a few MB |
+Measured rather than assumed — 576 tiles rendered on a lattice across the whole
+country:
 
-So the country is kept as an overview — enough to see where you are — and full
-detail is downloaded only along the route you are actually travelling, plus
-15 km around wherever you happen to be. You never need a country in detail,
-only the thread you are moving along.
+| | |
+|---|---|
+| Tiles at z15 | 149,760 |
+| **Mean tile** | **448 bytes** |
+| Median | 192 B — 72% of the bbox is sea or foreign land |
+| p90 | 1,045 B |
+| Amsterdam centre, mean | 3,068 B |
+
+**The whole Netherlands at z15 is about 64 MB**, under 3% of the card. So a
+country is kept at full navigating detail, not at an overview zoom.
+
+An earlier version stored countries at z13 on an assumed 4 kB a tile. That was
+nine times too pessimistic and bought nothing but a worse map: 4-bit greyscale
+line art on black is almost entirely one repeated value, and PNG's filtering
+eats it.
+
+A continent is another matter — Western Europe is roughly 3–4 GB — so the
+**route corridor** stays, and it is what makes travelling abroad possible
+without carrying Europe. A 50 km route at z15 is a few hundred tiles.
+
+Tiles arrive in **blocks of 256** from `pack.php`, not one request each. A
+country one tile at a time is 149,760 round trips: at even 50 ms apiece that is
+two hours, nearly all of it waiting rather than transferring, for files
+averaging under half a kilobyte. In blocks it is about 600 requests and the
+transfer is bounded by the data instead.
 
 Bulk downloads **refuse to start without wifi**, and stop if it goes away
-mid-job: a country is tens of megabytes and the cellular link belongs to the
-tracker's own reporting. A single tile needed right now goes over anything,
-because one tile is 4 KB and the alternative is a blank screen.
+mid-job: the cellular link belongs to the tracker's own reporting. A single
+tile needed right now goes over anything, because half a kilobyte against a
+blank screen is not a trade worth making.
 
 ### Countries
 
@@ -457,6 +475,18 @@ turn left", never "in one hundred and eighty-seven metres".
 **No street names.** At 240x240, spoken through a wrist, the direction and the
 distance are the whole of what is useful, and the name is exactly what makes
 the sentence too long to finish before the junction arrives.
+
+### The cold start
+
+A GNSS receiver takes a minute or two from cold and this watch keeps its own
+off most of the time, so opening the map usually means nothing to draw and no
+way to know which country to fetch. The first position comes from the tracker
+server instead — the same resolved wifi-and-cell fix the sports screen reads.
+
+It is drawn as a grey dot inside an uncertainty ring, labelled `approx`, and
+**turn instructions are suppressed while it is in use**. Hundreds of metres is
+fine for choosing a country and centring a map, and useless for deciding which
+junction you are at. The first real fix replaces it silently.
 
 ### Position
 

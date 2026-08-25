@@ -50,6 +50,7 @@ public class MapScreen extends Screen implements LocationListener {
     private MapView view;
     private MapTiles tiles;
     private Speech speech;
+    private ServerFix server;
     private LocationManager locations;
     private final Handler ui = new Handler();
 
@@ -70,6 +71,14 @@ public class MapScreen extends Screen implements LocationListener {
     private boolean listening = false;
     private boolean arrived = false;
 
+    /** True while the position on screen came from the tracker server rather
+     *  than from this watch's own receiver. It is a real position, resolved
+     *  from wifi and cell, but it can be hundreds of metres out - enough to
+     *  pick the right country and centre the map, not enough to navigate by,
+     *  so the screen says so. */
+    private boolean approximate = false;
+    private boolean askedServer = false;
+
     @Override
     public String title() { return "Map"; }
 
@@ -77,6 +86,7 @@ public class MapScreen extends Screen implements LocationListener {
     protected View build() {
         tiles = new MapTiles(shell);
         speech = new Speech(shell);
+        server = new ServerFix();
         locations = (LocationManager) shell.getSystemService(Context.LOCATION_SERVICE);
         view = new MapView(shell);
 
@@ -93,6 +103,7 @@ public class MapScreen extends Screen implements LocationListener {
         loadRoute();
         startFixes();
         seedFromLastFix();
+        seedFromServer();
         view.invalidate();
     }
 
@@ -159,6 +170,45 @@ public class MapScreen extends Screen implements LocationListener {
         } catch (Exception e) { /* nothing known */ }
     }
 
+    /**
+     * The cold start.
+     *
+     * A GNSS receiver takes a minute or two to find itself from cold, and this
+     * watch keeps its own off most of the time - so on opening the map there
+     * is usually nothing to draw and no way to know which country to fetch.
+     * The tracker server already holds a position resolved from the wifi and
+     * cell readings the firmware uploads, which is the same source the sports
+     * screen uses. Good enough to pick a map and centre it; the first real fix
+     * replaces it.
+     */
+    private void seedFromServer() {
+        if (askedServer || !Double.isNaN(lat)) return;
+        askedServer = true;
+        new Thread(new Runnable() {
+            public void run() {
+                server.refresh();
+                final double la = server.lat(), lo = server.lon();
+                final long at = server.at();
+                if (at == 0 || (la == 0 && lo == 0)) return;
+                ui.post(new Runnable() {
+                    public void run() {
+                        // A real fix that arrived while we were asking wins.
+                        if (!Double.isNaN(lat) && !approximate) return;
+                        lat = la;
+                        lon = lo;
+                        fixAt = at;
+                        approximate = true;
+                        bearing = -1;
+                        speedMs = -1;
+                        if (!countryKnown) findCountry();
+                        prefetchAround();
+                        view.invalidate();
+                    }
+                });
+            }
+        }).start();
+    }
+
     public void onLocationChanged(Location l) { take(l); }
     public void onProviderEnabled(String p) { }
     public void onProviderDisabled(String p) { }
@@ -166,6 +216,7 @@ public class MapScreen extends Screen implements LocationListener {
 
     private void take(Location l) {
         if (l == null) return;
+        approximate = false;                 // this one is ours
         lat = l.getLatitude();
         lon = l.getLongitude();
         bearing = l.hasBearing() ? l.getBearing() : -1;
@@ -184,6 +235,10 @@ public class MapScreen extends Screen implements LocationListener {
     /** Speak the next turn, notice arrival, notice leaving the route. */
     private void follow() {
         if (route == null) return;
+        // Never navigate off a server position: it can be hundreds of metres
+        // out, and an instruction spoken at the wrong junction is worse than
+        // no instruction at all.
+        if (approximate) { note = "waiting for gps"; return; }
 
         double[] end = route.destination();
         if (end != null) {
@@ -424,10 +479,19 @@ public class MapScreen extends Screen implements LocationListener {
             } else {
                 // Stationary, or no course: a dot, because an arrow would be
                 // pointing somewhere it does not know.
-                paint.setColor(Ui.ACCENT);
+                paint.setColor(approximate ? Ui.MUTED : Ui.ACCENT);
                 canvas.drawCircle(x, y, 5, paint);
                 paint.setColor(Ui.BG);
                 canvas.drawCircle(x, y, 2, paint);
+                if (approximate) {
+                    // A ring for the uncertainty, so a position good to a few
+                    // hundred metres does not look like one good to five.
+                    paint.setStyle(Paint.Style.STROKE);
+                    paint.setStrokeWidth(1);
+                    paint.setColor(Ui.MUTED);
+                    canvas.drawCircle(x, y, 14, paint);
+                    paint.setStyle(Paint.Style.FILL);
+                }
             }
         }
 
@@ -440,6 +504,11 @@ public class MapScreen extends Screen implements LocationListener {
                 paint.setTextAlign(Paint.Align.LEFT);
                 canvas.drawText(tiles.online() ? "finding map..." : "offline, no map",
                         2, 10, paint);
+            }
+            if (approximate) {
+                paint.setColor(Ui.WARN);
+                paint.setTextAlign(Paint.Align.LEFT);
+                canvas.drawText("approx", 2, h - 2, paint);
             }
             long age = (fixAt == 0) ? -1 : (System.currentTimeMillis() - fixAt) / 1000;
             if (age > 30) {

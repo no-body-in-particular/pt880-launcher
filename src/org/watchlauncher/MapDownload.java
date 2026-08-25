@@ -24,18 +24,36 @@ import java.util.List;
  */
 public class MapDownload {
 
-    /** Zoom for a whole country: enough to see where you are, not enough to
-     *  navigate a junction. */
-    public static final int COUNTRY_ZOOM = 13;
+    /**
+     * A country is kept at full navigating detail, not an overview.
+     *
+     * That is a measured decision rather than an assumption. A z15 tile of
+     * this map averages 448 bytes across a country - 4-bit greyscale line art
+     * on black is almost all one repeated value, and PNG eats that - so the
+     * whole of the Netherlands is about 64 MB, under three per cent of the
+     * card. An earlier version kept countries at z13 on a guess of four
+     * kilobytes a tile, which was nine times too pessimistic and bought
+     * nothing but a worse map.
+     *
+     * A continent is still far too much, so the route corridor below stays:
+     * it is what makes travelling abroad possible without carrying Europe.
+     */
+    public static final int COUNTRY_ZOOM = 15;
 
-    /** Zoom for a route and for the area around you. */
+    /** Routes are at the same zoom; the corridor is what makes them cheap. */
     public static final int DETAIL_ZOOM = 15;
 
     /** How far either side of the route to take, in metres. */
     private static final int CORRIDOR_M = 1200;
 
-    /** And around the current position, when a country is downloaded. */
-    private static final int AROUND_M = 15000;
+    /** Tiles come in blocks of this many a side. 256 tiles a request turns a
+     *  country from a hundred and fifty thousand round trips into six hundred. */
+    private static final int BLOCK = 16;
+
+    /** Measured mean for a z15 tile over a whole country, for the estimates.
+     *  A city block runs nearer 2.3 kB and open water 192 bytes; this is the
+     *  average that matters when sizing a download. */
+    private static final int BYTES_PER_TILE = 500;
 
     public interface Progress {
         /** @return false to stop the job */
@@ -64,14 +82,9 @@ public class MapDownload {
                        double atLat, double atLon, Progress p) {
         if (!tiles.onWifi()) return -1;
 
-        List<Tile> want = box(minx, miny, maxx, maxy, COUNTRY_ZOOM);
-        if (!Double.isNaN(atLat)) {
-            double dLat = AROUND_M / 111320.0;
-            double dLon = AROUND_M / (111320.0 * Math.cos(Math.toRadians(atLat)));
-            want.addAll(box(atLon - dLon, atLat - dLat, atLon + dLon, atLat + dLat,
-                    DETAIL_ZOOM));
-        }
-        return run(tiles, name, want, p, COUNTRY_ZOOM);
+        // No separate detail pass around the position any more: the country
+        // itself is at detail zoom now, so there is nothing left to add.
+        return blocks(tiles, name, minx, miny, maxx, maxy, COUNTRY_ZOOM, p);
     }
 
     /** The corridor along a route, at full detail. */
@@ -117,6 +130,45 @@ public class MapDownload {
         return out;
     }
 
+    /**
+     * A rectangle, fetched as blocks rather than as tiles.
+     *
+     * Whole blocks are asked for even where part of one falls outside the
+     * area: a block is one request either way, and trimming it would cost more
+     * round trips than the few extra tiles are worth.
+     */
+    private int blocks(MapTiles tiles, String country,
+                       double minx, double miny, double maxx, double maxy,
+                       int z, Progress p) {
+        int x0 = (int) Math.floor(Mercator.xOf(minx, z));
+        int x1 = (int) Math.floor(Mercator.xOf(maxx, z));
+        int y0 = (int) Math.floor(Mercator.yOf(maxy, z));    // north is smaller
+        int y1 = (int) Math.floor(Mercator.yOf(miny, z));
+
+        int total = (x1 - x0 + 1) * (y1 - y0 + 1);
+        int done = 0, failed = 0;
+
+        for (int x = x0; x <= x1; x += BLOCK) {
+            for (int y = y0; y <= y1; y += BLOCK) {
+                if (cancelled) return failed;
+                // Checked every block: walking out of range mid-download
+                // should stop it, not quietly finish over cellular.
+                if (!tiles.onWifi()) return -1;
+
+                int w = Math.min(BLOCK, x1 - x + 1);
+                int h = Math.min(BLOCK, y1 - y + 1);
+                int got = tiles.fetchPack(country, z, x, y, w, h);
+                if (got < 0) { failed += w * h; } 
+                done += w * h;
+                if (p != null && !p.onProgress(Math.min(done, total), total, failed)) {
+                    return failed;
+                }
+            }
+        }
+        if (p != null) p.onProgress(total, total, failed);
+        return failed;
+    }
+
     private int run(MapTiles tiles, String country, List<Tile> want,
                     Progress p, int zoom) {
         int done = 0, failed = 0;
@@ -141,7 +193,7 @@ public class MapDownload {
     /** What a job would cost, before starting it. Tiles average about four
      *  kilobytes; the estimate is for a person deciding, not for accounting. */
     public static String estimate(int tiles) {
-        long bytes = (long) tiles * 4096;
+        long bytes = (long) tiles * BYTES_PER_TILE;
         if (bytes > 1048576L * 1024) return String.format("%.1f GB", bytes / 1073741824.0);
         if (bytes > 1048576L) return String.format("%.0f MB", bytes / 1048576.0);
         return (bytes / 1024) + " KB";
