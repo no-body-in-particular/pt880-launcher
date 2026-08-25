@@ -101,6 +101,11 @@ public class ShellActivity extends Activity {
 
     private boolean twoButtons = false;
     private boolean keepAwake = false;
+
+    /** Held while a map download runs, on top of whatever the user chose in
+     *  the system menu. Kept apart from keepAwake so that finishing a
+     *  download restores their setting rather than overwriting it. */
+    private boolean downloadAwake = false;
     private boolean started = false;
 
     // Shared services, built once and handed to whichever screens want them.
@@ -289,8 +294,11 @@ public class ShellActivity extends Activity {
     }
 
     private void applyKeepAwake() {
-        if (keepAwake) getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        if (keepAwake || downloadAwake) {
+            getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        } else {
+            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        }
     }
 
     // ---------------------------------------------------------------- ui
@@ -320,6 +328,17 @@ public class ShellActivity extends Activity {
     private final Runnable tick = new Runnable() {
         public void run() {
             status.render();
+
+            // The screen stays on for as long as tiles are being fetched.
+            // Driven from here rather than from the download itself so that
+            // every way a download can end - finished, cancelled, failed, or
+            // the thread dying outright - puts the screen back to normal.
+            boolean downloading = MapDownload.running();
+            if (downloading != downloadAwake) {
+                downloadAwake = downloading;
+                applyKeepAwake();
+            }
+
             if (!stack.isEmpty()) current().tick();
             ui.postDelayed(this, 1000);
         }
