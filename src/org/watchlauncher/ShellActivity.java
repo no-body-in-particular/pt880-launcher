@@ -13,6 +13,7 @@ import android.os.IBinder;
 import android.view.Gravity;
 import android.view.InputDevice;
 import android.view.KeyEvent;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
@@ -72,6 +73,16 @@ public class ShellActivity extends Activity {
     /** Auto-repeats seen before a hold counts as the "extra long" gesture. */
     private static final int XLONG_REPEATS = 60;
 
+    /** How far a mouse has to travel, in pixels, to step the selection once.
+     *  A row is about 28px, so this is a little under one row of movement per
+     *  step -- fast enough to cross the launcher in a flick, slow enough to
+     *  land on the row you meant. */
+    private static final float MOUSE_STEP_PX = 24f;
+
+    /** The same for a trackball, whose events carry relative movement in
+     *  units of roughly one per detent rather than pixels. */
+    private static final float BALL_STEP = 0.7f;
+
     /** Set by the caller to open straight onto one app -- used by the incoming
      *  call receiver, and by {@code am start -e app camera} from a shell. */
     public static final String EXTRA_APP = "app";
@@ -97,6 +108,10 @@ public class ShellActivity extends Activity {
     private RootShell root;
     private MusicService music;
     private boolean musicBound = false;
+
+    // pointer state
+    private float pointerAccum = 0;
+    private float lastHoverY = Float.NaN;
 
     // key state
     private int downKey = -1;
@@ -531,6 +546,102 @@ public class ShellActivity extends Activity {
         if (!stack.isEmpty() && current() instanceof MusicScreen) {
             ((MusicScreen) current()).flashVolume();
         }
+    }
+
+    // ---------------------------------------------------------------- pointer
+
+    /*
+     * A mouse or trackball drives the same vocabulary the two buttons do,
+     * rather than a cursor and hit-testing.
+     *
+     * That is not laziness about pointers: this is a 240x240 screen whose
+     * every screen is a list moved by an index, and a cursor would need every
+     * row to become a hit-testable target for the sake of pointing at
+     * something a wheel can already select. Mapping movement onto button B
+     * and a click onto button A means the launcher, the player, the camera,
+     * the terminal and the call screen all accept a pointer without one line
+     * changing in any of them.
+     *
+     *   move / scroll     step the selection, the way B does
+     *   left click        select, the way a tap on A does
+     *   right click       back out, the way a hold on A does
+     */
+
+    /** Movement, in whatever unit the device speaks, accumulated until it is
+     *  worth a step. Sub-threshold movement is kept, not discarded, so slow
+     *  travel still gets there. */
+    private void pointerMove(float delta, float step) {
+        if (stack.isEmpty()) return;
+        pointerAccum += delta;
+        while (pointerAccum >= step) {
+            pointerAccum -= step;
+            act(BTN_B, TAP);              // down
+        }
+        while (pointerAccum <= -step) {
+            pointerAccum += step;
+            act(BTN_B, HOLD);             // up
+        }
+    }
+
+    /** Hover and scroll from a mouse. */
+    @Override
+    public boolean dispatchGenericMotionEvent(MotionEvent e) {
+        if ((e.getSource() & InputDevice.SOURCE_CLASS_POINTER) != 0) {
+            if (e.getAction() == MotionEvent.ACTION_SCROLL) {
+                // A wheel notch is one step, and up on the wheel means up the
+                // list, so the sign is inverted.
+                float v = e.getAxisValue(MotionEvent.AXIS_VSCROLL);
+                pointerMove(-v * MOUSE_STEP_PX, MOUSE_STEP_PX);
+                return true;
+            }
+            float y = e.getY();
+            if (!Float.isNaN(lastHoverY)) pointerMove(y - lastHoverY, MOUSE_STEP_PX);
+            lastHoverY = y;
+            return true;
+        }
+        return super.dispatchGenericMotionEvent(e);
+    }
+
+    /** A trackball reports relative movement and its own button. */
+    @Override
+    public boolean onTrackballEvent(MotionEvent e) {
+        if (e.getAction() == MotionEvent.ACTION_DOWN) {
+            act(BTN_A, TAP);
+            return true;
+        }
+        pointerMove(e.getY(), BALL_STEP);
+        return true;
+    }
+
+    /** Mouse buttons arrive as touch events carrying SOURCE_MOUSE. */
+    @Override
+    public boolean dispatchTouchEvent(MotionEvent e) {
+        if ((e.getSource() & InputDevice.SOURCE_MOUSE) != InputDevice.SOURCE_MOUSE) {
+            return super.dispatchTouchEvent(e);
+        }
+        if (e.getAction() == MotionEvent.ACTION_DOWN) {
+            // getButtonState reports what is held; a secondary button backs
+            // out, anything else selects.
+            boolean secondary =
+                    (e.getButtonState() & MotionEvent.BUTTON_SECONDARY) != 0;
+            act(BTN_A, secondary ? HOLD : TAP);
+        }
+        return true;
+    }
+
+    /** True when something that can point is attached. Shown on the About
+     *  screen beside the keyboard, since "paired" and "connected" are
+     *  different things and only the second one moves anything. */
+    public boolean pointerAttached() {
+        int[] ids = InputDevice.getDeviceIds();
+        for (int i = 0; i < ids.length; i++) {
+            InputDevice d = InputDevice.getDevice(ids[i]);
+            if (d == null) continue;
+            int s = d.getSources();
+            if ((s & InputDevice.SOURCE_MOUSE) == InputDevice.SOURCE_MOUSE) return true;
+            if ((s & InputDevice.SOURCE_TRACKBALL) == InputDevice.SOURCE_TRACKBALL) return true;
+        }
+        return false;
     }
 
     /** Long-press of the main key arrives here as BACK when nothing consumed

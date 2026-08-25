@@ -46,10 +46,17 @@ public class AboutScreen extends Screen {
         b.append("build   ").append(Build.ID).append("\n\n");
         b.append("shell   ").append(shell.root().describe()).append("\n");
         b.append("keyboard ").append(shell.keyboardAttached() ? "attached" : "none").append("\n");
+        b.append("pointer ").append(shell.pointerAttached() ? "attached" : "none").append("\n");
+        b.append("hid host ").append(shell.bt().hidHost()).append("\n");
         b.append("buttons ").append(shell.twoButtons() ? "two" : "one").append("\n");
         b.append("oui db  ").append(OuiDb.get(shell).describe()).append("\n");
         body.setText(b.toString());
     }
+
+    /** Some of what this screen reports arrives on a callback rather than
+     *  being there to be read, so it redraws while you look at it. */
+    @Override
+    public void tick() { onShow(); }
 
     @Override
     public boolean onGesture(int button, int kind) {
