@@ -756,13 +756,14 @@ public class MapTiles {
     /**
      * Which rendering the tiles on the card were made with.
      *
-     * Bumped when the server starts drawing tiles differently - the move from
-     * sixteen greys to sixteen colours, for instance. Without it a card
+     * Bumped when the server starts drawing tiles differently: sixteen greys
+     * to sixteen colours, and then to thirty-two with ground cover and
+     * buildings under the roads. Without it a card
      * holding half a country in the old style and half in the new shows the
      * seam between them, and nothing would ever replace the old half, because
      * as far as the downloader is concerned those tiles are present.
      */
-    public static final int STYLE = 3;
+    public static final int STYLE = 4;
 
     /**
      * The country being re-rendered, if any.
