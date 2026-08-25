@@ -8,6 +8,8 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.os.Handler;
+import android.os.Looper;
 
 import java.lang.reflect.Method;
 import java.util.ArrayList;
@@ -50,15 +52,29 @@ public class BtHelper {
             "android.bluetooth.device.extra.PAIRING_VARIANT";
     private static final String EXTRA_PAIRING_KEY =
             "android.bluetooth.device.extra.PAIRING_KEY";
+    private static final String EXTRA_REASON =
+            "android.bluetooth.device.extra.REASON";
     private static final String ACTION_HID_STATE =
             "android.bluetooth.input.profile.action.CONNECTION_STATE_CHANGED";
 
     // Pairing variants, from the framework's BluetoothDevice.
     private static final int VARIANT_PIN = 0;
+    private static final int VARIANT_PASSKEY = 1;
     private static final int VARIANT_PASSKEY_CONFIRMATION = 2;
     private static final int VARIANT_CONSENT = 3;
     private static final int VARIANT_DISPLAY_PASSKEY = 4;
     private static final int VARIANT_DISPLAY_PIN = 5;
+    private static final int VARIANT_OOB_CONSENT = 6;
+
+    /** The last pairing variant seen, kept so a failure can say which kind of
+     *  handshake it was that failed. Without it "pairing failed" is a dead
+     *  end: the six variants fail for entirely different reasons. */
+    private int lastVariant = -1;
+
+    /** Set while a removal we asked for is in flight. The BOND_NONE that
+     *  follows is our own doing and is not a pairing failure; reporting it as
+     *  one sent an entire evening chasing a fault that was the report itself. */
+    private String removing = null;
 
     public interface Listener {
         void onBtChanged(String status);
@@ -74,6 +90,14 @@ public class BtHelper {
         public boolean bonded;
         public boolean connected;
 
+        /** LE-only, which this platform cannot bond. Only ever set from
+         *  BluetoothDevice.getType(), never inferred. */
+        public boolean lowEnergy;
+
+        /** Might be LE, on the address alone. A hint on the row; never a
+         *  reason to refuse. */
+        public boolean maybeLowEnergy;
+
         Dev(Context c, BluetoothDevice d) {
             device = d;
             refresh(c);
@@ -85,6 +109,8 @@ public class BtHelper {
             detail = BtNames.detail(c, device, name);
             glyph = BtNames.glyph(device);
             bonded = (device.getBondState() == BluetoothDevice.BOND_BONDED);
+            lowEnergy = BtNames.isLowEnergyOnly(c, device);
+            maybeLowEnergy = BtNames.suspectedLe(c, device);
         }
     }
 
@@ -94,8 +120,21 @@ public class BtHelper {
     private final BluetoothAdapter adapter;
     private final Random random = new Random();
 
+    private final Handler wait = new Handler(Looper.getMainLooper());
+
+    /** A bond that is waiting for the radio to stop scanning. */
+    private BluetoothDevice pendingBond;
+
     private BluetoothA2dp a2dp;
     private BluetoothProfile hid;
+
+    /** Whether the stack ever handed us the HID host proxy. This is the
+     *  question behind "would a classic mouse work at all": if this build was
+     *  compiled without a HID host, no app can connect a keyboard or a mouse
+     *  and there is no point buying one. */
+    private boolean hidAsked = false;
+    private boolean hidAvailable = false;
+    private long hidAskedAt = 0;
     private BluetoothDevice pendingConnect;
     private String status = "";
     private String prompt = "";
@@ -126,6 +165,26 @@ public class BtHelper {
 
     public boolean enabled() { return adapter != null && adapter.isEnabled(); }
 
+    /**
+     * Can this build drive a keyboard or mouse at all?
+     *
+     * "yes" means the HID host profile exists and answered. "no" means it does
+     * not, and no classic peripheral will ever work here whatever is paired --
+     * worth knowing before buying one.
+     */
+    public String hidHost() {
+        if (adapter == null) return "no bluetooth";
+        // getProfileProxy answers synchronously about whether the profile
+        // exists at all, so a false here is a real verdict.
+        if (!hidAsked) return "absent from this build";
+        if (hidAvailable) return "available";
+        // The proxy arrives on a callback. Reading before it lands says
+        // nothing, and an earlier version of this reported that silence as a
+        // failure -- a diagnostic that answered before it knew.
+        if (System.currentTimeMillis() - hidAskedAt < 6000) return "asking...";
+        return "present but silent";
+    }
+
     public boolean scanning() {
         try { return adapter != null && adapter.isDiscovering(); }
         catch (Exception e) { return false; }
@@ -155,7 +214,10 @@ public class BtHelper {
 
         if (!adapter.isEnabled()) adapter.enable();
         adapter.getProfileProxy(ctx, proxyListener, BluetoothProfile.A2DP);
-        adapter.getProfileProxy(ctx, proxyListener, PROFILE_INPUT_DEVICE);
+        // getProfileProxy returning false means the stack has no such profile,
+        // which is an immediate and complete answer.
+        hidAsked = adapter.getProfileProxy(ctx, proxyListener, PROFILE_INPUT_DEVICE);
+        hidAskedAt = System.currentTimeMillis();
         loadBonded();
     }
 
@@ -219,28 +281,82 @@ public class BtHelper {
     /** Bond if needed, then bring up whichever profile the device is for. */
     public void pairAndConnect(BluetoothDevice d) {
         if (adapter == null) return;
-        cancelScan();
+        if (BtNames.isLowEnergyOnly(ctx, d)) {
+            // createBond() would fail in about thirty milliseconds without
+            // ever reaching the device. Refusing is the honest answer.
+            say("Low Energy - needs Bluetooth Classic");
+            return;
+        }
         pendingConnect = d;
         prompt = "";
         if (d.getBondState() == BluetoothDevice.BOND_BONDED) {
+            cancelScan();
             connectProfile(d);
-        } else {
-            say(BtNames.isKeyboard(d) ? "Pairing keyboard..." : "Pairing...");
-            try {
-                d.createBond();
-            } catch (Exception e) {
-                say("Pair failed");
+            return;
+        }
+
+        lastVariant = -1;
+        say(BtNames.isKeyboard(d) ? "Pairing keyboard..." : "Pairing...");
+
+        /*
+         * The radio has to have stopped scanning before the bond starts.
+         *
+         * cancelDiscovery() is asynchronous, and bluedroid refuses a bond
+         * while an inquiry is still running -- it fails in about thirty
+         * milliseconds with a generic status, before any pairing request is
+         * ever sent, which looks exactly like the remote device rejecting us.
+         * It is not. Calling createBond() on the line after cancelDiscovery()
+         * is a race, and one that is lost most of the time.
+         *
+         * This is also why headphones seemed to work: the scan runs about
+         * twelve seconds, so anything picked after it finished never raced.
+         * Anything picked the moment it appeared always did.
+         */
+        boolean scanning = false;
+        try { scanning = adapter.isDiscovering(); } catch (Exception e) { /* assume not */ }
+
+        if (!scanning) {
+            startBond(d);
+            return;
+        }
+        pendingBond = d;
+        cancelScan();
+        // ACTION_DISCOVERY_FINISHED normally arrives within a few hundred
+        // milliseconds and starts the bond. This is the safety net for a stack
+        // that cancels without announcing it.
+        wait.removeCallbacks(bondWhenIdle);
+        wait.postDelayed(bondWhenIdle, 2000);
+    }
+
+    private final Runnable bondWhenIdle = new Runnable() {
+        public void run() {
+            BluetoothDevice d = pendingBond;
+            pendingBond = null;
+            if (d != null) startBond(d);
+        }
+    };
+
+    private void startBond(BluetoothDevice d) {
+        try {
+            if (d.getBondState() == BluetoothDevice.BOND_BONDING) {
+                say("Already pairing, wait");
+                return;
             }
+            if (!d.createBond()) say("Pairing refused by the stack");
+        } catch (Exception e) {
+            say("Pair failed");
         }
     }
 
     /** Drop the bond, so a device that paired wrong can be tried again. */
     public void unpair(BluetoothDevice d) {
         try {
+            removing = d.getAddress();
             Method m = BluetoothDevice.class.getMethod("removeBond");
             m.invoke(d);
             say("Unpaired");
         } catch (Exception e) {
+            removing = null;
             say("Unpair failed");
         }
     }
@@ -255,6 +371,7 @@ public class BtHelper {
      */
     private void onPairingRequest(BluetoothDevice d, int variant, int key) {
         if (d == null) return;
+        lastVariant = variant;
         boolean keyboard = BtNames.isKeyboard(d);
 
         try {
@@ -280,14 +397,65 @@ public class BtHelper {
                 return;
             }
 
+            if (variant == VARIANT_PASSKEY) {
+                // "Enter the passkey shown on the other device" -- a different
+                // call entirely. Answering it with setPairingConfirmation, as
+                // the fall-through below used to, confirms a handshake nobody
+                // asked about and the bond dies.
+                setPasskey(d, key >= 0 ? key : 0);
+                say("Pairing...");
+                return;
+            }
+
             if (variant == VARIANT_PASSKEY_CONFIRMATION) {
                 prompt = "Code " + pad(key);
             }
             confirm(d, true);
-            if (!keyboard) quietUi(d);
             say("Pairing...");
         } catch (Exception e) {
             say("Auto-pair failed");
+        }
+    }
+
+    /**
+     * The reason the stack gives for a bond disappearing.
+     *
+     * These are the UNBOND_REASON_* constants, which are @hide, so they are
+     * written out here rather than referenced. They matter: "timeout" means
+     * the device stopped listening, "auth failed" means the code was wrong,
+     * and "repeated attempts" means the stack is refusing to try again until
+     * the old bond is forgotten -- three different things to do next, where
+     * "pairing failed" tells you to do none of them.
+     */
+    private String why(int reason) {
+        String kind = variantName(lastVariant);
+        switch (reason) {
+            case 1:  return "auth failed" + kind;
+            case 2:  return "rejected by device" + kind;
+            case 3:  return "cancelled" + kind;
+            case 4:  return "device not responding" + kind;
+            case 5:  return "still scanning" + kind;
+            case 6:  return "timed out" + kind;
+            case 7:  return "too many attempts, forget it first" + kind;
+            case 8:  return "cancelled by device" + kind;
+            case 9:  return "removed" + kind;
+            default: return (lastVariant < 0)
+                    ? "no pairing request arrived"
+                    : ("unknown" + kind);
+        }
+    }
+
+    /** Which handshake was in progress, for the failure line. */
+    private static String variantName(int v) {
+        switch (v) {
+            case VARIANT_PIN: return " (pin)";
+            case VARIANT_PASSKEY: return " (passkey entry)";
+            case VARIANT_PASSKEY_CONFIRMATION: return " (confirm)";
+            case VARIANT_CONSENT: return " (just works)";
+            case VARIANT_DISPLAY_PASSKEY: return " (type on device)";
+            case VARIANT_DISPLAY_PIN: return " (type on device)";
+            case VARIANT_OOB_CONSENT: return " (oob)";
+            default: return "";
         }
     }
 
@@ -310,24 +478,38 @@ public class BtHelper {
         sp.invoke(d, (Object) bytes);
     }
 
+    private void setPasskey(BluetoothDevice d, int passkey) throws Exception {
+        Method m = BluetoothDevice.class.getMethod("setPasskey", int.class);
+        m.invoke(d, passkey);
+    }
+
     private void confirm(BluetoothDevice d, boolean yes) throws Exception {
         Method sc = BluetoothDevice.class.getMethod("setPairingConfirmation", boolean.class);
         sc.invoke(d, yes);
     }
 
-    /** Stop the system's own pairing dialog appearing behind us, which on this
-     *  build cannot be dismissed without a touchscreen. */
-    private void quietUi(BluetoothDevice d) {
-        try {
-            Method m = BluetoothDevice.class.getMethod("cancelPairingUserInput");
-            m.invoke(d);
-        } catch (Exception e) { /* fine */ }
-    }
+    /*
+     * There is deliberately no call to cancelPairingUserInput() here.
+     *
+     * The name reads like "dismiss the system's dialog", and that is what it
+     * was here for. It is not what it does: on this platform it calls
+     * cancelBondProcess(), so it cancelled the bond a line after
+     * setPairingConfirmation(true) accepted it. Headphones survived the race
+     * often enough to hide it; a trackball failed instantly and every time,
+     * which is what finally showed it up.
+     *
+     * The system dialog may briefly appear behind us. That is harmless -- the
+     * request is answered from here before anyone could act on it -- and it is
+     * a much better outcome than a pairing that cannot succeed.
+     */
 
     // ---------------------------------------------------------------- profiles
 
+    /** Audio goes to A2DP, anything that speaks HID goes to the input profile,
+     *  and anything that says nothing useful about itself is tried as audio --
+     *  headphones are what most devices paired with this watch will be. */
     private void connectProfile(BluetoothDevice d) {
-        if (BtNames.isKeyboard(d)) connectHid(d);
+        if (BtNames.isInputDevice(d)) connectHid(d);
         else connectA2dp(d);
     }
 
@@ -392,7 +574,7 @@ public class BtHelper {
             new BluetoothProfile.ServiceListener() {
         public void onServiceConnected(int profile, BluetoothProfile proxy) {
             if (profile == BluetoothProfile.A2DP) a2dp = (BluetoothA2dp) proxy;
-            else if (profile == PROFILE_INPUT_DEVICE) hid = proxy;
+            else if (profile == PROFILE_INPUT_DEVICE) { hid = proxy; hidAvailable = true; }
             else return;
 
             if (pendingConnect != null
@@ -428,6 +610,14 @@ public class BtHelper {
                 if (d != null) { addOrUpdate(d); say(status); }
 
             } else if (BluetoothAdapter.ACTION_DISCOVERY_FINISHED.equals(a)) {
+                // The radio is idle, so a bond held back for it can start now.
+                if (pendingBond != null) {
+                    wait.removeCallbacks(bondWhenIdle);
+                    BluetoothDevice b = pendingBond;
+                    pendingBond = null;
+                    startBond(b);
+                    return;
+                }
                 say(found.isEmpty() ? "Nothing found" : "Scan done");
 
             } else if (ACTION_PAIRING_REQUEST.equals(a)) {
@@ -443,7 +633,18 @@ public class BtHelper {
                     if (d != null) connectProfile(d);
                 } else if (st == BluetoothDevice.BOND_NONE) {
                     prompt = "";
-                    say("Pairing failed");
+                    String addr = (d == null) ? null : d.getAddress();
+                    if (removing != null && removing.equals(addr)) {
+                        removing = null;          // our own removal, not a failure
+                        say("Forgotten");
+                    } else {
+                        int reason = in.getIntExtra(EXTRA_REASON, -1);
+                        // Reason 9 is a local removeBond. Nothing in this app
+                        // asked for it, so something else on the device did --
+                        // worth saying, because no amount of retrying helps.
+                        say(reason == 9 ? "Bond deleted by the system"
+                                        : ("Failed: " + why(reason)));
+                    }
                 }
 
             } else if (BluetoothA2dp.ACTION_CONNECTION_STATE_CHANGED.equals(a)) {
