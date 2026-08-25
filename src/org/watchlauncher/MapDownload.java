@@ -318,7 +318,15 @@ public class MapDownload {
                     }
                     skipped += already;
                 } else {
+                    // One retry. A block is 256 tiles, so a single timeout or
+                    // a truncated response - a busy server, a moment of bad
+                    // wifi - otherwise reports 256 failures for what is very
+                    // often a transient fault the next attempt clears.
                     int got = tiles.fetchPack(country, z, x, y, w, h);
+                    if (got < 0 && !cancelled) {
+                        try { Thread.sleep(1500); } catch (InterruptedException e) { }
+                        got = tiles.fetchPack(country, z, x, y, w, h);
+                    }
                     if (got < 0) { failed += tilesHere; }
                     skipped += already;
                 }

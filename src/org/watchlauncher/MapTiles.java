@@ -77,6 +77,20 @@ public class MapTiles {
 
     Context context() { return ctx; }
 
+    private static volatile int versionCode = -1;
+
+    private int version() {
+        if (versionCode < 0) {
+            try {
+                versionCode = ctx.getPackageManager()
+                        .getPackageInfo(ctx.getPackageName(), 0).versionCode;
+            } catch (Exception e) {
+                versionCode = 0;
+            }
+        }
+        return versionCode;
+    }
+
     /** Whether the backlight is on, for the download diagnostics. */
     boolean screenOn() {
         try {
@@ -301,7 +315,11 @@ public class MapTiles {
                 // The previous block's split, so the log says where the time
                 // went: tn is milliseconds on the network, tw milliseconds
                 // writing tiles to the card.
-                + "&tn=" + lastNetMs + "&tw=" + lastWriteMs;
+                + "&tn=" + lastNetMs + "&tw=" + lastWriteMs
+                // Which build is talking. Without it a measurement taken
+                // across an update cannot be told apart from one that was
+                // not, which is exactly what happened to the first set.
+                + "&v=" + version();
         HttpURLConnection c = null;
         java.io.DataInputStream in = null;
         boolean drained = false;
