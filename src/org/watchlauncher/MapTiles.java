@@ -277,7 +277,11 @@ public class MapTiles {
         // pack.php ignores it.
         String url = base() + "pack.php?c=" + country + "&z=" + z
                 + "&x=" + x + "&y=" + y + "&w=" + w + "&h=" + h
-                + "&s=" + (screenOn() ? 1 : 0);
+                + "&s=" + (screenOn() ? 1 : 0)
+                // The previous block's split, so the log says where the time
+                // went: tn is milliseconds on the network, tw milliseconds
+                // writing tiles to the card.
+                + "&tn=" + lastNetMs + "&tw=" + lastWriteMs;
         HttpURLConnection c = null;
         java.io.DataInputStream in = null;
         try {
@@ -305,31 +309,63 @@ public class MapTiles {
             if (count < 0 || count > 4096) return -1;
 
             int written = 0;
+            long netMs = 0, writeMs = 0;
+            String madeDir = null;
+            boolean restyle = refreshing(country);
+
             for (int i = 0; i < count; i++) {
+                long t0 = System.currentTimeMillis();
                 int tx = in.readInt();
                 int ty = in.readInt();
                 int len = in.readInt();
                 if (len < 0 || len > 1048576) return -1;
                 byte[] png = new byte[len];
                 in.readFully(png);
+                netMs += System.currentTimeMillis() - t0;
 
+                t0 = System.currentTimeMillis();
                 File out = fileFor(country, z, tx, ty);
                 // The size check alone is not enough during a style refresh:
                 // recolouring changes no index and no length, so every stale
                 // tile matches byte for byte in size and would be skipped.
-                if (!refreshing(country) && out.isFile() && out.length() == len) {
+                if (!restyle && out.isFile() && out.length() == len) {
                     written++;
+                    writeMs += System.currentTimeMillis() - t0;
                     continue;
                 }
+
+                // One directory check per column rather than per tile. Every
+                // tile in a pack shares a handful of parents, and on FAT32 a
+                // stat is a linear scan of the directory.
                 File dir = out.getParentFile();
-                if (dir != null && !dir.isDirectory() && !dir.mkdirs()) continue;
-                // Written under a temporary name and moved, so an interrupted
-                // pack cannot leave a half tile that looks cached.
-                File tmp = new File(out.getAbsolutePath() + ".part");
-                FileOutputStream os = new FileOutputStream(tmp);
-                try { os.write(png); } finally { os.close(); }
-                if (tmp.renameTo(out)) written++; else tmp.delete();
+                if (dir != null) {
+                    String path = dir.getPath();
+                    if (!path.equals(madeDir)) {
+                        if (!dir.isDirectory() && !dir.mkdirs()) continue;
+                        madeDir = path;
+                    }
+                }
+
+                // Written straight to its name, not via a temporary one.
+                // Create-plus-rename is two directory updates per tile, and a
+                // pack is 256 tiles - which on this card was most of the cost
+                // of a block. A torn write leaves a short file, and a short
+                // file is refetched, so the rename was buying less than it
+                // charged.
+                FileOutputStream os = null;
+                try {
+                    os = new FileOutputStream(out);
+                    os.write(png);
+                    written++;
+                } catch (Exception e) {
+                    out.delete();
+                } finally {
+                    if (os != null) try { os.close(); } catch (Exception e) { }
+                }
+                writeMs += System.currentTimeMillis() - t0;
             }
+            lastNetMs = netMs;
+            lastWriteMs = writeMs;
             return written;
         } catch (Exception e) {
             return -1;
@@ -542,6 +578,9 @@ public class MapTiles {
      * deleted that has not already been replaced.
      */
     private static volatile String refreshing = null;
+
+    /** Where the last pack's time went, reported on the next request. */
+    private static volatile long lastNetMs = 0, lastWriteMs = 0;
 
     private static File styleFile(String country) {
         return new File(DIR + "/" + country + "/.style");
