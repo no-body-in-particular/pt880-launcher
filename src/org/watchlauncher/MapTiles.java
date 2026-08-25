@@ -131,6 +131,7 @@ public class MapTiles {
     }
 
     public boolean have(String country, int z, int x, int y) {
+        if (refreshing(country)) return false;      // drawn by an older renderer
         File f = fileFor(country, z, x, y);
         return f.isFile() && f.length() > 0;
     }
@@ -165,6 +166,7 @@ public class MapTiles {
      * about 16 files in the same directory one at a time scans it 16 times.
      */
     public int haveInBlock(String country, int z, int x, int y, int w, int h) {
+        if (refreshing(country)) return 0;
         int n = 0;
         for (int i = 0; i < w; i++) {
             String[] names = new File(DIR + "/" + country + "/" + z + "/" + (x + i)).list();
@@ -294,7 +296,13 @@ public class MapTiles {
                 in.readFully(png);
 
                 File out = fileFor(country, z, tx, ty);
-                if (out.isFile() && out.length() == len) { written++; continue; }
+                // The size check alone is not enough during a style refresh:
+                // recolouring changes no index and no length, so every stale
+                // tile matches byte for byte in size and would be skipped.
+                if (!refreshing(country) && out.isFile() && out.length() == len) {
+                    written++;
+                    continue;
+                }
                 File dir = out.getParentFile();
                 if (dir != null && !dir.isDirectory() && !dir.mkdirs()) continue;
                 // Written under a temporary name and moved, so an interrupted
@@ -497,50 +505,75 @@ public class MapTiles {
      * Which rendering the tiles on the card were made with.
      *
      * Bumped when the server starts drawing tiles differently - the move from
-     * sixteen greys to sixteen colours, for instance. Without it a card holding
-     * half a country in the old style and half in the new shows the seam
-     * between them, and nothing would ever replace the old half, because as
-     * far as the downloader is concerned those tiles are present.
+     * sixteen greys to sixteen colours, for instance. Without it a card
+     * holding half a country in the old style and half in the new shows the
+     * seam between them, and nothing would ever replace the old half, because
+     * as far as the downloader is concerned those tiles are present.
      */
     public static final int STYLE = 2;
+
+    /**
+     * The country being re-rendered, if any.
+     *
+     * Refreshing a style is deliberately NOT a delete followed by a download.
+     * Deleting a country is tens of thousands of unlinks on a FAT32 card, one
+     * at a time, with the screen showing "starting" throughout and no way to
+     * tell it apart from a hang - which is exactly how it looked. Instead the
+     * tiles are treated as absent for the duration and overwritten in place,
+     * so the map stays usable the whole way through and nothing is ever
+     * deleted that has not already been replaced.
+     */
+    private static volatile String refreshing = null;
 
     private static File styleFile(String country) {
         return new File(DIR + "/" + country + "/.style");
     }
 
-    /** Drop a country's tiles if they were drawn by an older renderer.
-     *  Called when a download starts, so the refetch that follows fills the
-     *  gap immediately rather than leaving an empty map. */
-    public static void dropIfStale(String country) {
-        if (country == null) return;
-        File mark = styleFile(country);
-        int had = 0;
-        try {
-            if (mark.isFile()) {
-                byte[] b = new byte[16];
-                java.io.FileInputStream in = new java.io.FileInputStream(mark);
-                int n = in.read(b);
-                in.close();
-                if (n > 0) had = Integer.parseInt(new String(b, 0, n).trim());
-            }
-        } catch (Exception e) {
-            had = 0;
-        }
-        if (had == STYLE) return;
+    static boolean refreshing(String country) {
+        String r = refreshing;
+        return r != null && r.equals(country);
+    }
 
+    /** @return true if this country's tiles predate the current renderer. */
+    public static boolean styleStale(String country) {
+        if (country == null) return false;
         File dir = new File(DIR + "/" + country);
-        if (dir.isDirectory()) delete(dir);
-        forgetSizes();
+        if (!dir.isDirectory()) return false;          // nothing to refresh
+        File mark = styleFile(country);
         try {
-            if (dir.mkdirs() || dir.isDirectory()) {
-                java.io.FileOutputStream o = new java.io.FileOutputStream(mark);
+            if (!mark.isFile()) return true;
+            byte[] b = new byte[16];
+            java.io.FileInputStream in = new java.io.FileInputStream(mark);
+            int n = in.read(b);
+            in.close();
+            return n <= 0 || Integer.parseInt(new String(b, 0, n).trim()) != STYLE;
+        } catch (Exception e) {
+            return true;
+        }
+    }
+
+    public static void beginStyleRefresh(String country) { refreshing = country; }
+
+    /** Only called when the refresh actually completed; a partial one leaves
+     *  the marker alone so the next download picks the rest up. */
+    public static void endStyleRefresh(String country) {
+        refreshing = null;
+        if (country == null) return;
+        try {
+            File dir = new File(DIR + "/" + country);
+            if (dir.isDirectory() || dir.mkdirs()) {
+                java.io.FileOutputStream o =
+                        new java.io.FileOutputStream(styleFile(country));
                 o.write(String.valueOf(STYLE).getBytes());
                 o.close();
             }
         } catch (Exception e) {
-            // Losing the marker only costs one extra refetch later.
+            // Losing the marker only costs one extra refresh later.
         }
+        forgetSizes();
     }
+
+    public static void abortStyleRefresh() { refreshing = null; }
 
     /** Megabytes, for a row on a 240px screen. */
     public static String mb(long bytes) {

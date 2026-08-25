@@ -2,6 +2,7 @@ package org.watchlauncher;
 
 import java.io.File;
 import java.io.FileOutputStream;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -30,59 +31,91 @@ public class MapMenuScreen extends ListScreen {
         if (busy.length() > 0 || MapDownload.running()) render();
     }
 
+    /**
+     * Rows, and what each one does, built together.
+     *
+     * They used to be a list here and a switch on the row number over there,
+     * and every time the rows changed the switch had to be renumbered by hand
+     * - which went wrong three times, most recently sending "Retry position"
+     * to the storage readout. Pairing them at the point of construction means
+     * a row cannot be wired to its neighbour's action.
+     */
+    private final List<Runnable> actions = new ArrayList<Runnable>();
+
+    private void row(List<Item> l, Item it, Runnable r) {
+        l.add(it);
+        actions.add(r);
+    }
+
+    private static final Runnable NOTHING = new Runnable() { public void run() { } };
+
     @Override
     protected List<Item> items() {
         List<Item> l = list();
+        actions.clear();
 
         Destination d = map.target();
-        l.add(new Item("Route to", d == null ? "no destination" : d.name, AppIcons.CALL));
-        l.add(new Item("Reload destination", null, AppIcons.GEAR));
+        row(l, new Item("Route to", d == null ? "no destination" : d.name, AppIcons.CALL),
+                new Runnable() { public void run() { routeTo(); } });
+
+        row(l, new Item("Reload destination", null, AppIcons.GEAR),
+                new Runnable() { public void run() {
+                    map.reloadDestination();
+                    shell.toast(Destination.file() == null
+                            ? makeExample() : "destination reloaded");
+                    render();
+                } });
+
         String live = MapDownload.progress();
         if (live != null) {
-            // A download started from an earlier visit to this menu is still
-            // running. Show it, and let either row stop it - without this
-            // there is no way to call one off short of killing the app.
-            l.add(new Item("Stop download", live, AppIcons.DEVICE));
-            l.add(new Item("Stop download", "running", AppIcons.DEVICE, Ui.DIM));
+            // One row, not one per download kind: there is a single job, and
+            // two identical Stop buttons only invited the question of which.
+            row(l, new Item("Stop download", live, AppIcons.DEVICE),
+                    new Runnable() { public void run() {
+                        MapDownload.cancelCurrent();
+                        shell.toast("stopping");
+                        render();
+                    } });
         } else {
-            l.add(new Item("Download country",
-                    map.country() == null ? "unknown" : map.country(), AppIcons.DEVICE));
-            l.add(new Item("Download route", null, AppIcons.DEVICE));
+            row(l, new Item("Download country",
+                            map.country() == null ? "unknown" : map.country(),
+                            AppIcons.DEVICE),
+                    new Runnable() { public void run() { downloadCountry(); } });
+            row(l, new Item("Download route", null, AppIcons.DEVICE),
+                    new Runnable() { public void run() { downloadRoute(); } });
         }
-        l.add(new Item("Storage", MapTiles.mb(MapTiles.bytesOnCard()),
-                AppIcons.NONE, Ui.DIM));
+
+        row(l, new Item("Storage", MapTiles.mb(MapTiles.bytesOnCard()),
+                AppIcons.NONE, Ui.DIM), NOTHING);
+
         long dead = MapTiles.reclaimable(map.country(), MapDownload.COUNTRY_ZOOM);
-        l.add(new Item("Clean up", dead > 0 ? ("free " + MapTiles.mb(dead)) : "nothing to free",
-                AppIcons.GEAR, dead > 0 ? Ui.FG : Ui.DIM));
-        l.add(new Item("Retry position", map.why().length() > 0 ? map.why() : "ok",
-                AppIcons.GEAR));
-        l.add(new Item("Network", map.tiles().onWifi() ? "wifi"
-                : (map.tiles().online() ? "mobile" : "offline"),
-                AppIcons.NONE, Ui.DIM));
+        row(l, new Item("Clean up",
+                        dead > 0 ? ("free " + MapTiles.mb(dead)) : "nothing to free",
+                        AppIcons.GEAR, dead > 0 ? Ui.FG : Ui.DIM),
+                new Runnable() { public void run() { cleanUp(); } });
+
+        row(l, new Item("Retry position", map.why().length() > 0 ? map.why() : "ok",
+                        AppIcons.GEAR),
+                new Runnable() { public void run() { map.retrySeed(); render(); } });
+
+        row(l, new Item("Network", map.tiles().onWifi() ? "wifi"
+                        : (map.tiles().online() ? "mobile" : "offline"),
+                        AppIcons.NONE, Ui.DIM), NOTHING);
+
+        int before = l.size();
         addBack(l);
-        l.add(new Item("Exit map", null, AppIcons.HOME));
+        for (int i = before; i < l.size(); i++) {
+            actions.add(new Runnable() { public void run() { shell.pop(); } });
+        }
+
+        row(l, new Item("Exit map", null, AppIcons.HOME),
+                new Runnable() { public void run() { shell.popToRoot(); } });
         return l;
     }
 
     @Override
     protected void onPick(int index) {
-        switch (index) {
-            case 0: routeTo(); break;
-            case 1:
-                map.reloadDestination();
-                shell.toast(Destination.file() == null
-                        ? makeExample() : "destination reloaded");
-                render();
-                break;
-            case 2: downloadCountry(); break;
-            case 3: downloadRoute(); break;
-            case 4: break;                       // a readout
-            case 5: cleanUp(); break;
-            case 6: map.retrySeed(); render(); break;
-            case 7: break;                       // a readout
-            case 8: shell.pop(); break;
-            default: shell.popToRoot(); break;
-        }
+        if (index >= 0 && index < actions.size()) actions.get(index).run();
     }
 
     /**

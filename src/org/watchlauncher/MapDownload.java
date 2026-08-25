@@ -130,14 +130,23 @@ public class MapDownload {
     public int country(MapTiles tiles, String name,
                        double minx, double miny, double maxx, double maxy,
                        double atLat, double atLon, Progress p) {
-        // Tiles drawn by an older renderer go first, or the map ends up half
-        // in one style and half in the other with no way to finish the job.
-        MapTiles.dropIfStale(name);
-        if (!tiles.onWifi()) return -1;
+        // Tiles drawn by an older renderer are overwritten as we go, rather
+        // than deleted up front - see MapTiles.refreshing.
+        boolean restyle = MapTiles.styleStale(name);
+        if (restyle) MapTiles.beginStyleRefresh(name);
+        try {
+            if (!tiles.onWifi()) return -1;
 
-        // No separate detail pass around the position any more: the country
-        // itself is at detail zoom now, so there is nothing left to add.
-        return blocks(tiles, name, minx, miny, maxx, maxy, COUNTRY_ZOOM, p);
+            // No separate detail pass around the position any more: the
+            // country itself is at detail zoom now, so nothing to add.
+            int failed = blocks(tiles, name, minx, miny, maxx, maxy, COUNTRY_ZOOM, p);
+            // Only a clean sweep earns the marker. A partial one leaves it
+            // unset so the next download finishes the restyle.
+            if (restyle && failed == 0 && !cancelled) MapTiles.endStyleRefresh(name);
+            return failed;
+        } finally {
+            MapTiles.abortStyleRefresh();
+        }
     }
 
     /** The corridor along a route, at full detail. */
