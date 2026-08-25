@@ -7,7 +7,12 @@ import android.bluetooth.BluetoothGattCallback;
 import android.bluetooth.BluetoothGattCharacteristic;
 import android.bluetooth.BluetoothGattDescriptor;
 import android.bluetooth.BluetoothGattService;
+import android.content.BroadcastReceiver;
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.os.Handler;
+import android.os.Looper;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -50,6 +55,9 @@ public class LeHid {
         /** Progress, for the screen. */
         void onLeHidStatus(String line);
 
+        /** The list of devices seen has changed. */
+        void onLeHidFound();
+
         /** A raw boot report. {@code keyboard} false means it is a mouse. */
         void onLeHidReport(boolean keyboard, byte[] report);
     }
@@ -69,13 +77,34 @@ public class LeHid {
 
     private final Context ctx;
     private final BluetoothAdapter adapter;
-    private final Listener listener;
+    private Listener listener;
+
+    /** One advertiser seen during a scan. */
+    public static class Found {
+        public BluetoothDevice device;
+        public String name;
+        public boolean hid;
+        public int rssi;
+
+        public String label() {
+            String n = (name == null || name.length() == 0)
+                    ? device.getAddress() : name;
+            return hid ? (n + "  HID") : n;
+        }
+    }
+
+    /** LE peripherals stop advertising once they are connected, and many sleep
+     *  when idle, so a scan that finds nothing usually means the device needs
+     *  waking or putting back into pairing mode rather than that anything is
+     *  broken. Twenty seconds is long enough to tell those apart. */
+    private static final long SCAN_MS = 20000;
 
     private BluetoothGatt gatt;
     private final List<BluetoothGattCharacteristic> toSubscribe =
             new ArrayList<BluetoothGattCharacteristic>();
     private boolean scanning = false;
-    private final List<String> seen = new ArrayList<String>();
+    private final List<Found> found = new ArrayList<Found>();
+    private final Handler ui = new Handler(Looper.getMainLooper());
 
     public LeHid(Context c, Listener l) {
         ctx = c.getApplicationContext();
@@ -83,9 +112,52 @@ public class LeHid {
         adapter = BluetoothAdapter.getDefaultAdapter();
     }
 
-    private void say(String s) {
-        if (listener != null) listener.onLeHidStatus(s);
+    /*
+     * Every callback below arrives on a binder thread, not the UI thread: the
+     * LE scan callback and all of the GATT ones. The listener is a screen, and
+     * a screen redraws itself, so calling it directly touches views off the
+     * main thread -- which throws CalledFromWrongThreadException, and an
+     * uncaught exception on a binder thread takes the whole process with it.
+     *
+     * On a watch whose launcher IS this app, that looks like the screen simply
+     * going back to the home screen and nothing happening, with no crash to
+     * see. So everything the listener is told goes through the main thread,
+     * and each hop is wrapped: a screen that has been popped in the meantime
+     * must not be able to kill the app either.
+     */
+    private void post(final Runnable r) {
+        ui.post(new Runnable() {
+            public void run() {
+                try { r.run(); } catch (Exception e) { /* the screen has gone */ }
+            }
+        });
     }
+
+    private void say(final String s) {
+        final Listener l = listener;
+        if (l == null) return;
+        post(new Runnable() { public void run() { l.onLeHidStatus(s); } });
+    }
+
+    private void changed() {
+        final Listener l = listener;
+        if (l == null) return;
+        post(new Runnable() { public void run() { l.onLeHidFound(); } });
+    }
+
+    private void report(final boolean keyboard, final byte[] v) {
+        final Listener l = listener;
+        if (l == null) return;
+        post(new Runnable() { public void run() { l.onLeHidReport(keyboard, v); } });
+    }
+
+    /** The report screen takes over the callbacks when it opens, and the list
+     *  screen takes them back when it returns. */
+    public void setListener(Listener l) { listener = l; }
+
+    public List<Found> devices() { return found; }
+
+    public boolean scanning() { return scanning; }
 
     // ---------------------------------------------------------------- scan
 
@@ -94,12 +166,41 @@ public class LeHid {
     public void scan() {
         if (adapter == null) { say("no bluetooth"); return; }
         if (scanning) return;
-        seen.clear();
+
+        // A classic inquiry and an LE scan share one radio, and on this
+        // controller the inquiry wins: the LE callback simply never fires.
+        // Entering the Bluetooth screen starts a twelve second inquiry, so
+        // without this the scan looked hung for exactly that long and then
+        // found nothing anyway.
+        try {
+            if (adapter.isDiscovering()) {
+                adapter.cancelDiscovery();
+                say("stopped the classic scan first");
+            }
+        } catch (Exception e) { /* carry on */ }
+
+        found.clear();
+        changed();
+
         scanning = adapter.startLeScan(scanCallback);
-        say(scanning ? "scanning for LE input..." : "LE scan refused");
+        say(scanning ? "scanning 20s..." : "LE scan refused by the stack");
+        if (scanning) {
+            ui.removeCallbacks(endScan);
+            ui.postDelayed(endScan, SCAN_MS);
+        }
     }
 
+    private final Runnable endScan = new Runnable() {
+        public void run() {
+            stopScan();
+            say(found.isEmpty()
+                    ? "nothing advertising. wake the device or put it in pairing mode"
+                    : (found.size() + " found"));
+        }
+    };
+
     public void stopScan() {
+        ui.removeCallbacks(endScan);
         if (adapter == null || !scanning) return;
         try { adapter.stopLeScan(scanCallback); } catch (Exception e) { /* ignore */ }
         scanning = false;
@@ -109,17 +210,23 @@ public class LeHid {
             new BluetoothAdapter.LeScanCallback() {
         public void onLeScan(BluetoothDevice device, int rssi, byte[] record) {
             String addr = device.getAddress();
-            if (seen.contains(addr)) return;
-            seen.add(addr);
-
-            String name = null;
-            try { name = device.getName(); } catch (Exception e) { /* ignore */ }
-            boolean hid = advertisesHid(record);
-            say((name == null ? addr : name) + (hid ? "  HID" : "") + "  " + rssi);
-            if (hid) {
-                stopScan();
-                connect(device);
+            for (int i = 0; i < found.size(); i++) {
+                if (found.get(i).device.getAddress().equals(addr)) {
+                    found.get(i).rssi = rssi;      // keep the freshest signal
+                    return;
+                }
             }
+            Found f = new Found();
+            f.device = device;
+            f.rssi = rssi;
+            try { f.name = device.getName(); } catch (Exception e) { f.name = null; }
+            // Only a hint. Plenty of HID devices advertise the service in the
+            // scan response rather than the advertisement, or not at all until
+            // after connecting, so this decides how a row is labelled and
+            // nothing else -- the choice of what to connect to is yours.
+            f.hid = advertisesHid(record);
+            found.add(f);
+            changed();
         }
     };
 
@@ -149,17 +256,91 @@ public class LeHid {
 
     // ---------------------------------------------------------------- connect
 
+    /** How long to wait for a connection before saying so. The stack's own
+     *  timeout is around thirty seconds and reports nothing until it expires,
+     *  which is indistinguishable from being hung. */
+    private static final long CONNECT_MS = 18000;
+
+    private BluetoothDevice connecting;
+    private boolean triedAutoConnect = false;
+    private boolean retried = false;
+    private long connectStartedAt = 0;
+
     public void connect(BluetoothDevice d) {
-        say("connecting to " + d.getAddress());
-        close();
-        // autoConnect false: connect now and report failure, rather than
-        // waiting indefinitely for the device to come into range.
-        gatt = d.connectGatt(ctx, false, callback);
-        if (gatt == null) say("connectGatt refused");
+        connect(d, false);
     }
 
+    /**
+     * @param auto the autoConnect flag. False asks the stack to connect now;
+     *             true queues the connection until the device is seen, which
+     *             is a different code path in this stack and sometimes
+     *             succeeds where the direct one silently does not.
+     */
+    private void connect(BluetoothDevice d, boolean auto) {
+        close();
+        connecting = d;
+        triedAutoConnect = auto;
+        connectStartedAt = System.currentTimeMillis();
+
+        String bond;
+        switch (d.getBondState()) {
+            case BluetoothDevice.BOND_BONDED: bond = "bonded"; break;
+            case BluetoothDevice.BOND_BONDING: bond = "bonding"; break;
+            default: bond = "not bonded"; break;
+        }
+        say("connecting to " + d.getAddress() + (auto ? " (auto)" : "") + ", " + bond);
+
+        gatt = d.connectGatt(ctx, auto, callback);
+        if (gatt == null) { say("connectGatt refused"); return; }
+
+        ui.removeCallbacks(connectTimeout);
+        ui.postDelayed(connectTimeout, CONNECT_MS);
+    }
+
+    /** Says how long it has been waiting, so a slow connect is visibly alive
+     *  rather than apparently hung. */
+    public String connectProgress() {
+        if (connectStartedAt == 0) return "";
+        long s = (System.currentTimeMillis() - connectStartedAt) / 1000;
+        return s + "s";
+    }
+
+    /** Service discovery can hang exactly as the connect can, and reports
+     *  nothing when it does. */
+    private static final long DISCOVER_MS = 15000;
+
+    private final Runnable discoverTimeout = new Runnable() {
+        public void run() {
+            say("no services after " + (DISCOVER_MS / 1000) + "s.");
+            say("this usually means the link is up but unencrypted");
+            say("and the device is refusing to describe itself.");
+        }
+    };
+
+    private final Runnable connectTimeout = new Runnable() {
+        public void run() {
+            BluetoothDevice d = connecting;
+            if (d == null) return;
+            if (!triedAutoConnect) {
+                say("no answer in " + (CONNECT_MS / 1000) + "s, retrying the other way");
+                connect(d, true);
+                return;
+            }
+            connecting = null;
+            connectStartedAt = 0;
+            close();
+            say("no answer. it is probably connected to something else,");
+            say("or asleep. wake it or unpair it from your phone first.");
+        }
+    };
+
     public void close() {
+        ui.removeCallbacks(connectTimeout);
+        ui.removeCallbacks(discoverTimeout);
         if (gatt == null) return;
+        // close() rather than just disconnect(): this stack leaks a client
+        // interface per unclosed GATT and stops connecting once they run out,
+        // silently and permanently until the app is restarted.
         try { gatt.close(); } catch (Exception e) { /* ignore */ }
         gatt = null;
     }
@@ -168,9 +349,28 @@ public class LeHid {
 
         public void onConnectionStateChange(BluetoothGatt g, int status, int state) {
             if (state == BluetoothGatt.STATE_CONNECTED) {
+                ui.removeCallbacks(connectTimeout);
+                connecting = null;
+                connectStartedAt = 0;
                 say("connected (status " + status + "), discovering");
-                g.discoverServices();
+                ui.removeCallbacks(discoverTimeout);
+                ui.postDelayed(discoverTimeout, DISCOVER_MS);
+                if (!g.discoverServices()) say("discoverServices refused");
             } else if (state == BluetoothGatt.STATE_DISCONNECTED) {
+                ui.removeCallbacks(discoverTimeout);
+                if (status == 133 && !retried && connecting == null) {
+                    // 133 is GATT_ERROR, this stack's catch-all. After a
+                    // successful connect it usually means the link collapsed
+                    // because the device wanted it encrypted. A single retry
+                    // is the standard workaround and sometimes lands.
+                    retried = true;
+                    final BluetoothDevice again = g.getDevice();
+                    say("133 - retrying once");
+                    ui.postDelayed(new Runnable() {
+                        public void run() { connect(again, false); }
+                    }, 1200);
+                    return;
+                }
                 // Status 8 is a supervision timeout, 19 a remote disconnect,
                 // 22 a local one. 133 is the catch-all this stack returns when
                 // it has nothing better, and usually means the link dropped
@@ -180,20 +380,31 @@ public class LeHid {
         }
 
         public void onServicesDiscovered(BluetoothGatt g, int status) {
+            ui.removeCallbacks(discoverTimeout);
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 say("discovery failed (" + status + ")");
                 return;
             }
             BluetoothGattService hid = g.getService(HID_SERVICE);
             if (hid == null) {
-                StringBuilder b = new StringBuilder("no HID service. found: ");
+                say("no HID service. it offers:");
                 for (BluetoothGattService s : g.getServices()) {
-                    b.append(shortUuid(s.getUuid())).append(' ');
+                    say("  " + shortUuid(s.getUuid()) + "  " + serviceName(s.getUuid()));
                 }
-                say(b.toString());
                 return;
             }
             say("HID service found");
+
+            // Reading a protected characteristic is the documented way to make
+            // the stack start pairing, and its status is the answer we are
+            // after: 5 is insufficient authentication, 15 insufficient
+            // encryption, and either means the device wants a bonded link.
+            BluetoothGattCharacteristic map = hid.getCharacteristic(REPORT_MAP);
+            if (map != null) {
+                say("reading report map to provoke pairing...");
+                if (g.readCharacteristic(map)) return;   // continue in onCharacteristicRead
+                say("read refused outright");
+            }
 
             toSubscribe.clear();
             for (BluetoothGattCharacteristic c : hid.getCharacteristics()) {
@@ -221,22 +432,45 @@ public class LeHid {
             subscribeNext(g);
         }
 
+        public void onCharacteristicRead(BluetoothGatt g,
+                                         BluetoothGattCharacteristic c, int status) {
+            say("report map read -> " + authWord(status));
+            // Whatever the answer, carry on: if pairing was triggered the
+            // subscribe below may now succeed, and if it was not, its status
+            // will say the same thing again.
+            BluetoothGattService hid = g.getService(HID_SERVICE);
+            if (hid == null) return;
+            toSubscribe.clear();
+            for (BluetoothGattCharacteristic ch : hid.getCharacteristics()) {
+                UUID u = ch.getUuid();
+                if (BOOT_KB_IN.equals(u) || BOOT_MOUSE_IN.equals(u) || REPORT.equals(u)) {
+                    toSubscribe.add(ch);
+                }
+            }
+            BluetoothGattCharacteristic mode = hid.getCharacteristic(PROTOCOL_MODE);
+            if (mode != null) {
+                mode.setValue(new byte[]{0});
+                mode.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE);
+                g.writeCharacteristic(mode);
+            }
+            subscribeNext(g);
+        }
+
         public void onDescriptorWrite(BluetoothGatt g, BluetoothGattDescriptor d,
                                       int status) {
             // Status 5 is insufficient authentication and 15 insufficient
             // encryption: both mean the device wants a bonded link, and both
             // are the answer to whether this can work at all.
             say("subscribe " + shortUuid(d.getCharacteristic().getUuid())
-                    + " -> " + (status == 0 ? "ok" : ("status " + status)));
+                    + " -> " + authWord(status));
             subscribeNext(g);
         }
 
         public void onCharacteristicChanged(BluetoothGatt g,
                                             BluetoothGattCharacteristic c) {
             byte[] v = c.getValue();
-            if (v == null || listener == null) return;
-            boolean keyboard = !BOOT_MOUSE_IN.equals(c.getUuid());
-            listener.onLeHidReport(keyboard, v);
+            if (v == null) return;
+            report(!BOOT_MOUSE_IN.equals(c.getUuid()), v);
         }
     };
 
@@ -254,6 +488,99 @@ public class LeHid {
         } catch (Exception e) {
             subscribeNext(g);
         }
+    }
+
+    /** The few standard services worth recognising by name when HID is
+     *  missing, since the numbers alone say nothing about what went wrong. */
+    /** GATT statuses worth having words for. */
+    static String authWord(int status) {
+        switch (status) {
+            case 0:   return "ok";
+            case 5:   return "status 5 - needs authentication (a bond)";
+            case 8:   return "status 8 - link timed out";
+            case 15:  return "status 15 - needs encryption (a bond)";
+            case 133: return "status 133 - generic failure, usually the link dropping";
+            case 137: return "status 137 - authentication failed";
+            default:  return "status " + status;
+        }
+    }
+
+    /**
+     * Ask the stack to bond, and watch what happens.
+     *
+     * LE bonding is unreliable on this Android version, which is why this is a
+     * deliberate action rather than something attempted silently. Without the
+     * receiver below it was also untestable: createBond() returns true the
+     * moment the request is accepted and says nothing about the outcome, so a
+     * bond that failed a second later looked identical to one that worked.
+     */
+    public void bond(BluetoothDevice d) {
+        watchBonding();
+        try {
+            say(d.createBond() ? "bond requested, waiting..." : "createBond refused");
+        } catch (Exception e) {
+            say("createBond threw");
+        }
+    }
+
+    private boolean bondWatch = false;
+
+    private void watchBonding() {
+        if (bondWatch) return;
+        bondWatch = true;
+        IntentFilter f = new IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED);
+        f.addAction("android.bluetooth.device.action.PAIRING_REQUEST");
+        try { ctx.registerReceiver(bondRx, f); } catch (Exception e) { bondWatch = false; }
+    }
+
+    public void stopWatchingBonding() {
+        if (!bondWatch) return;
+        bondWatch = false;
+        try { ctx.unregisterReceiver(bondRx); } catch (Exception e) { /* ignore */ }
+    }
+
+    private final BroadcastReceiver bondRx = new BroadcastReceiver() {
+        public void onReceive(Context c, Intent in) {
+            String a = in.getAction();
+            if ("android.bluetooth.device.action.PAIRING_REQUEST".equals(a)) {
+                BluetoothDevice d =
+                        in.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
+                int variant = in.getIntExtra(
+                        "android.bluetooth.device.extra.PAIRING_VARIANT", -1);
+                int key = in.getIntExtra(
+                        "android.bluetooth.device.extra.PAIRING_KEY", -1);
+                say("pairing request, variant " + variant
+                        + (key >= 0 ? (" key " + key) : ""));
+                // Just Works is what a mouse or trackball almost always asks
+                // for; answering it is the whole of the handshake.
+                try {
+                    java.lang.reflect.Method m = BluetoothDevice.class
+                            .getMethod("setPairingConfirmation", boolean.class);
+                    m.invoke(d, true);
+                    say("confirmed");
+                } catch (Exception e) {
+                    say("could not confirm: " + e.getClass().getSimpleName());
+                }
+                return;
+            }
+            int st = in.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, -1);
+            int reason = in.getIntExtra("android.bluetooth.device.extra.REASON", -1);
+            if (st == BluetoothDevice.BOND_BONDED) say("BONDED");
+            else if (st == BluetoothDevice.BOND_BONDING) say("bonding...");
+            else if (st == BluetoothDevice.BOND_NONE) say("bond failed, reason " + reason);
+        }
+    };
+
+    static String serviceName(UUID u) {
+        String s = shortUuid(u);
+        if (s.equals("0x1800")) return "generic access";
+        if (s.equals("0x1801")) return "generic attribute";
+        if (s.equals("0x180a")) return "device information";
+        if (s.equals("0x180f")) return "battery";
+        if (s.equals("0x1812")) return "human interface device";
+        if (s.equals("0x1813")) return "scan parameters";
+        if (s.equals("0xfe59")) return "device firmware update";
+        return "";
     }
 
     static String shortUuid(UUID u) {
