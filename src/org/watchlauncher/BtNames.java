@@ -151,11 +151,131 @@ public final class BtNames {
         return AppIcons.DEVICE;
     }
 
+    public static final int TRANSPORT_UNKNOWN = 0;
+    public static final int TRANSPORT_CLASSIC = 1;
+    public static final int TRANSPORT_LE = 2;
+    public static final int TRANSPORT_DUAL = 3;
+
+    /**
+     * Classic, Low Energy, or both.
+     *
+     * This matters more than it looks. Android 4.4 can scan and connect LE
+     * GATT, but it has no HOGP host and no working LE bonding: createBond() on
+     * an LE-only device fails in about thirty milliseconds, before any radio
+     * exchange happens, and the stack reports a status AOSP has no name for --
+     * which surfaces as UNBOND_REASON_REMOVED and reads like something deleted
+     * the pairing. Nothing did. The platform simply cannot pair it, and no
+     * amount of retrying changes that. Saying so up front is the whole point
+     * of this method.
+     */
+    public static int transport(BluetoothDevice d) {
+        int t = TRANSPORT_UNKNOWN;
+        try {
+            t = d.getType();          // API 18, so present here
+        } catch (Exception e) {
+            t = TRANSPORT_UNKNOWN;
+        }
+        if (t == TRANSPORT_CLASSIC || t == TRANSPORT_LE || t == TRANSPORT_DUAL) {
+            return t;
+        }
+        // getType had nothing to say. A random address is still proof of LE --
+        // but only together with the vendor lookup failing, because a public
+        // OUI can legitimately begin with the same two bits (F0: is Huawei).
+        return looksRandom(d.getAddress()) ? TRANSPORT_LE : TRANSPORT_UNKNOWN;
+    }
+
+    /**
+     * True only when the stack itself says the device is LE-only.
+     *
+     * Nothing here is inferred, and that is deliberate. An earlier version
+     * also treated a random-looking address with no vendor as proof, which is
+     * wrong twice over: BR/EDR addresses are always public, so a random one
+     * does suggest LE -- but cheap peripherals ship unregistered MACs
+     * routinely, so the vendor lookup failing means very little. An i35 earbud
+     * could have matched that test and been refused, and it is emphatically
+     * Classic: it reports a Class of Device, which is a BR/EDR field with no
+     * LE equivalent, and it speaks A2DP, which is a Classic-only profile.
+     *
+     * Refusing a device that would have worked is far worse than letting one
+     * through that fails, so the guess only warns. See {@link #suspectedLe}.
+     */
+    public static boolean isLowEnergyOnly(Context c, BluetoothDevice d) {
+        try {
+            return d.getType() == TRANSPORT_LE;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * The device might be LE, on the address alone, when the stack would not
+     * say. Shown as a hint, never acted on.
+     *
+     * A device that turned up in a classic inquiry has a classic radio by
+     * definition, so this being true at the same time is a contradiction worth
+     * seeing rather than resolving silently.
+     */
+    public static boolean suspectedLe(Context c, BluetoothDevice d) {
+        if (isLowEnergyOnly(c, d)) return false;          // already certain
+        try {
+            if (d.getType() != TRANSPORT_UNKNOWN) return false;
+        } catch (Exception e) { /* keep going */ }
+        if (!looksRandom(d.getAddress())) return false;
+        if (OuiDb.get(c).vendor(d.getAddress()) != null) return false;
+        // A Class of Device is a BR/EDR field. Having one settles it.
+        return kind(d) == null;
+    }
+
+    /** For the device screen, so the truth is visible rather than inferred. */
+    public static String transportName(BluetoothDevice d) {
+        switch (transport(d)) {
+            case TRANSPORT_CLASSIC: return "classic";
+            case TRANSPORT_LE: return "low energy";
+            case TRANSPORT_DUAL: return "dual";
+            default: return "unknown";
+        }
+    }
+
+    /**
+     * The top two bits of the most significant octet. In LE these say the
+     * address is random rather than IEEE-assigned: 11 static, 01 resolvable
+     * private, 00 non-resolvable private.
+     */
+    static boolean looksRandom(String address) {
+        if (address == null || address.length() < 2) return false;
+        try {
+            int top = Integer.parseInt(address.substring(0, 2), 16) >> 6;
+            return top == 0x3 || top == 0x1 || top == 0x0;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     /** Does this look like something you would type on? Decides whether the
      *  pairing code has to be shown rather than auto-confirmed. */
     public static boolean isKeyboard(BluetoothDevice d) {
         String k = kind(d);
         return k != null && k.equals("Keyboard");
+    }
+
+    /**
+     * Anything that speaks HID: keyboards, mice, combos, remotes, gamepads.
+     *
+     * The profile to connect is decided by this and not by {@link #isKeyboard},
+     * which asks a narrower question for the pairing prompt. Routing on the
+     * narrow one sent every non-keyboard -- a mouse included -- down the A2DP
+     * path, which is an audio profile and has nothing to say to a pointing
+     * device, so it bonded and then sat there doing nothing.
+     */
+    public static boolean isInputDevice(BluetoothDevice d) {
+        BluetoothClass k = null;
+        try { k = d.getBluetoothClass(); } catch (Exception e) { /* ignore */ }
+        if (k == null) return false;
+        if (k.getMajorDeviceClass() == BluetoothClass.Device.Major.PERIPHERAL) return true;
+        // Some combo keyboards declare themselves uncategorised but still set
+        // the keyboard or pointer bit, so check those directly too.
+        int minor = (k.getDeviceClass() & 0xFC) >> 2;
+        return (minor & 0x30) != 0;
     }
 
     /** Does this look like something you would listen to? */

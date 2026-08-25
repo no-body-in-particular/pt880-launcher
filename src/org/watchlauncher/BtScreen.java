@@ -73,12 +73,31 @@ public class BtScreen extends ListScreen implements BtHelper.Listener {
 
         l.add(new Item(h.scanning() ? "Scanning..." : "Scan for devices",
                 null, AppIcons.BLUETOOTH));
+        // Classic discovery never finds LE devices, and this build cannot bond
+        // them anyway. This is the other road in.
+        l.add(new Item("LE input (HID over GATT)", null, AppIcons.KEYBOARD));
 
         List<BtHelper.Dev> devs = h.devices();
         for (int i = 0; i < devs.size(); i++) {
             BtHelper.Dev d = devs.get(i);
-            String right = d.connected ? "connected" : (d.bonded ? "paired" : d.detail);
-            int colour = d.connected ? Ui.OK : (d.bonded ? Ui.FG : Ui.DIM);
+            String right;
+            int colour;
+            if (d.lowEnergy) {
+                // The stack said so outright, so this one really cannot pair.
+                right = "LE";
+                colour = Ui.FAINT;
+            } else if (d.maybeLowEnergy) {
+                // A hint from the address only. Still selectable: refusing on
+                // a guess would be worse than a pairing that fails.
+                right = "LE?";
+                colour = Ui.DIM;
+            } else if (d.connected) {
+                right = "connected"; colour = Ui.OK;
+            } else if (d.bonded) {
+                right = "paired"; colour = Ui.FG;
+            } else {
+                right = d.detail; colour = Ui.DIM;
+            }
             l.add(new Item(d.label, right, d.glyph, colour));
         }
         addBack(l);
@@ -91,11 +110,16 @@ public class BtScreen extends ListScreen implements BtHelper.Listener {
         if (!h.available()) { shell.pop(); return; }
 
         if (index == 0) { h.scan(); render(); return; }
+        if (index == 1) { shell.push(new LeInputScreen()); return; }
 
         List<BtHelper.Dev> devs = h.devices();
-        int di = index - 1;
+        int di = index - 2;                    // scan row, then the LE row
         if (di >= 0 && di < devs.size()) {
             BtHelper.Dev d = devs.get(di);
+            if (d.lowEnergy) {
+                shell.toast("Low Energy - needs Bluetooth Classic");
+                return;
+            }
             // A paired device is worth a second question -- connecting and
             // forgetting are both one press away and only one is undoable.
             if (d.bonded) shell.push(new DeviceScreen(h, d));
@@ -123,12 +147,13 @@ public class BtScreen extends ListScreen implements BtHelper.Listener {
         protected List<Item> items() {
             List<Item> l = list();
             BluetoothDevice d = dev.device;
-            if (BtNames.isKeyboard(d)) {
-                l.add(new Item("Connect keyboard", null, AppIcons.KEYBOARD));
+            if (BtNames.isInputDevice(d)) {
+                l.add(new Item("Connect input", null, AppIcons.KEYBOARD));
             } else {
                 l.add(new Item("Connect audio", null, AppIcons.HEADSET));
             }
             l.add(new Item("Address", d.getAddress(), AppIcons.NONE, Ui.DIM));
+            l.add(new Item("Radio", BtNames.transportName(d), AppIcons.NONE, Ui.DIM));
             String kind = BtNames.kind(d);
             l.add(new Item("Type", kind == null ? "unknown" : kind,
                     AppIcons.NONE, Ui.DIM));
@@ -141,14 +166,14 @@ public class BtScreen extends ListScreen implements BtHelper.Listener {
         protected void onPick(int index) {
             switch (index) {
                 case 0:
-                    if (BtNames.isKeyboard(dev.device)) bt.connectHid(dev.device);
+                    if (BtNames.isInputDevice(dev.device)) bt.connectHid(dev.device);
                     else bt.connectA2dp(dev.device);
                     shell.pop();
                     break;
-                case 3:
+                case 4:
                     shell.pop();
                     break;
-                case 4:
+                case 5:
                     bt.unpair(dev.device);
                     shell.pop();
                     break;

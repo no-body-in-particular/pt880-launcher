@@ -157,6 +157,30 @@ class-of-device and does the right one.
 Once a keyboard is connected it drives the whole UI, not only the terminal:
 arrows move, Enter picks, Escape backs out.
 
+### Low Energy will not pair, and the app says so
+
+Android 4.4 can scan and connect LE GATT, but it has **no HOGP host and no
+working LE bonding**. `createBond()` on an LE-only device fails in about
+thirty milliseconds -- before any radio exchange -- and the stack returns a
+status AOSP has no mapping for, so `getUnbondReasonFromHALCode()` falls through
+to `UNBOND_REASON_REMOVED`. That surfaces as "removed" and reads exactly like
+something deleted the pairing. Nothing did.
+
+The scan list marks those devices `LE` and refuses to try, because retrying
+cannot work. Dual-mode devices are fine: they bond over their classic half.
+
+Telling them apart is `BluetoothDevice.getType()`, which is API 18 and
+authoritative when it answers. When it returns UNKNOWN there is a fallback on
+the address -- the top two bits of the first octet say an LE address is random
+rather than IEEE-assigned -- but only *together with* the vendor lookup
+failing. On its own that test flags Sennheiser's `00:16:94` and Huawei's
+`F0:61:C0`, both perfectly ordinary public addresses. A real trackball at
+`F1:65:26:9B:A8:00` matches the bits **and** appears in no registry, which is
+what makes it conclusive.
+
+So: a Bluetooth **Classic** mouse or keyboard works here. Anything sold as
+"Bluetooth 4.0 LE" does not, and no app-side change can alter that.
+
 ## Contacts
 
 ```bash
