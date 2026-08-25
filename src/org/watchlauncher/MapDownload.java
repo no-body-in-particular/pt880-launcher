@@ -2,6 +2,9 @@ package org.watchlauncher;
 
 import java.util.ArrayList;
 import java.util.List;
+import android.content.Context;
+import android.net.wifi.WifiManager;
+import android.os.PowerManager;
 
 /**
  * Filling the card with map, in bulk.
@@ -202,11 +205,66 @@ public class MapDownload {
     private int blocks(MapTiles tiles, String country,
                        double minx, double miny, double maxx, double maxy,
                        int z, Progress p) {
+        hold(tiles.context());
         try {
             return blocksInner(tiles, country, minx, miny, maxx, maxy, z, p);
         } finally {
             MapTiles.writing(false);
+            releasePower();
         }
+    }
+
+    // ------------------------------------------------------------- power
+
+    /*
+     * A download has to survive the screen going off, and on stock Android it
+     * does not.
+     *
+     * Two things happen the moment the backlight dies. The CPU suspends, so a
+     * plain background thread gets a sliver of a wakeup every so often rather
+     * than running. And the wifi chip drops into power save, where it stops
+     * listening continuously and waits for beacons instead - which does not
+     * break the transfer, it just makes it crawl, and it stays that way for
+     * as long as the screen is off. That is the "much slower after the screen
+     * blinks off" exactly.
+     *
+     * A partial wake lock answers the first and a high performance wifi lock
+     * the second. Both are held only while blocks are actually being fetched,
+     * and both come off in the finally above - a wake lock left holding on a
+     * watch is a flat battery by morning. The timeout is a second line of
+     * defence against precisely that.
+     */
+    private static final long MAX_HOLD_MS = 2 * 60 * 60 * 1000L;
+
+    private PowerManager.WakeLock cpu;
+    private WifiManager.WifiLock radio;
+
+    private void hold(Context c) {
+        if (c == null) return;
+        try {
+            PowerManager pm = (PowerManager) c.getSystemService(Context.POWER_SERVICE);
+            cpu = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "watchlauncher.map");
+            cpu.setReferenceCounted(false);
+            cpu.acquire(MAX_HOLD_MS);
+        } catch (Exception e) {
+            cpu = null;
+        }
+        try {
+            WifiManager wm = (WifiManager) c.getSystemService(Context.WIFI_SERVICE);
+            radio = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF,
+                    "watchlauncher.map");
+            radio.setReferenceCounted(false);
+            radio.acquire();
+        } catch (Exception e) {
+            radio = null;
+        }
+    }
+
+    private void releasePower() {
+        try { if (cpu != null && cpu.isHeld()) cpu.release(); } catch (Exception e) { }
+        try { if (radio != null && radio.isHeld()) radio.release(); } catch (Exception e) { }
+        cpu = null;
+        radio = null;
     }
 
     private int blocksInner(MapTiles tiles, String country,

@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="org.watchlauncher"
-    android:versionCode="38"
-    android:versionName="5.2">
+    android:versionCode="39"
+    android:versionName="5.3">
 
     <uses-sdk android:minSdkVersion="19" android:targetSdkVersion="19" />
 
@@ -17,6 +17,11 @@
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
 
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- The map download holds a high-performance wifi lock, so that the
+         radio does not drop into power-save polling the moment the screen
+         goes off and leave a country download crawling. -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
     <!-- Sleep tracking has to survive a reboot; without this it would stop
          the first time the battery ran out and never start again. -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />

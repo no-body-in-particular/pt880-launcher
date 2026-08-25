@@ -75,6 +75,8 @@ public class MapTiles {
         ctx = c.getApplicationContext();
     }
 
+    Context context() { return ctx; }
+
     // ---------------------------------------------------------------- config
 
     public String base() {
