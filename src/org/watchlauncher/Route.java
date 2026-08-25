@@ -1,0 +1,242 @@
+package org.watchlauncher;
+
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.DataInputStream;
+import java.io.BufferedInputStream;
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * A route, and what to say next.
+ *
+ * The server computes it once and the watch follows it offline. Both halves
+ * matter on this device: a road graph for a country is not something a 1 GHz
+ * watch should search, and a route is followed for an hour after being asked
+ * for, long after the network may have gone.
+ *
+ * <h3>Instructions</h3>
+ *
+ * A turn carries a direction and a distance and no street name. On a wrist,
+ * spoken, "in two hundred metres, turn left" is the whole of what is useful --
+ * and the name is exactly what makes the sentence too long to finish before
+ * the junction arrives.
+ *
+ * Each turn is announced twice: once far enough out to change lane, and once
+ * on top of it. Distances are rounded to something a person would say, because
+ * "in one hundred and eighty-seven metres" is not an instruction, it is a
+ * reading.
+ */
+public class Route {
+
+    public static final int DEPART = 0, STRAIGHT = 1, SLIGHT_LEFT = 2, LEFT = 3,
+            SHARP_LEFT = 4, SLIGHT_RIGHT = 5, RIGHT = 6, SHARP_RIGHT = 7,
+            UTURN = 8, ROUNDABOUT = 9, ARRIVE = 10;
+
+    /** Announced at this range, then again when it is imminent. */
+    private static final int WARN_M = 250;
+    private static final int NOW_M = 40;
+
+    /** Past this from the line, the route is no longer being followed. */
+    public static final int OFF_ROUTE_M = 80;
+
+    /** Within this of the destination, the job is done. */
+    public static final int ARRIVED_M = 30;
+
+    public static class Turn {
+        public int kind;
+        public int metres;          // length of the step that follows
+        public double lat, lon;
+        boolean warned, announced;
+    }
+
+    public final List<Turn> turns = new ArrayList<Turn>();
+    public final List<double[]> line = new ArrayList<double[]>();
+    public int totalMetres;
+
+    /** Parse the server's binary. Returns null if it is not a route. */
+    public static Route read(File f) {
+        DataInputStream in = null;
+        try {
+            in = new DataInputStream(new BufferedInputStream(new FileInputStream(f)));
+            byte[] magic = new byte[4];
+            in.readFully(magic);
+            if (magic[0] != 'W' || magic[1] != 'R' || magic[2] != 'T' || magic[3] != '1') {
+                return null;
+            }
+            Route r = new Route();
+            r.totalMetres = in.readInt();
+            int steps = in.readUnsignedShort();
+            int points = in.readUnsignedShort();
+
+            for (int i = 0; i < steps; i++) {
+                Turn t = new Turn();
+                t.kind = in.readUnsignedByte();
+                t.metres = in.readUnsignedShort();
+                t.lat = in.readInt() / 1e7;
+                t.lon = in.readInt() / 1e7;
+                r.turns.add(t);
+            }
+
+            if (points > 0) {
+                double lat = in.readInt() / 1e7;
+                double lon = in.readInt() / 1e7;
+                r.line.add(new double[]{lat, lon});
+                for (int i = 1; i < points; i++) {
+                    lat += in.readShort() / 1e6;
+                    lon += in.readShort() / 1e6;
+                    r.line.add(new double[]{lat, lon});
+                }
+            }
+            return r.line.size() >= 2 ? r : null;
+        } catch (Exception e) {
+            return null;
+        } finally {
+            try { if (in != null) in.close(); } catch (Exception e) { /* ignore */ }
+        }
+    }
+
+    public double[] destination() {
+        return line.isEmpty() ? null : line.get(line.size() - 1);
+    }
+
+    /**
+     * What should be said now, or null.
+     *
+     * Each turn speaks twice and then goes quiet, so a queue at a junction does
+     * not produce the same instruction on every fix.
+     */
+    public String instruction(double lat, double lon) {
+        Turn next = null;
+        double best = Double.MAX_VALUE;
+        for (int i = 0; i < turns.size(); i++) {
+            Turn t = turns.get(i);
+            if (t.announced) continue;
+            double d = metresBetween(lat, lon, t.lat, t.lon);
+            if (d < best) { best = d; next = t; }
+        }
+        if (next == null) return null;
+
+        if (best <= NOW_M) {
+            next.announced = true;
+            next.warned = true;
+            return phrase(next.kind, 0);
+        }
+        if (best <= WARN_M && !next.warned) {
+            next.warned = true;
+            return phrase(next.kind, (int) best);
+        }
+        return null;
+    }
+
+    /** The nearest upcoming turn, for the screen. */
+    public Turn nextTurn(double lat, double lon) {
+        Turn next = null;
+        double best = Double.MAX_VALUE;
+        for (int i = 0; i < turns.size(); i++) {
+            Turn t = turns.get(i);
+            if (t.announced) continue;
+            double d = metresBetween(lat, lon, t.lat, t.lon);
+            if (d < best) { best = d; next = t; }
+        }
+        return next;
+    }
+
+    public int metresTo(double lat, double lon, Turn t) {
+        return (int) Math.round(metresBetween(lat, lon, t.lat, t.lon));
+    }
+
+    /** How far off the line we are, for the off-route test. */
+    public double offRouteMetres(double lat, double lon) {
+        double best = Double.MAX_VALUE;
+        for (int i = 1; i < line.size(); i++) {
+            double d = pointToSegment(lat, lon,
+                    line.get(i - 1)[0], line.get(i - 1)[1],
+                    line.get(i)[0], line.get(i)[1]);
+            if (d < best) best = d;
+        }
+        return best;
+    }
+
+    private static String phrase(int kind, int metres) {
+        String turn;
+        switch (kind) {
+            case SLIGHT_LEFT:  turn = "bear left"; break;
+            case LEFT:         turn = "turn left"; break;
+            case SHARP_LEFT:   turn = "turn sharp left"; break;
+            case SLIGHT_RIGHT: turn = "bear right"; break;
+            case RIGHT:        turn = "turn right"; break;
+            case SHARP_RIGHT:  turn = "turn sharp right"; break;
+            case UTURN:        turn = "make a u turn"; break;
+            case ROUNDABOUT:   turn = "at the roundabout"; break;
+            case ARRIVE:       turn = "you have arrived"; break;
+            case DEPART:       return null;
+            default:           turn = "continue straight ahead"; break;
+        }
+        if (kind == ARRIVE) return turn;
+        if (metres <= 0) return turn;
+        return "in " + spokenDistance(metres) + ", " + turn;
+    }
+
+    /** Rounded to what a person would say. Nobody says "187 metres". */
+    static String spokenDistance(int m) {
+        if (m >= 1000) return (Math.round(m / 100.0) / 10.0) + " kilometres";
+        if (m > 300) return (Math.round(m / 100.0) * 100) + " metres";
+        if (m > 80) return (Math.round(m / 50.0) * 50) + " metres";
+        return (Math.round(m / 10.0) * 10) + " metres";
+    }
+
+    public static String turnWord(int kind) {
+        switch (kind) {
+            case SLIGHT_LEFT:  return "bear left";
+            case LEFT:         return "left";
+            case SHARP_LEFT:   return "sharp left";
+            case SLIGHT_RIGHT: return "bear right";
+            case RIGHT:        return "right";
+            case SHARP_RIGHT:  return "sharp right";
+            case UTURN:        return "u-turn";
+            case ROUNDABOUT:   return "roundabout";
+            case ARRIVE:       return "arrive";
+            case DEPART:       return "start";
+            default:           return "straight";
+        }
+    }
+
+    // ---------------------------------------------------------------- geometry
+
+    public static double metresBetween(double lat1, double lon1,
+                                       double lat2, double lon2) {
+        double dLat = Math.toRadians(lat2 - lat1);
+        double dLon = Math.toRadians(lon2 - lon1);
+        double a = Math.sin(dLat / 2) * Math.sin(dLat / 2)
+                 + Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2))
+                 * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+        return 6371000.0 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    }
+
+    /** Bearing from one point to another, degrees clockwise from north. */
+    public static double bearing(double lat1, double lon1, double lat2, double lon2) {
+        double p1 = Math.toRadians(lat1), p2 = Math.toRadians(lat2);
+        double dl = Math.toRadians(lon2 - lon1);
+        double y = Math.sin(dl) * Math.cos(p2);
+        double x = Math.cos(p1) * Math.sin(p2) - Math.sin(p1) * Math.cos(p2) * Math.cos(dl);
+        double b = Math.toDegrees(Math.atan2(y, x));
+        return (b + 360) % 360;
+    }
+
+    /** Flat-earth is fine over a route segment and much cheaper than the
+     *  alternative on a processor this size. */
+    private static double pointToSegment(double lat, double lon,
+                                         double alat, double alon,
+                                         double blat, double blon) {
+        double kx = 111320.0 * Math.cos(Math.toRadians(alat));
+        double ky = 110540.0;
+        double px = (lon - alon) * kx, py = (lat - alat) * ky;
+        double bx = (blon - alon) * kx, by = (blat - alat) * ky;
+        double len = bx * bx + by * by;
+        if (len == 0) return Math.sqrt(px * px + py * py);
+        double t = Math.max(0, Math.min(1, (px * bx + py * by) / len));
+        double dx = px - t * bx, dy = py - t * by;
+        return Math.sqrt(dx * dx + dy * dy);
+    }
+}

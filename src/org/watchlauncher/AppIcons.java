@@ -39,6 +39,7 @@ public class AppIcons extends View {
     public static final int COMPUTER = 14;
     public static final int HOME = 15;
     public static final int HEART = 16;
+    public static final int MAP = 17;
 
     private static final float D = 24f;
 
@@ -94,6 +95,7 @@ public class AppIcons extends View {
             case COMPUTER:  computer(canvas); break;
             case HOME:      home(canvas); break;
             case HEART:     heart(canvas); break;
+            case MAP:       map(canvas); break;
             default:        device(canvas); break;
         }
         canvas.restore();
@@ -293,6 +295,24 @@ public class AppIcons extends View {
         path.cubicTo(21.5f, 8.5f, 21f, 14f, 12f, 20.5f);
         path.close();
         c.drawPath(path, p);
+    }
+
+    /** A folded map: three panels with a fold between each. */
+    private void map(Canvas c) {
+        stroke(2f);
+        path.reset();
+        path.moveTo(2.5f, 6f);
+        path.lineTo(9f, 3.5f);
+        path.lineTo(15f, 6.5f);
+        path.lineTo(21.5f, 4f);
+        path.lineTo(21.5f, 18f);
+        path.lineTo(15f, 20.5f);
+        path.lineTo(9f, 17.5f);
+        path.lineTo(2.5f, 20f);
+        path.close();
+        c.drawPath(path, p);
+        c.drawLine(9f, 3.5f, 9f, 17.5f, p);
+        c.drawLine(15f, 6.5f, 15f, 20.5f, p);
     }
 
     private void device(Canvas c) {

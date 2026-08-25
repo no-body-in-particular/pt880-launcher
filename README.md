@@ -368,3 +368,102 @@ The APK is ~1.9 MB, and nearly all of that is the vendor database.
     assets/oui.db        57,858 IEEE vendor prefixes
     native/wsu.c         the setuid helper
     tools/               the database builder
+
+## Map and navigation
+
+A **Map** row on the launcher: where you are, drawn on an offline map, with
+turn-by-turn to a destination read out loud.
+
+### What lives where
+
+The watch holds no OSM data and does no routing. The server holds a country's
+roads and renders tiles on demand; the watch caches what it is given and then
+needs no network at all.
+
+```
+coredump.ws/map/
+  import.php    a Geofabrik roads shapefile -> a country's road store
+  tile.php      z/x/y -> a 4-bit greyscale PNG, rendered and cached
+  roads.php     z/x/y -> the same roads as vectors, binary
+  route.php     from/to -> geometry plus turns, binary
+  country.php   lat/lon -> which country's map covers it
+```
+
+The Netherlands is 1,990,294 ways in a 119 MB SQLite store. A tile renders in
+a few milliseconds and a lookup around a point takes about 16 ms.
+
+### Four bits
+
+The tiles are 4-bit greyscale PNGs, a few kilobytes each. Sixteen greys is
+more than enough to separate a motorway from a footpath on a 240x240 screen,
+and the storage saved is spent on covering more ground instead. GD writes a
+palette PNG at the smallest bit depth that fits, so a sixteen-colour palette
+becomes a 4-bit file without being asked.
+
+### Why a country is z13 and a route is z15
+
+| | tiles | size |
+|---|---|---|
+| Netherlands at z13 | 9,464 | ~37 MB |
+| Netherlands at z15 | 149,760 | ~585 MB |
+| A 50 km route corridor at z15 | a few hundred | a few MB |
+
+So the country is kept as an overview — enough to see where you are — and full
+detail is downloaded only along the route you are actually travelling, plus
+15 km around wherever you happen to be. You never need a country in detail,
+only the thread you are moving along.
+
+Bulk downloads **refuse to start without wifi**, and stop if it goes away
+mid-job: a country is tens of megabytes and the cellular link belongs to the
+tracker's own reporting. A single tile needed right now goes over anything,
+because one tile is 4 KB and the alternative is a blank screen.
+
+### Countries
+
+The country comes from your position, asked once and again only when a fix
+falls outside the bounds the last answer gave. Tiles live under
+`/sdcard/maps/<country>/`, so crossing a border fetches a new map and crossing
+back finds the old one already there. With no network, whatever is on the card
+is what gets drawn.
+
+### Destination
+
+```bash
+adb push destination.txt /sdcard/Documents/
+```
+
+```
+Home:51.4667000,4.5000000
+Work:51.4667000,4.5000000
+```
+
+Same shape as `contacts.txt`, for the same reason: nothing can be typed on this
+device. A bare `lat,lon` line works and names itself after its coordinates.
+
+With no destination it is simply a map with a dot on it, which is the common
+case and gets no ceremony.
+
+### Turns, spoken
+
+`com.svox.pico` ships on the watch, so nothing needs installing. Instructions
+go out on `STREAM_MUSIC`, which means they follow the headphones when those are
+connected and fall back to the case speaker when they are not — the same
+routing the player uses.
+
+Each turn is announced twice: once at 250 m to change lane, once at 40 m.
+Distances are rounded to what a person would say — "in two hundred metres,
+turn left", never "in one hundred and eighty-seven metres".
+
+**No street names.** At 240x240, spoken through a wrist, the direction and the
+distance are the whole of what is useful, and the name is exactly what makes
+the sentence too long to finish before the junction arrives.
+
+### Position
+
+Every 10 s, and only while the map is open — continuous GNSS is a few hours of
+battery against days on the tracker's own ten-minute cycle.
+
+The map is drawn **north-up**. There is no magnetometer on this watch, so
+heading can only come from course over ground: it knows which way you are
+moving and cannot know which way you are facing. A map that rotated on that
+guess would point confidently wrong every time you stopped, so it does not.
