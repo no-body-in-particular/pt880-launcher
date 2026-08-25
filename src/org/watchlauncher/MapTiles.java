@@ -55,19 +55,40 @@ public class MapTiles {
     private static final int READ_MS = 15000;
 
     /** Decoded tiles held in memory. Sixteen covers a 240px screen several
-     *  times over while panning, and each is 256x256 at one byte a pixel. */
+     *  times over while panning, at 256x256 and two bytes a pixel - so about
+     *  two megabytes, which this heap can hold. */
     private static final int MEMORY_TILES = 16;
 
     private final Context ctx;
-    private final Map<String, Bitmap> memory =
+
+    /**
+     * Evicted tiles are dropped, never recycled.
+     *
+     * recycle() frees the pixels immediately, and hardware rendering does not
+     * copy them: libhwui keeps the bitmap in a texture cache keyed by the
+     * native object, and a display list built this frame can still reference
+     * one recycled a moment later. Freeing it under the renderer is a
+     * use-after-free inside libhwui - a SIGSEGV no Java handler can catch,
+     * which as the home screen reads as the map flicking back to the
+     * launcher rather than as a crash.
+     *
+     * The eviction thread and the drawing thread are not the same one, so
+     * there is no moment at which recycling here is safe. Letting the
+     * collector free them costs a little memory and nothing else: it will not
+     * free a bitmap the renderer still holds a reference to, which is exactly
+     * the guarantee recycle() throws away.
+     *
+     * Synchronised for the same reason. warm() decodes on the prefetch thread
+     * while onDraw reads on the UI thread, and an unsynchronised
+     * LinkedHashMap under concurrent access can corrupt its own chains -
+     * especially this one, which reorders itself on every get().
+     */
+    private final Map<String, Bitmap> memory = java.util.Collections.synchronizedMap(
             new LinkedHashMap<String, Bitmap>(MEMORY_TILES, 0.75f, true) {
         protected boolean removeEldestEntry(Map.Entry<String, Bitmap> e) {
-            if (size() <= MEMORY_TILES) return false;
-            Bitmap b = e.getValue();
-            if (b != null && !b.isRecycled()) b.recycle();
-            return true;
+            return size() > MEMORY_TILES;
         }
-    };
+    });
 
     private String base = null;
 
@@ -289,6 +310,22 @@ public class MapTiles {
             r.seek(off);
             byte[] png = new byte[len];
             r.readFully(png);
+
+            // Check it really is a PNG before handing it to the decoder.
+            //
+            // BitmapFactory is libskia, and skia on a 2013 build does not
+            // always fail politely on a buffer that is not an image - it can
+            // take the process down with a native crash, which no Java
+            // handler can catch and which reads as the launcher restarting
+            // rather than as a fault. A wrong offset in a block index would
+            // otherwise be pointed straight at it.
+            if (len < 8 || (png[0] & 0xFF) != 0x89 || png[1] != 'P'
+                    || png[2] != 'N' || png[3] != 'G') {
+                Log.w("watchmap", "not a png at " + country + "/" + z + "/"
+                        + x + "/" + y + " off=" + off + " len=" + len);
+                return null;
+            }
+
             BitmapFactory.Options o = new BitmapFactory.Options();
             // 565 halves the memory against 8888 and loses nothing that
             // sixteen palette entries could show.

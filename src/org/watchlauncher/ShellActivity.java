@@ -124,6 +124,21 @@ public class ShellActivity extends Activity {
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
+
+        // Before anything else: a crash on any thread kills this process, and
+        // as the home screen it is relaunched immediately, so a failure looks
+        // like the app navigating rather than dying. Record it on the card.
+        Crash.install(this);
+
+        // And say so, once, if the last run ended badly. A crash that only
+        // happens in the field is otherwise invisible: the watch relaunches
+        // so fast that the wearer sees a screen change, not a failure.
+        ui.postDelayed(new Runnable() {
+            public void run() {
+                String why = Crash.last();
+                if (why != null && Crash.freshlyCrashed()) toast(why);
+            }
+        }, 1200);
         prefs = getSharedPreferences("watchlauncher", MODE_PRIVATE);
         twoButtons = prefs.getBoolean("twoButtons", false);
         keepAwake = prefs.getBoolean("keepAwake", false);
