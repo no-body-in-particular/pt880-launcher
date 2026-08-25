@@ -221,6 +221,7 @@ public class MapTiles {
         HttpURLConnection c = null;
         InputStream in = null;
         FileOutputStream os = null;
+        boolean drained = false;
         File tmp = new File(out.getAbsolutePath() + ".part");
         try {
             File dir = out.getParentFile();
@@ -245,13 +246,14 @@ public class MapTiles {
             os.flush();
             os.close();
             os = null;
+            drained = true;                 // read to EOF: reusable
             return tmp.renameTo(out);
         } catch (Exception e) {
             return false;
         } finally {
             try { if (os != null) os.close(); } catch (Exception e) { /* ignore */ }
             try { if (in != null) in.close(); } catch (Exception e) { /* ignore */ }
-            if (c != null) c.disconnect();
+            if (c != null && !drained) c.disconnect();
             if (tmp.exists()) tmp.delete();
         }
     }
@@ -270,6 +272,24 @@ public class MapTiles {
      *
      * @return how many tiles were written, or -1 if the request failed
      */
+    /*
+     * Why these methods do not call disconnect().
+     *
+     * On Android, HttpURLConnection.disconnect() does not merely finish with
+     * the response - it closes the socket and drops it from the pool. Calling
+     * it after every block meant every block began with a fresh TLS
+     * handshake, and this device's TLS is BouncyCastle in pure Java: ECDHE
+     * plus an RSA-2048 signature check on a 2013 ARM with no crypto
+     * instructions. That is seconds of arithmetic, identical for a 1kB block
+     * and a 240kB one, which is exactly the shape the timings had - a fixed
+     * 3.9s per block with transfer speed itself perfectly healthy.
+     *
+     * Closing the stream instead hands the connection back to the pool, and
+     * the next block reuses the already-negotiated session. disconnect() is
+     * still right when the response was not read to the end, since a socket
+     * with unread bytes on it cannot be reused - so it is kept for the error
+     * paths only.
+     */
     public int fetchPack(String country, int z, int x, int y, int w, int h) {
         // The screen state rides along so the server log can measure the
         // screen-on/screen-off gap against the real workload, rather than
@@ -284,6 +304,7 @@ public class MapTiles {
                 + "&tn=" + lastNetMs + "&tw=" + lastWriteMs;
         HttpURLConnection c = null;
         java.io.DataInputStream in = null;
+        boolean drained = false;
         try {
             c = (HttpURLConnection) new URL(url).openConnection();
             if (c instanceof HttpsURLConnection) {
@@ -366,12 +387,14 @@ public class MapTiles {
             }
             lastNetMs = netMs;
             lastWriteMs = writeMs;
+            drained = true;                 // whole body read: reusable
             return written;
         } catch (Exception e) {
             return -1;
         } finally {
             try { if (in != null) in.close(); } catch (Exception e) { /* ignore */ }
-            if (c != null) c.disconnect();
+            // Only tear the socket down if the body was not read to the end.
+            if (c != null && !drained) c.disconnect();
         }
     }
 
@@ -383,6 +406,7 @@ public class MapTiles {
     /** Text from an endpoint, for the small answers. */
     public String get(String url) {
         HttpURLConnection c = null;
+        boolean drained = false;
         try {
             c = (HttpURLConnection) new URL(url).openConnection();
             if (c instanceof HttpsURLConnection) {
@@ -398,6 +422,7 @@ public class MapTiles {
             String line;
             while ((line = r.readLine()) != null) b.append(line).append('\n');
             r.close();
+            drained = true;
             return b.toString();
         } catch (Exception e) {
             lastError = e.getClass().getSimpleName().replace("Exception", "");
@@ -405,7 +430,7 @@ public class MapTiles {
                     + " " + String.valueOf(e.getMessage()));
             return null;
         } finally {
-            if (c != null) c.disconnect();
+            if (c != null && !drained) c.disconnect();
         }
     }
 
