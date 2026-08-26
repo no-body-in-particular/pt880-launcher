@@ -83,8 +83,27 @@ public class RoadGraph {
      * claim a country. Its own header says what ground it covers.
      */
     public static File fileFor(String country) {
-        return new File(MapTiles.DIR + "/roads.graph");
+        return new File(MapTiles.DIR + "/" + Travel.graphFile(mode));
     }
+
+    /**
+     * Which network is loaded: car or bicycle.
+     *
+     * Static because fileFor is, and fileFor is static because everything that
+     * asks whether a graph is on the card - the map, the menu, the downloader
+     * - asks before it has a graph object to ask through.
+     */
+    private static int mode = Travel.CAR;
+
+    public static void useMode(int m) {
+        if (m == mode) return;
+        mode = m;
+        // The open graph is the other network now, so let go of it. The next
+        // open() maps whichever file the new mode names.
+        if (shared != null) shared.close();
+    }
+
+    public static int mode() { return mode; }
 
     public static File fileFor() { return fileFor(null); }
 

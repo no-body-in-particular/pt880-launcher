@@ -78,6 +78,22 @@ public class MapMenuScreen extends ListScreen {
                     render();
                 } });
 
+        row(l, new Item("Travel by", Travel.name(Travel.mode(shell)), AppIcons.DEVICE),
+                new Runnable() { public void run() {
+                    // Two networks, not one setting: the graph on the card is
+                    // either the roads a car may drive or the ways a bicycle
+                    // may ride, and switching means loading the other file -
+                    // and downloading it, if this is the first time.
+                    int now = Travel.mode(shell) == Travel.BIKE ? Travel.CAR : Travel.BIKE;
+                    Travel.setMode(shell, now);
+                    RoadGraph.useMode(now);
+                    map.setRoute(null);
+                    shell.toast(RoadGraph.fileFor(map.country()).isFile()
+                            ? ("now routing by " + Travel.name(now))
+                            : ("now " + Travel.name(now) + " - download the graph"));
+                    render();
+                } });
+
         String live = MapDownload.progress();
         if (live != null) {
             // One row, not one per download kind: there is a single job, and

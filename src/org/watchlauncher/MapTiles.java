@@ -524,7 +524,8 @@ public class MapTiles {
         File out = RoadGraph.fileFor(country);
         if (out.isFile() && out.length() > 1024) return true;
         if (!onWifi()) return false;
-        boolean ok = download(base() + "graph.php?c=" + country, out);
+        boolean ok = download(base() + "graph.php?c=" + country
+                + Travel.param(RoadGraph.mode()), out);
         forgetSizes();
         return ok;
     }
@@ -546,6 +547,7 @@ public class MapTiles {
         File out = RoadGraph.fileFor(country);
         File tmp = new File(out.getAbsolutePath() + ".new");
         String url = base() + "graph.php?c=" + country
+                + Travel.param(RoadGraph.mode())
                 + "&w=" + w + "&s=" + s + "&e=" + e + "&n=" + n;
         if (!download(url, tmp)) return false;
         if (tmp.length() < 64) { tmp.delete(); return false; }

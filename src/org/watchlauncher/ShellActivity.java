@@ -145,6 +145,11 @@ public class ShellActivity extends Activity {
         // The stock in-call screen cannot be dismissed on a watch with no
         // touchscreen, and it covers this one the moment a call is placed.
         claimCallUi();
+
+        // Car or bicycle, as it was left. RoadGraph decides which file to map
+        // from this, and it is a static because everything that asks whether a
+        // graph is on the card asks before it has a graph to ask through.
+        RoadGraph.useMode(Travel.mode(this));
         keepAwake = prefs.getBoolean("keepAwake", false);
 
         audio = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
