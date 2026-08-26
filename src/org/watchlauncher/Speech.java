@@ -142,11 +142,64 @@ public class Speech {
         if (phrase.equals(last) && now - lastAt < REPEAT_MS) return;
         last = phrase;
         lastAt = now;
+        utter(phrase);
+    }
+
+    /**
+     * Put a phrase out, having made the path ready to carry it.
+     *
+     * Three things have to be true for a turn instruction to be heard on the
+     * watch's own speaker, and only the first was being done.
+     *
+     * <h3>The stream</h3>
+     *
+     * STREAM_MUSIC, which A2DP carries, so the instruction follows the
+     * headphones when they are connected and falls back to the case speaker
+     * when they are not.
+     *
+     * <h3>The volume</h3>
+     *
+     * That stream can be sitting at zero. On this watch the media volume is
+     * whatever the music player was last left at, and a watch that has only
+     * ever been used with headphones is quite likely to have been turned down
+     * to nothing - at which point the engine speaks perfectly and nobody hears
+     * it. KEY_PARAM_VOLUME is a scale of the stream volume, so 1.0 of zero is
+     * still zero. Nudged up to a third of the range, once, and only when it is
+     * actually silent.
+     *
+     * <h3>The amplifier</h3>
+     *
+     * A small speaker's amplifier is powered down when nothing is playing and
+     * takes a moment to come up. A two second instruction that starts the
+     * moment the track opens loses its first word, and a short one - "turn
+     * left" - can be over before there is anything to hear. A little silence
+     * queued ahead of the words gives it that moment, and costs nothing when
+     * the path is already open, which is the case over Bluetooth.
+     */
+    private void utter(String phrase) {
         try {
+            if (audio != null) {
+                int vol = audio.getStreamVolume(AudioManager.STREAM_MUSIC);
+                int max = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
+                if (vol == 0 && max > 0) {
+                    audio.setStreamVolume(AudioManager.STREAM_MUSIC, max / 3, 0);
+                    Log.i(TAG, "media volume was 0; raised to " + (max / 3) + "/" + max);
+                }
+                // Ducks the music player rather than talking over it, and on
+                // this hardware asking for the path is also what opens it.
+                audio.requestAudioFocus(null, AudioManager.STREAM_MUSIC,
+                        AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK);
+            }
+
             HashMap<String, String> params = new HashMap<String, String>();
             params.put(TextToSpeech.Engine.KEY_PARAM_STREAM,
                     String.valueOf(AudioManager.STREAM_MUSIC));
             params.put(TextToSpeech.Engine.KEY_PARAM_VOLUME, "1.0");
+
+            // Queued on the same stream and immediately before the words, so
+            // the amplifier is already up by the time they start.
+            tts.playSilence(WARMUP_MS, TextToSpeech.QUEUE_ADD, params);
+
             Log.i(TAG, "say: " + phrase);
             // ADD, not FLUSH: two instructions rarely fall together, and when
             // they do, cutting the first one off mid-word is worse than
@@ -157,6 +210,10 @@ public class Speech {
         }
     }
 
+    /** Long enough for a small amplifier to come up, short enough not to be a
+     *  pause anyone notices before an instruction. */
+    private static final long WARMUP_MS = 350;
+
     /** Say it even if it was just said - for a test, where silence is the
      *  thing being investigated. */
     public void sayAgain(String phrase) {
@@ -166,6 +223,9 @@ public class Speech {
 
     public void stop() {
         if (tts == null) return;
+        // Hand the audio path back, or the music player stays ducked for as
+        // long as the process lives.
+        try { if (audio != null) audio.abandonAudioFocus(null); } catch (Exception e) { /* ignore */ }
         try { tts.stop(); tts.shutdown(); } catch (Exception e) { /* ignore */ }
         tts = null;
         ready = false;
