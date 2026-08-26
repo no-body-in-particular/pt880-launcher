@@ -1,5 +1,6 @@
 package org.watchlauncher;
 
+import android.util.Log;
 import android.content.Context;
 
 import java.io.IOException;
@@ -266,6 +267,40 @@ public class Tls12SocketFactory extends SSLSocketFactory {
                 // platform sets SNI itself from the socket's own hostname, and
                 // this is the path that does not need BouncyCastle anyway.
             }
+        }
+
+        // Whatever else happens, leave the socket with protocols it can use.
+        //
+        // Setting SNI means reading the parameters out and putting them back,
+        // and that round trip can leave the enabled protocol set empty -
+        // BouncyCastle then refuses the socket outright with "No usable
+        // protocols enabled", which is an IllegalStateException, which is not
+        // an IOException, so it escapes as a fault nobody was expecting.
+        // Reproduced on an API 19 emulator; it is the IllegalState the map
+        // was reporting.
+        //
+        // Asking for everything the socket says it supports cannot weaken
+        // anything: the server still picks, and offering more cannot make it
+        // choose worse.
+        try {
+            String[] supported = ssl.getSupportedProtocols();
+            java.util.List<String> use = new java.util.ArrayList<String>();
+            for (int i = 0; i < supported.length; i++) {
+                // Everything but 1.3. This server is hiawatha on mbedTLS and
+                // answers a ClientHello offering 1.3 with handshake_failure,
+                // after which okhttp falls back to a spec BouncyCastle has no
+                // protocol for at all and the whole thing fails as
+                // "No usable protocols enabled". Offering only what the other
+                // end can actually do is the fix; 1.3 buys nothing here.
+                if (supported[i].startsWith("TLS") && !supported[i].equals("TLSv1.3")) {
+                    use.add(supported[i]);
+                }
+            }
+            if (!use.isEmpty()) {
+                ssl.setEnabledProtocols(use.toArray(new String[use.size()]));
+            }
+        } catch (Throwable t) {
+            Log.w("watchmap", "could not set protocols: " + t);
         }
 
         if (isBc) return s;          // nothing else to widen; it offers it all

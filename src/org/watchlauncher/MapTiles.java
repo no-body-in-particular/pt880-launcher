@@ -665,8 +665,11 @@ public class MapTiles {
             return b.toString();
         } catch (Exception e) {
             lastError = e.getClass().getSimpleName().replace("Exception", "");
+            // With the stack. There is no debugger on a watch, and knowing
+            // which layer threw is the difference between fixing a fault and
+            // retrying around it.
             Log.w("watchmap", "GET " + url + " -> " + e.getClass().getSimpleName()
-                    + " " + String.valueOf(e.getMessage()));
+                    + " " + String.valueOf(e.getMessage()), e);
             return null;
         } finally {
             if (c != null && !drained) c.disconnect();
