@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="org.watchlauncher"
-    android:versionCode="54"
-    android:versionName="7.0">
+    android:versionCode="55"
+    android:versionName="7.1">
 
     <uses-sdk android:minSdkVersion="19" android:targetSdkVersion="19" />
 
@@ -112,9 +112,20 @@
              memory costs one epoch rather than the night. -->
         <service android:name=".SleepService" android:exported="false" />
 
+        <!--
+            Sleep tracking is an alarm chain, and Android cancels every
+            pending alarm a package owns when that package is replaced. So an
+            update stops the watch recording until the launcher happens to be
+            started again. MY_PACKAGE_REPLACED re-arms it the moment the
+            update lands, which over a night of installing test builds is the
+            difference between a night of data and a night of holes.
+        -->
         <receiver android:name=".BootReceiver" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
 

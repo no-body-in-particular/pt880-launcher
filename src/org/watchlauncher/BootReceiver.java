@@ -18,9 +18,19 @@ public class BootReceiver extends BroadcastReceiver {
     @Override
     public void onReceive(Context c, Intent in) {
         if (!SleepLog.enabled(c)) return;
-        // Watching cadence, not logging: whatever state it was in before the
-        // reboot, the wrist has certainly moved since.
-        SleepLog.setState(c, SleepLog.WATCHING);
-        SleepService.schedule(c, 15000);
+
+        boolean rebooted = in == null || in.getAction() == null
+                || Intent.ACTION_BOOT_COMPLETED.equals(in.getAction());
+
+        if (rebooted) {
+            // Watching cadence, not logging: whatever state it was in before
+            // the reboot, the wrist has certainly moved since.
+            SleepLog.setState(c, SleepLog.WATCHING);
+        }
+        // An update, though, is not a reason to decide someone woke up - the
+        // watch is on a wrist that has not moved just because a new build
+        // landed on it. Only the alarm needs re-arming, and it needs it
+        // urgently: replacing a package cancels every alarm it owned.
+        SleepService.schedule(c, rebooted ? 15000 : 5000);
     }
 }

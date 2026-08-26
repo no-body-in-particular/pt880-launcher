@@ -162,6 +162,18 @@ public class SleepService extends Service implements SensorEventListener {
         if (sampling) return START_NOT_STICKY;      // a burst is already running
         sampling = true;
 
+        // Arm the next burst before taking this one, not after.
+        //
+        // The chain used to be re-armed only once sampling finished, so
+        // anything that ended the process in between - a crash, the low
+        // memory killer, an install - broke it silently and the watch simply
+        // stopped recording until the launcher next started. Arming first
+        // means the worst case is one missed burst rather than every burst
+        // from then on. The interval is replaced at the end with whatever
+        // this burst decides, since setExact on the same PendingIntent
+        // supersedes it.
+        if (SleepLog.enabled(this)) schedule(this, WATCH_INTERVAL_MS);
+
         sensors = (SensorManager) getSystemService(Context.SENSOR_SERVICE);
         accel = (sensors == null) ? null
                 : sensors.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
