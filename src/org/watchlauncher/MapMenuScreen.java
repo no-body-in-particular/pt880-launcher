@@ -55,8 +55,20 @@ public class MapMenuScreen extends ListScreen {
         actions.clear();
 
         Destination d = map.target();
-        row(l, new Item("Route to", d == null ? "no destination" : d.name, AppIcons.CALL),
-                new Runnable() { public void run() { routeTo(); } });
+        int many = Destination.load().size();
+        row(l, new Item("Route to",
+                        d == null ? "no destination"
+                                  : (many > 1 ? (d.name + "  (" + many + ")") : d.name),
+                        AppIcons.CALL),
+                new Runnable() { public void run() {
+                    // More than one place in the file means a choice to make;
+                    // one means the choice was already made.
+                    if (Destination.load().size() > 1) {
+                        shell.push(new DestinationScreen(map));
+                    } else {
+                        routeTo();
+                    }
+                } });
 
         row(l, new Item("Reload destination", null, AppIcons.GEAR),
                 new Runnable() { public void run() {

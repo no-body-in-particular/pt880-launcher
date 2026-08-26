@@ -826,6 +826,55 @@ public class MapScreen extends Screen implements LocationListener {
 
     MapTiles tiles() { return tiles; }
     Destination target() { return target; }
+
+    /** Chosen from the destination list rather than being whichever line
+     *  happened to be first in the file. */
+    void setTarget(Destination d) {
+        target = d;
+        // A route to somewhere else is not a route to here.
+        route = null;
+        arrived = false;
+        note = "";
+        changed();
+    }
+
+    /**
+     * Route to the current target, on device if the roads are on the card and
+     * from the server otherwise. Safe to call from another screen.
+     */
+    void routeToTarget() {
+        final Destination d = target;
+        if (d == null || !hasFix()) return;
+        if (rerouting) return;
+        rerouting = true;
+        note = "routing";
+        final double la = lat, lo = lon;
+        new Thread(new Runnable() {
+            public void run() {
+                Route found = routeHere(la, lo, d.lat, d.lon);
+                if (found == null && tiles.online()) {
+                    File out = new File(MapTiles.DIR + "/route.bin");
+                    if (out.getParentFile() != null) out.getParentFile().mkdirs();
+                    String url = tiles.base() + "route.php"
+                            + "?flat=" + la + "&flon=" + lo
+                            + "&tlat=" + d.lat + "&tlon=" + d.lon;
+                    if (tiles.download(url, out)) found = Route.read(out);
+                }
+                final Route r = found;
+                ui.post(new Runnable() {
+                    public void run() {
+                        rerouting = false;
+                        if (r == null) { note = "no route"; changed(); return; }
+                        setRoute(r);
+                        note = "";
+                        int km = r.totalMetres / 1000;
+                        speech.say("route found, " + km + " kilometres");
+                        changed();
+                    }
+                });
+            }
+        }).start();
+    }
     String country() { return country; }
     double lat() { return lat; }
     double lon() { return lon; }
