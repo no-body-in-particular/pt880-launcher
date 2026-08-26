@@ -55,7 +55,7 @@ public class MapMenuScreen extends ListScreen {
         actions.clear();
 
         Destination d = map.target();
-        int many = Destination.load().size();
+        int many = map.destinations().size();
         row(l, new Item("Route to",
                         d == null ? "no destination"
                                   : (many > 1 ? (d.name + "  (" + many + ")") : d.name),
@@ -63,7 +63,7 @@ public class MapMenuScreen extends ListScreen {
                 new Runnable() { public void run() {
                     // More than one place in the file means a choice to make;
                     // one means the choice was already made.
-                    if (Destination.load().size() > 1) {
+                    if (map.destinations().size() > 1) {
                         shell.push(new DestinationScreen(map));
                     } else {
                         routeTo();

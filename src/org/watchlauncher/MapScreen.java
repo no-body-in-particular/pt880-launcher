@@ -173,10 +173,35 @@ public class MapScreen extends Screen implements LocationListener {
         if (view != null) view.invalidate();
     }
 
+    /**
+     * The places from destination.txt, read once and kept.
+     *
+     * The menu used to call Destination.load() while building its rows, which
+     * opens and parses the whole file - and the menu redraws once a second
+     * while a download runs. That is a file read per second on the drawing
+     * thread for a file that changes only when someone pushes a new one, and
+     * with a long list it is enough to make the watch stutter.
+     */
+    private List<Destination> destinations = new java.util.ArrayList<Destination>();
+
     private void loadDestination() {
         List<Destination> all = Destination.load();
+        destinations = all;
+        // Keep the chosen one if it is still in the file, so reloading does
+        // not silently send you somewhere else.
+        if (target != null) {
+            for (int i = 0; i < all.size(); i++) {
+                if (all.get(i).name.equals(target.name)) {
+                    target = all.get(i);
+                    return;
+                }
+            }
+        }
         target = all.isEmpty() ? null : all.get(0);
     }
+
+    /** The list as last read. Reloaded by Reload destination, not by drawing. */
+    List<Destination> destinations() { return destinations; }
 
     private void loadRoute() {
         File f = new File(MapTiles.DIR + "/route.bin");

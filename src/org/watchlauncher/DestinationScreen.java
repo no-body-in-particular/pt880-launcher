@@ -28,7 +28,9 @@ public class DestinationScreen extends ListScreen {
 
     @Override
     protected List<Item> items() {
-        all = Destination.load();
+        // The list the map already has; pushing a new file and choosing
+        // Reload destination is what refreshes it.
+        all = map.destinations();
         List<Item> l = list();
 
         if (all.isEmpty()) {
