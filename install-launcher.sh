@@ -6,7 +6,8 @@
 #     (no flags)   install the APK and nothing else
 #     --root       also install the setuid helper the Terminal needs
 #     --home       also make it the watch's home screen
-#     --all        both of the above
+#     --call       also take the in-call screen off the stock dialler
+#     --all        all three
 #
 # Root and home are opt-in on purpose. One installs a binary that hands root to
 # anything on the device that can exec it, and the other changes what the watch
@@ -22,18 +23,20 @@ SERIAL="${SERIAL:-}"
 adbq() { $ADB "$@" </dev/null; }
 
 BASE="${BASE:-https://coredump.ws/pt880}"
-APK_SHA256="75212288c270361d29e4267342a376fd656549cfb8df6c9a2e283e17a88fe802"
+APK_SHA256="4029914aa00b608d04011c7ce80e02b580cd722dced7172685a61061f47ee8d1"
 
 say() { printf '\n== %s\n' "$*"; }
 die() { printf '\nerror: %s\n' "$*" >&2; exit 1; }
 
 DO_ROOT=0
 DO_HOME=0
+DO_CALL=0
 for a in "$@"; do
   case "$a" in
     --root) DO_ROOT=1 ;;
     --home) DO_HOME=1 ;;
-    --all)  DO_ROOT=1; DO_HOME=1 ;;
+    --call) DO_CALL=1 ;;
+    --all)  DO_ROOT=1; DO_HOME=1; DO_CALL=1 ;;
     -h|--help)
       sed -n '2,12p' "$0" 2>/dev/null || echo "flags: --root --home --all"
       exit 0 ;;
@@ -145,6 +148,41 @@ if [ "$DO_ROOT" = "1" ]; then
   # Runs as a file rather than a pipe, so its own BASH_SOURCE logic works and
   # its adb calls are not competing with this script for stdin.
   ADB="$ADB" WSU_URL="$BASE/wsu" bash "$TMP/install-root-helper.sh"
+fi
+
+if [ "$DO_CALL" = "1" ]; then
+  say "in-call screen"
+  # The stock one cannot be dismissed on a watch with no touchscreen: it
+  # covers the launcher the moment a call is placed, and the two hardware
+  # buttons are not something it listens to, so an outgoing call cannot be
+  # cancelled at all.
+  #
+  # Only the Activity is disabled. The service that actually runs the call is
+  # a different component in the same package and is untouched - measured on
+  # API 19 with the activity disabled, a call still connects, the launcher
+  # keeps the screen, and hanging up returns the line to idle.
+  #
+  # The launcher does this for itself on first start when it has root. This
+  # flag is for a watch without the root helper, and for putting it back.
+  COMPONENT=""
+  for cand in \
+      "com.android.dialer/com.android.incallui.InCallActivity" \
+      "com.android.incallui/com.android.incallui.InCallActivity" \
+      "com.android.incallui/.InCallActivity" \
+      "com.android.phone/.InCallScreen" ; do
+    pkg="${cand%%/*}"; cls="${cand#*/}"
+    case "$cls" in .*) fq="$pkg$cls" ;; *) fq="$cls" ;; esac
+    if adbq shell "dumpsys package $pkg" 2>/dev/null | tr -d '\r' | grep -q "$fq"; then
+      COMPONENT="$cand"; break
+    fi
+  done
+  if [ -z "$COMPONENT" ]; then
+    echo "  no stock in-call screen found on this build; nothing to disable"
+  else
+    echo "  $COMPONENT"
+    adbq shell "pm disable $COMPONENT" | tr -d '\r' | sed 's/^/  /'
+    echo "  put it back with:  adb shell pm enable $COMPONENT"
+  fi
 fi
 
 if [ "$DO_HOME" = "1" ]; then

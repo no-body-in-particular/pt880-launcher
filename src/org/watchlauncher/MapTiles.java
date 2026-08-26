@@ -236,6 +236,11 @@ public class MapTiles {
      */
     private static final int MAX_TILE_BYTES = 512 * 1024;
 
+    /** The largest a whole block may claim to be. Two hundred and fifty six
+     *  tiles of a city come to about a megabyte and a half; this is room for
+     *  five of those and still a twentieth of what would exhaust the heap. */
+    private static final int MAX_BLOCK_BYTES = 8 * 1024 * 1024;
+
     /** Tiles live under b<zoom>, so a card written by the old one-file-per-tile
      *  build is simply not found - and shows up under Clean up as reclaimable
      *  rather than being deleted out from under a working map. */
@@ -596,7 +601,22 @@ public class MapTiles {
                 int tx = in.readInt();
                 int ty = in.readInt();
                 int len = in.readInt();
-                if (len < 0 || len > 1048576) return -1;
+                if (len < 0 || len > MAX_TILE_BYTES) return -1;
+                // And the block as a whole, not only each tile in it.
+                //
+                // Every tile was checked and the sum was not, so a reply of
+                // 256 slots at the per-tile limit was 256 MB held at once on
+                // a 64 MB heap. That is an OutOfMemoryError, and an Error is
+                // not an Exception, so the catch below would have let it past
+                // and taken the process with it - the same reasoning that put
+                // a limit on a single tile, applied to the total.
+                //
+                // A dense city block of this map is a megabyte and a half.
+                if (payload + len > MAX_BLOCK_BYTES) {
+                    Log.w("watchmap", "block " + z + "/" + bx + "_" + by
+                            + " claims more than " + (MAX_BLOCK_BYTES >> 20) + " MB");
+                    return -1;
+                }
                 byte[] bytes = new byte[len];
                 in.readFully(bytes);
                 // A tile outside this block would corrupt the index; the
@@ -653,7 +673,11 @@ public class MapTiles {
             lastWriteMs = writeMs;
             drained = true;                 // whole body read: reusable
             return written;
-        } catch (Exception e) {
+        } catch (Throwable e) {
+            // Throwable, not Exception. Decoding and buffering allocate, and
+            // an OutOfMemoryError here is a failed download rather than a
+            // reason for the watch to restart.
+            Log.w("watchmap", "block download failed: " + e);
             return -1;
         } finally {
             try { if (in != null) in.close(); } catch (Exception e) { /* ignore */ }

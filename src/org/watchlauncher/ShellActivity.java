@@ -141,6 +141,10 @@ public class ShellActivity extends Activity {
         }, 1200);
         prefs = getSharedPreferences("watchlauncher", MODE_PRIVATE);
         twoButtons = prefs.getBoolean("twoButtons", false);
+
+        // The stock in-call screen cannot be dismissed on a watch with no
+        // touchscreen, and it covers this one the moment a call is placed.
+        claimCallUi();
         keepAwake = prefs.getBoolean("keepAwake", false);
 
         audio = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
@@ -196,6 +200,27 @@ public class ShellActivity extends Activity {
             popToRoot();
             push(s);
         }
+    }
+
+    /**
+     * Take the in-call screen off the stock dialler, once per install.
+     *
+     * On a thread: it opens a root shell and asks the package manager two
+     * questions, neither of which the first frame should wait for. Silent when
+     * there is no root or no stock screen to take - the watch simply behaves
+     * as it did.
+     */
+    private void claimCallUi() {
+        if (CallUi.taken(this)) return;
+        new Thread(new Runnable() {
+            public void run() {
+                try {
+                    CallUi.takeOver(ShellActivity.this);
+                } catch (Throwable t) {
+                    android.util.Log.w("watchcall", "call ui: " + t);
+                }
+            }
+        }).start();
     }
 
     @Override
