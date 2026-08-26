@@ -120,6 +120,9 @@ public class Speech {
 
     public boolean ready() { return ready; }
 
+    /** Whether stop() has been called and this instance is spent. */
+    public boolean stopped() { return tts == null; }
+
     /** What the engine is doing, for the About screen and for saying so out
      *  loud when someone asks why it is quiet. */
     public String status() { return status; }

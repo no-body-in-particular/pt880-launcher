@@ -107,7 +107,6 @@ public class MapScreen extends Screen implements LocationListener {
     @Override
     protected View build() {
         tiles = new MapTiles(shell);
-        speech = new Speech(shell);
         server = new ServerFix(shell);
         locations = (LocationManager) shell.getSystemService(Context.LOCATION_SERVICE);
         view = new MapView(shell);
@@ -121,6 +120,7 @@ public class MapScreen extends Screen implements LocationListener {
 
     @Override
     public void onShow() {
+        voice();                       // start it warming; it takes a moment
         loadDestination();
         loadRoute();
         startFixes();
@@ -400,7 +400,7 @@ public class MapScreen extends Screen implements LocationListener {
         rerouting = true;
         lastReroute = now;
         note = "recalculating";
-        speech.say("recalculating");
+        voice().say("recalculating");
 
         final double la = lat, lo = lon;
         final Destination to = target;
@@ -455,7 +455,7 @@ public class MapScreen extends Screen implements LocationListener {
             if (left <= Route.ARRIVED_M) {
                 if (!arrived) {
                     arrived = true;
-                    speech.say("you have arrived");
+                    voice().say("you have arrived");
                     // The route has done its job. Keeping it drawn would leave
                     // a line to somewhere you already are.
                     route = null;
@@ -466,7 +466,7 @@ public class MapScreen extends Screen implements LocationListener {
         }
 
         String say = route.instruction(lat, lon, speedMs);
-        if (say != null) speech.say(say);
+        if (say != null) voice().say(say);
 
         if (route.offRouteMetres(lat, lon) > Route.OFF_ROUTE_M) {
             note = "off route";
@@ -930,7 +930,7 @@ public class MapScreen extends Screen implements LocationListener {
                         setRoute(r);
                         note = "";
                         int km = r.totalMetres / 1000;
-                        speech.say("route found, " + km + " kilometres");
+                        voice().say("route found, " + km + " kilometres");
                         changed();
                     }
                 });
@@ -953,16 +953,33 @@ public class MapScreen extends Screen implements LocationListener {
         view.invalidate();
     }
 
-    void speak(String s) { speech.say(s); }
+    /**
+     * The engine, started if it is not running.
+     *
+     * onHide shuts it down, and onHide is called whenever this screen is
+     * merely covered - by the map menu, which is the only way to choose a
+     * destination and start navigating. So the engine was being shut down on
+     * the way to asking for a route and never started again, and the voice
+     * was dead for the whole of every drive. It is rebuilt here rather than
+     * kept alive because the reason for shutting it down is real: it holds an
+     * audio path open that the music player should have when navigation is
+     * not running.
+     */
+    private Speech voice() {
+        if (speech == null || speech.stopped()) speech = new Speech(shell);
+        return speech;
+    }
 
-    String voiceStatus() { return speech == null ? "no voice" : speech.status(); }
+    void speak(String s) { voice().say(s); }
 
-    boolean voiceReady() { return speech != null && speech.ready(); }
+    String voiceStatus() { return voice().status(); }
+
+    boolean voiceReady() { return voice().ready(); }
 
     /** Say something on demand, bypassing the repeat guard: when the
      *  complaint is silence, hearing it twice is the point. */
     void testVoice() {
-        if (speech != null) speech.sayAgain("in three hundred metres, turn left");
+        voice().sayAgain("in three hundred metres, turn left");
     }
 
     String why() { return why; }
