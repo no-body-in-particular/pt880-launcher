@@ -209,6 +209,23 @@ if javac -nowarn -d "$TD4" "$HERE/src/org/watchlauncher/Route.java" \
 fi
 rm -rf "$TD4"
 
+# When a turn is announced, at the speeds this watch is used at. Route needs a
+# stub RoadGraph to compile off the device; see test/stub.
+TD5=$(mktemp -d)
+if javac -nowarn -d "$TD5" "$HERE/src/org/watchlauncher/Route.java" \
+        "$HERE/src/org/watchlauncher/Geo.java" \
+        "$HERE/test/stub/org/watchlauncher/RoadGraph.java" 2>/dev/null \
+   && javac -nowarn -cp "$TD5" -d "$TD5" "$HERE/test/TurnTimingTest.java" 2>/dev/null; then
+    if ! java -cp "$TD5" TurnTimingTest > "$TD5/out"; then
+        echo "turn timing test FAILED:" >&2
+        cat "$TD5/out" >&2
+        rm -rf "$TD5"
+        exit 1
+    fi
+    tail -1 "$TD5/out"
+fi
+rm -rf "$TD5"
+
 echo "built: $APK"
 ls -l "$APK"
 echo

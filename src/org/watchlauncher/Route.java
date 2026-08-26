@@ -34,18 +34,25 @@ public class Route {
             SHARP_LEFT = 4, SLIGHT_RIGHT = 5, RIGHT = 6, SHARP_RIGHT = 7,
             UTURN = 8, ROUNDABOUT = 9, ARRIVE = 10;
 
-    /** Announced at this range, then again when it is imminent. */
+
     /**
-     * How far ahead each notice is given, in metres, furthest first.
+     * How far ahead each notice is given, in seconds.
      *
-     * One warning is not enough at road speed. The watch takes a fix every
-     * ten seconds, which at 100 km/h is 278 metres of ground - so a single
-     * window at 250 metres can be stepped straight over, leaving nothing but
-     * the one spoken at the junction itself, about a second and a half of
-     * notice. Several thresholds mean whichever one you happen to land inside
-     * still gets said.
+     * Distance is the wrong unit to trigger on. Five hundred metres is fifteen
+     * seconds of motorway and a minute of town, so a fixed set of distances
+     * warns far too early at one end and far too late at the other - and this
+     * watch is used at both. Time is what a driver actually has.
+     *
+     * The phrase still says the distance, because that is what the signs say
+     * and what a person can judge. Only the moment of saying it comes from the
+     * clock, and from the speed actually being driven.
      */
-    private static final int[] STAGES = {1000, 500, 200};
+    private static final int[] STAGE_SECONDS = {60, 25};
+
+    /** However fast or slow: further off than this is noise, closer than this
+     *  is not a notice but the turn itself. */
+    private static final int STAGE_MIN_M = 150;
+    private static final int STAGE_MAX_M = 1500;
 
     /** Spoken at the junction itself, without a distance. */
     private static final int NOW_M = 50;
@@ -71,7 +78,7 @@ public class Route {
         public int metres;          // length of the step that follows
         public double lat, lon;
         /** Which advance notices have been given. Bit i is set once the
-         *  notice for STAGES[i] has been spoken for this turn. */
+         *  notice for STAGE_SECONDS[i] has been spoken for this turn. */
         int spoken;
         boolean announced;
     }
@@ -287,16 +294,49 @@ public class Route {
         // Furthest first, and the first one that is both due and unsaid wins.
         // Crossing several between fixes therefore speaks only the nearest,
         // rather than three notices in a row at one junction.
-        for (int i = 0; i < STAGES.length; i++) {
+        for (int i = 0; i < STAGE_SECONDS.length; i++) {
             int bit = 1 << i;
             if ((next.spoken & bit) != 0) continue;
-            if (best > STAGES[i]) continue;
+            if (best > triggerAt(STAGE_SECONDS[i], ms)) continue;
             // Everything further out is now moot whether or not it was said.
             for (int j = 0; j <= i; j++) next.spoken |= (1 << j);
             if (best / ms > MAX_LOOKAHEAD_S) return null;
             return phrase(next.kind, (int) best, signFor(next));
         }
         return null;
+    }
+
+    /** The distance that many seconds of driving works out at, kept inside
+     *  what is worth saying at all. */
+    static int triggerAt(int seconds, float ms) {
+        int d = (int) (seconds * ms);
+        if (d < STAGE_MIN_M) return STAGE_MIN_M;
+        if (d > STAGE_MAX_M) return STAGE_MAX_M;
+        return d;
+    }
+
+    /**
+     * The turn to speak next - for a caller that can say it at the right
+     * moment rather than at the next fix.
+     *
+     * instruction() can only speak when it is called, and it is called when a
+     * fix arrives, which on this watch is every ten seconds. At fifty
+     * kilometres an hour that is a hundred and forty metres of road, so "turn
+     * left" meant to be said at the junction was in fact said up to ten
+     * seconds after it. No arithmetic fixes that: the caller has to work out
+     * when the moment will be and wait for it.
+     */
+    public Turn imminent(double lat, double lon) {
+        Turn t = drawableTurn(lat, lon);
+        if (t == null || t.kind == ARRIVE) return null;
+        return t;
+    }
+
+    /** Mark a turn as said, so nothing says it twice. */
+    public void markSaid(Turn t) {
+        if (t == null) return;
+        t.announced = true;
+        t.spoken = -1;
     }
 
     /** The nearest upcoming turn, for the screen. */

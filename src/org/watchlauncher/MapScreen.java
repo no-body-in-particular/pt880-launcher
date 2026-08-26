@@ -181,6 +181,8 @@ public class MapScreen extends Screen implements LocationListener {
 
     @Override
     public void onHide() {
+        ui.removeCallbacks(saySoon);
+        soon = null;
         stopFixes();
         // The engine is shut down rather than kept warm: it holds an audio
         // focus path open, and the music player is the thing that should have
@@ -301,6 +303,11 @@ public class MapScreen extends Screen implements LocationListener {
          * for it. When it succeeds the framework calls onProviderEnabled and
          * the subscription is redone there.
          */
+        // Whatever else happens, hand the receiver the time and a rough
+        // position: a cold start with neither is a minute or two of searching
+        // the sky, and this watch has both already.
+        Gps.assist(locations);
+
         if (Gps.off(locations)) {
             new Thread(new Runnable() {
                 public void run() {
@@ -442,7 +449,7 @@ public class MapScreen extends Screen implements LocationListener {
     public void onProviderEnabled(String p) {
         Log.i("watchmap", "provider up: " + p);
         stopFixes();
-        startFixes();
+        startFixes();          // which injects the assistance data again
     }
 
     public void onProviderDisabled(String p) {
@@ -647,6 +654,8 @@ public class MapScreen extends Screen implements LocationListener {
 
         String say = route.instruction(lat, lon, speedMs);
         if (say != null) voice().say(say);
+
+        scheduleImminent();
 
         if (route.offRouteMetres(lat, lon) > Route.OFF_ROUTE_M) {
             note = OFF_ROUTE;
@@ -1268,6 +1277,8 @@ public class MapScreen extends Screen implements LocationListener {
     private static final double EXIT_NAME_M = 80;
 
     void setRoute(Route r) {
+        ui.removeCallbacks(saySoon);
+        soon = null;
         route = r;
         if (r != null) r.signs(signs);
         arrived = false;
@@ -1522,6 +1533,68 @@ public class MapScreen extends Screen implements LocationListener {
             }
         }).start();
     }
+
+    /**
+     * Say the turn at the turn, not at the next fix.
+     *
+     * A fix arrives every ten seconds. The instruction meant for the junction
+     * itself was spoken only when a fix happened to land near it, which at
+     * fifty kilometres an hour is anywhere in a hundred and forty metre
+     * window - so it was reliably late, by up to ten seconds, which is exactly
+     * as much use as not saying it.
+     *
+     * The watch knows where it is and how fast it is going, so it can work out
+     * when it will be at the junction and wait for that moment. Recomputed on
+     * every fix, so a slowdown, a stop or a wrong reading is corrected by the
+     * next one rather than being locked in.
+     *
+     * Speed comes from the drive rather than the plan, which is the whole
+     * reason Drive exists - and falls back to the planned average only when
+     * there is not yet enough driving to measure.
+     */
+    private void scheduleImminent() {
+        ui.removeCallbacks(saySoon);
+        soon = null;
+        if (route == null || Double.isNaN(lat) || approximate) return;
+
+        Route.Turn t = route.imminent(lat, lon);
+        if (t == null) return;
+
+        float v = drive.speedMs();
+        if (v < 1f) v = route.plannedMs();
+        if (v < 1f) return;                       // nothing to predict with
+
+        double away = Route.metresBetween(lat, lon, t.lat, t.lon) / v;
+        if (away > IMMINENT_WINDOW_S) return;     // too far off to time yet
+
+        // Ahead of the junction by a couple of seconds, so the words are
+        // finished before the turn rather than started at it. Never negative:
+        // a turn already behind the last fix is said at once or not at all.
+        long delay = (long) Math.max(0, (away - IMMINENT_LEAD_S) * 1000);
+        soon = t;
+        ui.postDelayed(saySoon, delay);
+    }
+
+    private Route.Turn soon = null;
+
+    private final Runnable saySoon = new Runnable() {
+        public void run() {
+            Route.Turn t = soon;
+            soon = null;
+            if (route == null || t == null || t.announced) return;
+            String what = Route.action(t.kind);
+            if (what == null) return;
+            route.markSaid(t);
+            voice().say(what);
+        }
+    };
+
+    /** Only worth timing once the junction is this close; further off and the
+     *  next fix will do a better job of it. */
+    private static final double IMMINENT_WINDOW_S = 25;
+
+    /** Said this far ahead of the junction, so it finishes before the turn. */
+    private static final double IMMINENT_LEAD_S = 3;
 
     /**
      * Ask less often, up to a point.
