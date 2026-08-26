@@ -229,17 +229,50 @@ public class Route {
     /**
      * The next turn as a line for the map: "in 300 m turn left".
      *
-     * @return null when there is no turn left to make
+     * Never blank while a route is loaded. Once the last manoeuvre has been
+     * spoken there is no next turn, and the line used to disappear for the
+     * rest of the drive - which is exactly when you most want to see that the
+     * watch is still navigating. So it falls back to the destination.
+     *
+     * @return null only when there is nothing left to say at all
      */
     public String screenInstruction(double lat, double lon) {
-        Turn t = nextTurn(lat, lon);
-        if (t == null) return null;
-        String what = action(t.kind);
-        if (what == null) return null;
-        int m = metresTo(lat, lon, t);
-        if (t.kind == ARRIVE) return what;
-        if (m <= 20) return what;              // at it now, no distance
-        return "in " + screenDistance(m) + " " + what;
+        Turn t = drawableTurn(lat, lon);
+        if (t != null) {
+            String what = action(t.kind);
+            int m = metresTo(lat, lon, t);
+            if (t.kind == ARRIVE) return what;
+            if (m <= 20) return what;              // at it now, no distance
+            return "in " + screenDistance(m) + " " + what;
+        }
+
+        double[] end = destination();
+        if (end == null) return null;
+        int m = (int) Math.round(metresBetween(lat, lon, end[0], end[1]));
+        if (m <= ARRIVED_M) return "you have arrived";
+        return "destination in " + screenDistance(m);
+    }
+
+    /**
+     * The nearest turn still worth drawing.
+     *
+     * Unlike nextTurn this skips manoeuvres that have no phrase - the depart
+     * marker at the head of every route - rather than returning one and
+     * leaving the caller with nothing to print. It reads the announced flag
+     * but never sets it: what the screen shows must not consume the voice's
+     * record of what it has already said.
+     */
+    private Turn drawableTurn(double lat, double lon) {
+        Turn best = null;
+        double bestD = Double.MAX_VALUE;
+        for (int i = 0; i < turns.size(); i++) {
+            Turn t = turns.get(i);
+            if (t.announced) continue;
+            if (action(t.kind) == null) continue;
+            double d = metresBetween(lat, lon, t.lat, t.lon);
+            if (d < bestD) { bestD = d; best = t; }
+        }
+        return best;
     }
 
     private static String phrase(int kind, int metres) {

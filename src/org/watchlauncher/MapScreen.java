@@ -280,6 +280,64 @@ public class MapScreen extends Screen implements LocationListener {
         changed();
     }
 
+    private int offRouteFixes = 0;
+    private boolean rerouting = false;
+    private long lastReroute = 0;
+
+    /**
+     * Ask for a new route from where we actually are.
+     *
+     * Missing a turn is the one moment navigation has to do something rather
+     * than repeat an instruction for a junction that is now behind you.
+     *
+     * Rate limited to once every half minute. Being off route is a state, not
+     * an event: without a limit, a road running parallel to the route - a
+     * service road, the other carriageway - would ask the server for a fresh
+     * route every ten seconds for as long as you drove along it.
+     */
+    private void reroute() {
+        if (rerouting) return;
+        if (target == null || !tiles.online()) return;
+        long now = System.currentTimeMillis();
+        if (now - lastReroute < 30000) return;
+
+        rerouting = true;
+        lastReroute = now;
+        note = "recalculating";
+        speech.say("recalculating");
+
+        final double la = lat, lo = lon;
+        final Destination to = target;
+        new Thread(new Runnable() {
+            public void run() {
+                File out = new File(MapTiles.DIR + "/route.bin");
+                if (out.getParentFile() != null) out.getParentFile().mkdirs();
+                String url = tiles.base() + "route.php"
+                        + "?flat=" + la + "&flon=" + lo
+                        + "&tlat=" + to.lat + "&tlon=" + to.lon;
+                boolean ok = tiles.download(url, out);
+                final Route r = ok ? Route.read(out) : null;
+                ui.post(new Runnable() {
+                    public void run() {
+                        rerouting = false;
+                        offRouteFixes = 0;
+                        if (r == null) {
+                            // Keep the old one. A stale route still shows
+                            // where the road went, which is more use than a
+                            // blank screen with no line on it at all.
+                            note = "no new route";
+                            changed();
+                            return;
+                        }
+                        setRoute(r);
+                        note = "";
+                        changed();
+                    }
+                });
+            }
+        }).start();
+    }
+
     /** Speak the next turn, notice arrival, notice leaving the route. */
     private void follow() {
         if (route == null) return;
@@ -309,7 +367,14 @@ public class MapScreen extends Screen implements LocationListener {
 
         if (route.offRouteMetres(lat, lon) > Route.OFF_ROUTE_M) {
             note = "off route";
+            offRouteFixes++;
+            // Two fixes, not one. A single bad position - and this watch
+            // takes plenty, seeded from the tracker or bounced off a
+            // building - would otherwise throw away a good route and ask the
+            // server for another one at eighty metres of noise.
+            if (offRouteFixes >= 2) reroute();
         } else {
+            offRouteFixes = 0;
             note = "";
         }
     }
