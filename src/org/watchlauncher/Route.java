@@ -76,6 +76,79 @@ public class Route {
     public final List<double[]> line = new ArrayList<double[]>();
     public int totalMetres;
 
+    /**
+     * Build a route from a path through the on-device graph.
+     *
+     * The graph holds junctions, not the bends between them, so the line is
+     * junction to junction. That is coarser than the server's geometry but it
+     * is the same road, and at five metres a pixel the difference only shows
+     * on a long sweeping curve.
+     *
+     * A turn is only emitted where roads actually meet - degree three or more.
+     * Without that test every bend in a lane becomes an instruction, and the
+     * watch spends the drive announcing corners nobody would call a turn.
+     */
+    static Route fromNodes(RoadGraph g, int[] path) {
+        if (g == null || path == null || path.length < 2) return null;
+
+        Route r = new Route();
+        double total = 0;
+        for (int i = 0; i < path.length; i++) {
+            r.line.add(new double[] { g.lat(path[i]), g.lon(path[i]) });
+            if (i > 0) total += g.metres(path[i - 1], path[i]);
+        }
+        r.totalMetres = (int) Math.round(total);
+
+        Turn depart = new Turn();
+        depart.kind = DEPART;
+        depart.lat = g.lat(path[0]);
+        depart.lon = g.lon(path[0]);
+        r.turns.add(depart);
+
+        for (int i = 1; i < path.length - 1; i++) {
+            if (g.degree(path[i]) < 3) continue;          // a bend, not a fork
+
+            double in = bearing(g.lat(path[i - 1]), g.lon(path[i - 1]),
+                                g.lat(path[i]), g.lon(path[i]));
+            double out = bearing(g.lat(path[i]), g.lon(path[i]),
+                                 g.lat(path[i + 1]), g.lon(path[i + 1]));
+            double d = out - in;
+            while (d > 180) d -= 360;
+            while (d < -180) d += 360;
+
+            int kind = kindOf(d);
+            if (kind == STRAIGHT) continue;
+
+            Turn t = new Turn();
+            t.kind = kind;
+            t.lat = g.lat(path[i]);
+            t.lon = g.lon(path[i]);
+            t.metres = (int) Math.round(g.metres(path[i], path[i + 1]));
+            r.turns.add(t);
+        }
+
+        Turn arrive = new Turn();
+        arrive.kind = ARRIVE;
+        arrive.lat = g.lat(path[path.length - 1]);
+        arrive.lon = g.lon(path[path.length - 1]);
+        r.turns.add(arrive);
+        return r;
+    }
+
+    /** Thresholds a driver would recognise, not evenly spaced ones: anything
+     *  under twenty degrees is following the road. */
+    private static int kindOf(double d) {
+        double a = Math.abs(d);
+        if (a < 20) return STRAIGHT;
+        if (a > 150) return UTURN;
+        if (d > 0) {
+            if (a < 50) return SLIGHT_RIGHT;
+            return a > 110 ? SHARP_RIGHT : RIGHT;
+        }
+        if (a < 50) return SLIGHT_LEFT;
+        return a > 110 ? SHARP_LEFT : LEFT;
+    }
+
     /** Parse the server's binary. Returns null if it is not a route. */
     public static Route read(File f) {
         DataInputStream in = null;

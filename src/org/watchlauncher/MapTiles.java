@@ -209,8 +209,19 @@ public class MapTiles {
      *  rather than being deleted out from under a working map. */
     static String zoomDir(int z) { return "b" + z; }
 
-    static File blockFile(String country, int z, int bx, int by) {
-        return new File(DIR + "/" + country + "/" + zoomDir(z) + "/" + bx + "_" + by + ".wtb");
+    /**
+     * Where a block lives on the card.
+     *
+     * Deliberately not under a country. Tile numbers are global - a z15 tile
+     * has the same coordinates whichever country it happens to fall in - so
+     * filing them by country stored the same picture twice under two names,
+     * lost the lot the moment a border was crossed, and made every cached
+     * tile from a previous trip useless on the next one. The country is a
+     * detail of which database the server renders from, and belongs in the
+     * request, not on the card.
+     */
+    static File blockFile(int z, int bx, int by) {
+        return new File(DIR + "/" + zoomDir(z) + "/" + bx + "_" + by + ".wtb");
     }
 
     static int blockOf(int tile) { return tile >> BLOCK_BITS; }
@@ -233,15 +244,15 @@ public class MapTiles {
     };
 
     /** @return offset/length pairs by slot, or null if there is no such block */
-    private int[] index(String country, int z, int bx, int by) {
-        String key = country + "/" + z + "/" + bx + "_" + by;
+    private int[] index(int z, int bx, int by) {
+        String key = z + "/" + bx + "_" + by;
         synchronized (indexes) {
             int[] got = indexes.get(key);
             if (got != null) return got.length == 0 ? null : got;
         }
 
         int[] table = null;
-        File f = blockFile(country, z, bx, by);
+        File f = blockFile(z, bx, by);
         if (f.isFile() && f.length() >= DATA_AT) {
             java.io.RandomAccessFile r = null;
             try {
@@ -271,34 +282,34 @@ public class MapTiles {
         return table;
     }
 
-    private void forgetIndex(String country, int z, int bx, int by) {
+    private void forgetIndex(int z, int bx, int by) {
         synchronized (indexes) {
-            indexes.remove(country + "/" + z + "/" + bx + "_" + by);
+            indexes.remove(z + "/" + bx + "_" + by);
         }
     }
 
     public boolean have(String country, int z, int x, int y) {
-        if (refreshing(country)) return false;      // drawn by an older renderer
-        int[] t = index(country, z, blockOf(x), blockOf(y));
+        if (refreshing()) return false;             // drawn by an older renderer
+        int[] t = index(z, blockOf(x), blockOf(y));
         if (t == null) return false;
         return t[slotOf(x, y) * 2 + 1] > 0;
     }
 
     /** Whether the whole block is on the card already. */
     public boolean haveBlock(String country, int z, int bx, int by) {
-        if (refreshing(country)) return false;
-        return index(country, z, bx, by) != null;
+        if (refreshing()) return false;
+        return index(z, bx, by) != null;
     }
 
     /** From memory, then the card. Never from the network: drawing happens on
      *  the UI thread and the network does not belong there. */
     public Bitmap cached(String country, int z, int x, int y) {
-        String key = country + "/" + z + "/" + x + "/" + y;
+        String key = z + "/" + x + "/" + y;
         Bitmap b = memory.get(key);
         if (b != null && !b.isRecycled()) return b;
 
         int bx = blockOf(x), by = blockOf(y);
-        int[] t = index(country, z, bx, by);
+        int[] t = index(z, bx, by);
         if (t == null) return null;
         int slot = slotOf(x, y) * 2;
         int off = t[slot], len = t[slot + 1];
@@ -306,7 +317,7 @@ public class MapTiles {
 
         java.io.RandomAccessFile r = null;
         try {
-            r = new java.io.RandomAccessFile(blockFile(country, z, bx, by), "r");
+            r = new java.io.RandomAccessFile(blockFile(z, bx, by), "r");
             r.seek(off);
             byte[] png = new byte[len];
             r.readFully(png);
@@ -321,8 +332,8 @@ public class MapTiles {
             // otherwise be pointed straight at it.
             if (len < 8 || (png[0] & 0xFF) != 0x89 || png[1] != 'P'
                     || png[2] != 'N' || png[3] != 'G') {
-                Log.w("watchmap", "not a png at " + country + "/" + z + "/"
-                        + x + "/" + y + " off=" + off + " len=" + len);
+                Log.w("watchmap", "not a png at " + z + "/" + x + "/" + y
+                        + " off=" + off + " len=" + len);
                 return null;
             }
 
@@ -419,6 +430,48 @@ public class MapTiles {
      *
      * @return how many tiles were written, or -1 if the request failed
      */
+    /**
+     * The routing graph for a country, so the watch can route with no
+     * network at all. Tens of megabytes, fetched once, wifi only.
+     *
+     * @return true if it is on the card afterwards
+     */
+    public boolean fetchGraph(String country) {
+        File out = RoadGraph.fileFor(country);
+        if (out.isFile() && out.length() > 1024) return true;
+        if (!onWifi()) return false;
+        boolean ok = download(base() + "graph.php?c=" + country, out);
+        forgetSizes();
+        return ok;
+    }
+
+    /**
+     * The routing graph for one box, rather than a whole country.
+     *
+     * A country is the wrong unit here: the Netherlands is 36MB and Germany
+     * would be nearer 300, which is neither a sensible download over a
+     * watch's wifi nor a sensible thing to search. A box around where you
+     * are is a few megabytes and answers the question you actually have.
+     *
+     * Always refetched, because the box has moved - that is the whole point
+     * of asking for a new one.
+     */
+    public boolean fetchGraphBox(String country, double w, double s,
+                                 double e, double n) {
+        if (!onWifi()) return false;
+        File out = RoadGraph.fileFor(country);
+        File tmp = new File(out.getAbsolutePath() + ".new");
+        String url = base() + "graph.php?c=" + country
+                + "&w=" + w + "&s=" + s + "&e=" + e + "&n=" + n;
+        if (!download(url, tmp)) return false;
+        if (tmp.length() < 64) { tmp.delete(); return false; }
+        // The old one is only dropped once its replacement is safely down.
+        out.delete();
+        boolean ok = tmp.renameTo(out);
+        forgetSizes();
+        return ok;
+    }
+
     /*
      * Why these methods do not call disconnect().
      *
@@ -442,7 +495,8 @@ public class MapTiles {
         // screen-on/screen-off gap against the real workload, rather than
         // against a synthetic transfer that may not behave the same way.
         // pack.php ignores it.
-        String url = base() + "pack.php?c=" + country + "&z=" + z
+        String url = base() + "pack.php?"
+                + (country == null ? "" : ("c=" + country + "&")) + "z=" + z
                 + "&x=" + x + "&y=" + y + "&w=" + w + "&h=" + h
                 + "&s=" + (screenOn() ? 1 : 0)
                 // The previous block's split, so the log says where the time
@@ -519,7 +573,7 @@ public class MapTiles {
                 at += png[slot].length;
             }
 
-            File out = blockFile(country, z, bx, by);
+            File out = blockFile(z, bx, by);
             File dir = out.getParentFile();
             if (dir != null && !dir.isDirectory() && !dir.mkdirs()) return -1;
 
@@ -546,7 +600,7 @@ public class MapTiles {
             } finally {
                 try { if (os != null) os.close(); } catch (Exception e) { }
             }
-            forgetIndex(country, z, bx, by);
+            forgetIndex(z, bx, by);
             writeMs = System.currentTimeMillis() - t0;
 
             lastNetMs = netMs;
@@ -643,52 +697,26 @@ public class MapTiles {
     }
 
     private static void scan(final String keepCountry, final int keepZoom) {
-        if (keepCountry != null && !keepCountry.equals(keptCountry)) {
-            keptCountry = keepCountry;
-            cachedAt = 0;                       // the answer was for elsewhere
-        }
-        if (keepZoom > 0) keptZoom = keepZoom;
         long now = System.currentTimeMillis();
         if (cachedBytes >= 0 && now - cachedAt < 60000) return;
         if (counting) return;
-        // Not while a download is running. The walk costs two syscalls per
-        // tile already on the card, so it gets more expensive the further a
-        // country download gets - and it spends them on the same card the
-        // downloader is writing to, which is why downloads appeared to slow
-        // down as they progressed. The figure would be stale on arrival
-        // anyway, with the tree changing underneath it.
+        // Not while a download is running. The walk costs a syscall per entry
+        // and spends it on the same card the downloader is writing to, which
+        // is why downloads appeared to slow as they progressed. The figure
+        // would be stale on arrival anyway.
         if (writing) return;
         counting = true;
         new Thread(new Runnable() {
             public void run() {
                 long total = 0, stale = 0;
                 File root = new File(DIR);
-                File[] countries = root.listFiles();
-                if (countries != null) {
-                    for (int i = 0; i < countries.length; i++) {
-                        File c = countries[i];
-                        if (!c.isDirectory()) { total += c.length(); continue; }
-                        long here = size(c);
+                File[] kids = root.listFiles();
+                if (kids != null) {
+                    for (int i = 0; i < kids.length; i++) {
+                        File f = kids[i];
+                        long here = size(f);
                         total += here;
-                        if (keepCountry != null && !c.getName().equals(keepCountry)) {
-                            stale += here;                 // a country we left
-                            continue;
-                        }
-                        if (keepZoom > 0) {
-                            File[] zooms = c.listFiles();
-                            if (zooms == null) continue;
-                            for (int j = 0; j < zooms.length; j++) {
-                                if (!zooms[j].isDirectory()) continue;
-                                if (!zooms[j].getName().equals(zoomDir(keepZoom))) {
-                                    // Anything this build does not read: the
-                                    // z13 overviews from before a country was
-                                    // measured small enough to keep at z15,
-                                    // and the one-file-per-tile trees from
-                                    // before blocks were stored whole.
-                                    stale += size(zooms[j]);
-                                }
-                            }
-                        }
+                        if (!keeps(f.getName(), keepZoom)) stale += here;
                     }
                 }
                 cachedBytes = total;
@@ -697,6 +725,22 @@ public class MapTiles {
                 counting = false;
             }
         }).start();
+    }
+
+    /**
+     * Whether something in the map directory is still in use.
+     *
+     * Everything else is from an older layout - the per-country trees from
+     * before tiles were filed by their global coordinates, and the z13
+     * overviews from before a country was measured small enough to keep whole
+     * at z15 - and is what Clean up offers to free.
+     */
+    private static boolean keeps(String name, int keepZoom) {
+        if (name.equals(zoomDir(keepZoom > 0 ? keepZoom : COUNTRY_ZOOM_FOR_STYLE))) return true;
+        if (name.equals(".style")) return true;
+        if (name.equals("roads.graph")) return true;
+        if (name.equals("route.bin")) return true;
+        return false;
     }
 
     /** Forget the cached figures, so the next read counts again. */
@@ -717,24 +761,12 @@ public class MapTiles {
     public static long cleanup(String keepCountry, int keepZoom) {
         long freed = 0;
         File root = new File(DIR);
-        File[] countries = root.listFiles();
-        if (countries == null) return 0;
+        File[] kids = root.listFiles();
+        if (kids == null) return 0;
 
-        for (int i = 0; i < countries.length; i++) {
-            File c = countries[i];
-            if (!c.isDirectory()) continue;
-            if (keepCountry != null && !c.getName().equals(keepCountry)) {
-                freed += delete(c);
-                continue;
-            }
-            File[] zooms = c.listFiles();
-            if (zooms == null) continue;
-            for (int j = 0; j < zooms.length; j++) {
-                if (!zooms[j].isDirectory()) continue;
-                if (keepZoom > 0 && !zooms[j].getName().equals(zoomDir(keepZoom))) {
-                    freed += delete(zooms[j]);
-                }
-            }
+        for (int i = 0; i < kids.length; i++) {
+            if (keeps(kids[i].getName(), keepZoom)) continue;
+            freed += delete(kids[i]);
         }
         forgetSizes();
         return freed;
@@ -763,7 +795,10 @@ public class MapTiles {
      * seam between them, and nothing would ever replace the old half, because
      * as far as the downloader is concerned those tiles are present.
      */
-    public static final int STYLE = 4;
+    public static final int STYLE = 5;
+
+    /** The only zoom stored, referenced where the style marker is checked. */
+    private static final int COUNTRY_ZOOM_FOR_STYLE = 15;
 
     /**
      * The country being re-rendered, if any.
@@ -776,26 +811,22 @@ public class MapTiles {
      * so the map stays usable the whole way through and nothing is ever
      * deleted that has not already been replaced.
      */
-    private static volatile String refreshing = null;
+    private static volatile boolean refreshing = false;
 
     /** Where the last pack's time went, reported on the next request. */
     private static volatile long lastNetMs = 0, lastWriteMs = 0;
 
-    private static File styleFile(String country) {
-        return new File(DIR + "/" + country + "/.style");
+    private static File styleFile() {
+        return new File(DIR + "/.style");
     }
 
-    static boolean refreshing(String country) {
-        String r = refreshing;
-        return r != null && r.equals(country);
-    }
+    static boolean refreshing() { return refreshing; }
 
     /** @return true if this country's tiles predate the current renderer. */
     public static boolean styleStale(String country) {
-        if (country == null) return false;
-        File dir = new File(DIR + "/" + country);
+        File dir = new File(DIR + "/" + zoomDir(COUNTRY_ZOOM_FOR_STYLE));
         if (!dir.isDirectory()) return false;          // nothing to refresh
-        File mark = styleFile(country);
+        File mark = styleFile();
         try {
             if (!mark.isFile()) return true;
             byte[] b = new byte[16];
@@ -808,18 +839,17 @@ public class MapTiles {
         }
     }
 
-    public static void beginStyleRefresh(String country) { refreshing = country; }
+    public static void beginStyleRefresh(String country) { refreshing = true; }
 
     /** Only called when the refresh actually completed; a partial one leaves
      *  the marker alone so the next download picks the rest up. */
     public static void endStyleRefresh(String country) {
-        refreshing = null;
-        if (country == null) return;
+        refreshing = false;
         try {
-            File dir = new File(DIR + "/" + country);
+            File dir = new File(DIR);
             if (dir.isDirectory() || dir.mkdirs()) {
                 java.io.FileOutputStream o =
-                        new java.io.FileOutputStream(styleFile(country));
+                        new java.io.FileOutputStream(styleFile());
                 o.write(String.valueOf(STYLE).getBytes());
                 o.close();
             }
@@ -829,7 +859,92 @@ public class MapTiles {
         forgetSizes();
     }
 
-    public static void abortStyleRefresh() { refreshing = null; }
+    public static void abortStyleRefresh() { refreshing = false; }
+
+    /**
+     * How much of the card the map may use before it starts throwing tiles
+     * away. Half a gigabyte is a lot of map - the whole Netherlands at this
+     * zoom is well under it - and a card is not only for maps.
+     */
+    public static final long CACHE_LIMIT = 500L * 1024 * 1024;
+
+    /**
+     * Drop blocks that are nowhere near where you are or where you are going.
+     *
+     * Deleting what falls outside the keep area rather than everything: the
+     * end state is the same, but nothing already on the card and still wanted
+     * has to be fetched a second time. On a watch that downloads over wifi at
+     * a hundred and fifty kilobytes a second, that distinction is half an
+     * hour.
+     *
+     * @param keep boxes of {west, south, east, north}, any of which spares a
+     *             block; an empty list is ignored rather than obeyed, because
+     *             a bug that deletes the whole map is worse than a full card
+     * @return bytes freed
+     */
+    public static long prune(java.util.List<double[]> keep) {
+        if (keep == null || keep.isEmpty()) return 0;
+
+        File dir = new File(DIR + "/" + zoomDir(COUNTRY_ZOOM_FOR_STYLE));
+        File[] blocks = dir.listFiles();
+        if (blocks == null) return 0;
+
+        long freed = 0;
+        for (int i = 0; i < blocks.length; i++) {
+            File f = blocks[i];
+            String nm = f.getName();
+            int us = nm.indexOf('_');
+            if (us <= 0 || !nm.endsWith(".wtb")) continue;
+            int bx, by;
+            try {
+                bx = Integer.parseInt(nm.substring(0, us));
+                by = Integer.parseInt(nm.substring(us + 1, nm.length() - 4));
+            } catch (Exception e) {
+                continue;
+            }
+
+            // The ground this block covers. North is the smaller y, so the
+            // latitudes come out the other way round from the tile numbers.
+            int z = COUNTRY_ZOOM_FOR_STYLE;
+            double w = Mercator.lonOf(bx * BLOCK, z);
+            double e = Mercator.lonOf((bx + 1) * BLOCK, z);
+            double n = Mercator.latOf(by * BLOCK, z);
+            double s = Mercator.latOf((by + 1) * BLOCK, z);
+
+            boolean wanted = false;
+            for (int k = 0; k < keep.size() && !wanted; k++) {
+                double[] b = keep.get(k);
+                wanted = !(e < b[0] || w > b[2] || n < b[1] || s > b[3]);
+            }
+            if (wanted) continue;
+
+            long len = f.length();
+            if (f.delete()) freed += len;
+        }
+        if (freed > 0) forgetSizes();
+        return freed;
+    }
+
+    /**
+     * Keep the map within its limit, given where you are and where you are
+     * going. Does nothing until the limit is passed, so the common case costs
+     * one cached size lookup.
+     *
+     * @return bytes freed
+     */
+    public static long enforceLimit(java.util.List<double[]> keep) {
+        if (bytesOnCard() <= CACHE_LIMIT) return 0;
+        long freed = prune(keep);
+        Log.i("watchmap", "cache over limit, freed " + mb(freed));
+        return freed;
+    }
+
+    /** A box of the given radius around a point. */
+    public static double[] boxAround(double lat, double lon, double km) {
+        double dLat = km / 111.0;
+        double dLon = km / (111.320 * Math.cos(Math.toRadians(lat)));
+        return new double[] { lon - dLon, lat - dLat, lon + dLon, lat + dLat };
+    }
 
     /** Megabytes, for a row on a 240px screen. */
     public static String mb(long bytes) {

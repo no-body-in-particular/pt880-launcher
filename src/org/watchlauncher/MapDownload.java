@@ -41,6 +41,16 @@ public class MapDownload {
      * A continent is still far too much, so the route corridor below stays:
      * it is what makes travelling abroad possible without carrying Europe.
      */
+    /**
+     * How far around you an area download reaches, in kilometres.
+     *
+     * Eighty is a box a hundred and sixty across - a day's driving in any
+     * direction from where you started, which is the honest span of "around
+     * here". On the Netherlands that is most of the country; on Germany it is
+     * about seven per cent of it, which is the point.
+     */
+    public static final int AREA_RADIUS_KM = 80;
+
     public static final int COUNTRY_ZOOM = 15;
 
     /** Routes are at the same zoom; the corridor is what makes them cheap. */
@@ -130,6 +140,39 @@ public class MapDownload {
      *
      * @return tiles that failed, or -1 if it never started
      */
+    /**
+     * Everything needed to navigate around here: the tiles you will look at
+     * and the roads you might be routed along, for a box centred on where you
+     * are.
+     *
+     * This is the download that matters. A country is a fine thing to have
+     * but a poor thing to wait for, and on anywhere the size of Germany it is
+     * not a reasonable request at all.
+     *
+     * @param radiusKm half the width of the box
+     * @return tiles that failed, -1 if the wifi went away
+     */
+    public int area(MapTiles tiles, String name, double lat, double lon,
+                    int radiusKm, Progress p) {
+        double dLat = radiusKm / 111.0;
+        double dLon = radiusKm / (111.320 * Math.cos(Math.toRadians(lat)));
+        double w = lon - dLon, e = lon + dLon;
+        double s = lat - dLat, n = lat + dLat;
+
+        int failed = blocks(tiles, name, w, s, e, n, COUNTRY_ZOOM, p);
+        if (failed < 0 || cancelled) return failed;
+
+        // The graph last: the map is useful without it, and it is the part
+        // most likely to be interrupted.
+        graphOk = tiles.fetchGraphBox(name, w, s, e, n);
+        return failed;
+    }
+
+    /** Whether the last area download also got its road graph. */
+    private volatile boolean graphOk = false;
+
+    public boolean graphOk() { return graphOk; }
+
     public int country(MapTiles tiles, String name,
                        double minx, double miny, double maxx, double maxy,
                        double atLat, double atLon, Progress p) {

@@ -76,7 +76,13 @@ public class MapMenuScreen extends ListScreen {
                         shell.toast("stopping");
                         render();
                     } });
+            row(l, new Item("Downloading", "hold to stop", AppIcons.NONE, Ui.DIM),
+                    NOTHING);
         } else {
+            row(l, new Item("Download area",
+                            MapDownload.AREA_RADIUS_KM + " km around you",
+                            AppIcons.DEVICE),
+                    new Runnable() { public void run() { downloadArea(); } });
             row(l, new Item("Download country",
                             map.country() == null ? "unknown" : map.country(),
                             AppIcons.DEVICE),
@@ -84,6 +90,14 @@ public class MapMenuScreen extends ListScreen {
             row(l, new Item("Download route", null, AppIcons.DEVICE),
                     new Runnable() { public void run() { downloadRoute(); } });
         }
+
+        File gf = map.country() == null ? null : RoadGraph.fileFor(map.country());
+        boolean haveGraph = gf != null && gf.isFile() && gf.length() > 1024;
+        row(l, new Item("Roads for routing",
+                        map.country() == null ? "country unknown"
+                                : (haveGraph ? MapTiles.mb(gf.length()) + " on card"
+                                             : "with Download area"),
+                        AppIcons.NONE, haveGraph ? Ui.OK : Ui.DIM), NOTHING);
 
         row(l, new Item("Storage", MapTiles.mb(MapTiles.bytesOnCard()),
                 AppIcons.NONE, Ui.DIM), NOTHING);
@@ -160,7 +174,10 @@ public class MapMenuScreen extends ListScreen {
         final Destination d = map.target();
         if (d == null) { shell.toast("no destination.txt"); return; }
         if (!map.hasFix()) { shell.toast("no fix yet"); return; }
-        if (!map.tiles().online()) { shell.toast("offline"); return; }
+        if (!map.tiles().online() && !map.canRouteOffline()) {
+            shell.toast("offline, no road graph");
+            return;
+        }
         if (busy.length() > 0) return;
 
         busy = "routing...";
@@ -168,13 +185,18 @@ public class MapMenuScreen extends ListScreen {
         final double la = map.lat(), lo = map.lon();
         new Thread(new Runnable() {
             public void run() {
-                File out = new File(MapTiles.DIR + "/route.bin");
-                out.getParentFile().mkdirs();
-                String url = map.tiles().base() + "route.php"
-                        + "?flat=" + la + "&flon=" + lo
-                        + "&tlat=" + d.lat + "&tlon=" + d.lon;
-                boolean ok = map.tiles().download(url, out);
-                final Route r = ok ? Route.read(out) : null;
+                // On-device first, so a route can be asked for with no
+                // network at all; the server is the fallback, not the plan.
+                Route found = map.routeHere(la, lo, d.lat, d.lon);
+                if (found == null) {
+                    File out = new File(MapTiles.DIR + "/route.bin");
+                    out.getParentFile().mkdirs();
+                    String url = map.tiles().base() + "route.php"
+                            + "?flat=" + la + "&flon=" + lo
+                            + "&tlat=" + d.lat + "&tlon=" + d.lon;
+                    if (map.tiles().download(url, out)) found = Route.read(out);
+                }
+                final Route r = found;
                 shell.runOnUiThread(new Runnable() {
                     public void run() {
                         busy = "";
@@ -191,6 +213,76 @@ public class MapMenuScreen extends ListScreen {
     }
 
     // ---------------------------------------------------------------- bulk
+
+    /**
+     * The area you are in: tiles to look at and roads to route along, in one
+     * go, for a box around the current position.
+     *
+     * This is the download people actually want. A country is a fine thing to
+     * own and a poor thing to wait for.
+     */
+    private void downloadArea() {
+        if (MapDownload.running()) { bulk(true, null); return; }
+        final String c = map.country();
+        if (c == null) { shell.toast("country unknown"); return; }
+        if (!map.hasFix()) { shell.toast("no position yet"); return; }
+        if (!map.tiles().onWifi()) { shell.toast("needs wifi"); return; }
+        if (busy.length() > 0) return;
+        area(c);
+    }
+
+    private void area(final String country) {
+        final MapDownload job = MapDownload.claim();
+        if (job == null) {
+            MapDownload.cancelCurrent();
+            shell.toast("stopping download");
+            render();
+            return;
+        }
+        busy = "starting...";
+        render();
+        final double la = map.lat(), lo = map.lon();
+
+        new Thread(new Runnable() {
+            public void run() {
+                MapDownload.Progress p = new MapDownload.Progress() {
+                    public boolean onProgress(final int done, final int total,
+                                              final int failed) {
+                        shell.runOnUiThread(new Runnable() {
+                            public void run() {
+                                busy = done + "/" + total
+                                        + (failed > 0 ? (" " + failed + " failed") : "");
+                            }
+                        });
+                        return true;
+                    }
+                };
+                int failed = job.area(map.tiles(), country, la, lo,
+                        MapDownload.AREA_RADIUS_KM, p);
+                long freed = MapTiles.enforceLimit(map.keepBoxes());
+                String msg;
+                if (failed < 0) {
+                    msg = "needs wifi";
+                } else if (!job.graphOk()) {
+                    msg = "map ready, no roads";
+                } else if (failed == 0) {
+                    msg = freed > 0 ? ("area ready, freed " + MapTiles.mb(freed))
+                                    : "area ready";
+                } else {
+                    msg = failed + " tiles missing";
+                }
+                job.release();
+                final String out = msg;
+                shell.runOnUiThread(new Runnable() {
+                    public void run() {
+                        busy = "";
+                        shell.toast(out);
+                        render();
+                    }
+                });
+            }
+        }).start();
+    }
 
     private void downloadCountry() {
         if (MapDownload.running()) { bulk(true, null); return; }
@@ -249,6 +341,7 @@ public class MapMenuScreen extends ListScreen {
                     if (r == null) { finish("no route yet"); return; }
                     failed = job.route(map.tiles(), country, r, p);
                 }
+                MapTiles.enforceLimit(map.keepBoxes());
                 String msg;
                 if (failed < 0) {
                     msg = "needs wifi";

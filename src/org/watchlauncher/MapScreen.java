@@ -280,6 +280,76 @@ public class MapScreen extends Screen implements LocationListener {
         changed();
     }
 
+    /** Kept either side of an active route when the card fills up. */
+    private static final double ROUTE_KEEP_KM = 45;
+
+    /**
+     * The parts of the map worth keeping.
+     *
+     * A corridor along the route if there is one, because that is where you
+     * are going; otherwise a box around where you are. Returned empty when
+     * there is no position at all, which prune() treats as "do nothing" -
+     * deleting the whole map because the gps has not woken up yet would be a
+     * poor trade.
+     */
+    java.util.List<double[]> keepBoxes() {
+        java.util.List<double[]> out = new java.util.ArrayList<double[]>();
+
+        Route r = route;
+        if (r != null && r.line.size() > 1) {
+            // Sampled along the line rather than one box round the lot: a
+            // route from one corner of the country to the other would
+            // otherwise "keep" everything in between, which is no limit at
+            // all.
+            double stepKm = ROUTE_KEEP_KM;
+            double sinceKm = stepKm;
+            double[] prev = null;
+            for (int i = 0; i < r.line.size(); i++) {
+                double[] p = r.line.get(i);
+                if (prev != null) {
+                    sinceKm += Route.metresBetween(prev[0], prev[1], p[0], p[1]) / 1000.0;
+                }
+                if (sinceKm >= stepKm || i == r.line.size() - 1) {
+                    out.add(MapTiles.boxAround(p[0], p[1], ROUTE_KEEP_KM));
+                    sinceKm = 0;
+                }
+                prev = p;
+            }
+        }
+
+        if (!Double.isNaN(lat)) {
+            out.add(MapTiles.boxAround(lat, lon, MapDownload.AREA_RADIUS_KM));
+        }
+        return out;
+    }
+
+    /** The road network on the card, and the search over it. Opened lazily:
+     *  most of the time the map is being looked at, not navigated. */
+    private final RoadGraph graph = new RoadGraph();
+    private Router router;
+
+    /**
+     * Route here, without asking anyone.
+     *
+     * @return a route, or null if there is no graph for this country or no
+     *         way through it - in which case the caller falls back to the
+     *         server, which knows about turn restrictions and traffic rules
+     *         this graph does not.
+     */
+    Route routeHere(double fromLat, double fromLon, double toLat, double toLon) {
+        String c = country;
+        if (c == null) return null;
+        if (!graph.open(c)) return null;
+        if (router == null) router = new Router(graph);
+        int[] path = router.path(fromLat, fromLon, toLat, toLon);
+        if (path == null) return null;
+        return Route.fromNodes(graph, path);
+    }
+
+    boolean canRouteOffline() {
+        return country != null && RoadGraph.fileFor(country).isFile();
+    }
+
     private int offRouteFixes = 0;
     private boolean rerouting = false;
     private long lastReroute = 0;
@@ -310,13 +380,20 @@ public class MapScreen extends Screen implements LocationListener {
         final Destination to = target;
         new Thread(new Runnable() {
             public void run() {
-                File out = new File(MapTiles.DIR + "/route.bin");
-                if (out.getParentFile() != null) out.getParentFile().mkdirs();
-                String url = tiles.base() + "route.php"
-                        + "?flat=" + la + "&flon=" + lo
-                        + "&tlat=" + to.lat + "&tlon=" + to.lon;
-                boolean ok = tiles.download(url, out);
-                final Route r = ok ? Route.read(out) : null;
+                // The graph on the card first. Missing a turn is exactly the
+                // moment the network is least likely to help - a tunnel, a
+                // cutting, a dead spot - and a route computed here needs
+                // none of it.
+                Route local = routeHere(la, lo, to.lat, to.lon);
+                if (local == null) {
+                    File out = new File(MapTiles.DIR + "/route.bin");
+                    if (out.getParentFile() != null) out.getParentFile().mkdirs();
+                    String url = tiles.base() + "route.php"
+                            + "?flat=" + la + "&flon=" + lo
+                            + "&tlat=" + to.lat + "&tlon=" + to.lon;
+                    if (tiles.download(url, out)) local = Route.read(out);
+                }
+                final Route r = local;
                 ui.post(new Runnable() {
                     public void run() {
                         rerouting = false;
