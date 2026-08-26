@@ -101,19 +101,52 @@ public class StatusBar {
     }
 
     /** Called from the activity's one-second tick and from battery broadcasts. */
+    /*
+     * What was last put on screen.
+     *
+     * This runs once a second for as long as the watch is awake, and almost
+     * every time it has nothing new to say: the clock changes once a minute
+     * and the battery every few. setText is not free even when the text is
+     * the same - it measures, lays out and invalidates - and the formatting
+     * before it allocates a Date, a StringBuffer and a String. Sixty times a
+     * minute, on a device with a 64MB heap, that is worth not doing.
+     */
+    private String shownClock = null;
+    private String shownBatt = null;
+    private int shownPct = Integer.MIN_VALUE;
+    private int shownColour = 0;
+
     public void render() {
-        vClock.setText(clockFmt.format(new Date()));
+        String now = clockFmt.format(new Date());
+        if (!now.equals(shownClock)) {
+            vClock.setText(now);
+            shownClock = now;
+        }
 
         if (pct < 0) {
-            vBatt.setText("");
-            vIcon.set(-1, Ui.MUTED);
+            if (shownBatt != null) {
+                vBatt.setText("");
+                shownBatt = null;
+            }
+            if (shownPct != -1) {
+                vIcon.set(-1, Ui.MUTED);
+                shownPct = -1;
+            }
             return;
         }
         // Charging is carried by colour rather than a bolt: the vendor icon
         // set has no bolt, and this build's font is missing one too.
         int c = charging ? Ui.ACCENT : (pct <= Ui.LOW_BATTERY_PCT ? Ui.WARN : Ui.MUTED);
-        vBatt.setText(pct + "%");
-        vBatt.setTextColor(c);
-        vIcon.set(pct, c);
+        String batt = pct + "%";
+        if (!batt.equals(shownBatt) || c != shownColour) {
+            vBatt.setText(batt);
+            vBatt.setTextColor(c);
+            shownBatt = batt;
+        }
+        if (pct != shownPct || c != shownColour) {
+            vIcon.set(pct, c);
+            shownPct = pct;
+        }
+        shownColour = c;
     }
 }

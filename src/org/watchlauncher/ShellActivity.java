@@ -340,8 +340,19 @@ public class ShellActivity extends Activity {
         }
     };
 
+    private String shownHint = null;
+
+    /** The hint line, set only when it differs. Like the status bar, this is
+     *  called once a second and nearly always has the same thing to say, and
+     *  setText measures and lays out regardless. */
     public void renderHint() {
-        if (!stack.isEmpty()) vHint.setText(current().hint());
+        if (stack.isEmpty()) return;
+        String h = current().hint();
+        if (h == null) h = "";
+        if (!h.equals(shownHint)) {
+            vHint.setText(h);
+            shownHint = h;
+        }
     }
 
     public StatusBar statusBar() { return status; }

@@ -659,16 +659,42 @@ public class MapScreen extends Screen implements LocationListener {
         return true;
     }
 
+    /*
+     * The hint line, built only when something in it has changed.
+     *
+     * It is asked for once a second whether or not the watch has moved, and
+     * the answer is a concatenation - a name, a number, a unit - so a
+     * stationary watch was allocating the same string sixty times a minute
+     * for the pleasure of comparing it with itself.
+     */
+    private String hintCache = null;
+    private double hintLat = Double.NaN, hintLon = Double.NaN;
+    private Destination hintTarget = null;
+    private String hintNote = null;
+
     @Override
     public String hint() {
         if (Double.isNaN(lat)) return "waiting for a fix   hold:menu";
+
+        if (hintCache != null && target == hintTarget && note.equals(hintNote)
+                && lat == hintLat && lon == hintLon) {
+            return hintCache;
+        }
+        hintLat = lat;
+        hintLon = lon;
+        hintTarget = target;
+        hintNote = note;
+
         // The next turn is drawn on the map itself now, so this line is free
         // to say how far there is left to go.
         if (target != null) {
             int m = (int) Route.metresBetween(lat, lon, target.lat, target.lon);
-            return target.name + "  " + (m >= 1000 ? ((m / 100) / 10.0 + " km") : (m + " m"));
+            hintCache = target.name + "  "
+                    + (m >= 1000 ? ((m / 100) / 10.0 + " km") : (m + " m"));
+        } else {
+            hintCache = note.length() > 0 ? note : "hold:menu";
         }
-        return note.length() > 0 ? note : "hold:menu";
+        return hintCache;
     }
 
     // ---------------------------------------------------------------- drawing
