@@ -803,13 +803,15 @@ public class MapTiles {
      * Which rendering the tiles on the card were made with.
      *
      * Bumped when the server starts drawing tiles differently: sixteen greys
-     * to sixteen colours, and then to thirty-two with ground cover and
-     * buildings under the roads. Without it a card
+     * to sixteen colours, then thirty-two with ground cover and buildings
+     * under the roads, and now with the road hierarchy actually reaching the
+     * screen - motorways had been drawn with the slip road's width and
+     * colour, and the two brightest entries in the palette were never used. Without it a card
      * holding half a country in the old style and half in the new shows the
      * seam between them, and nothing would ever replace the old half, because
      * as far as the downloader is concerned those tiles are present.
      */
-    public static final int STYLE = 5;
+    public static final int STYLE = 6;
 
     /** The only zoom stored, referenced where the style marker is checked. */
     private static final int COUNTRY_ZOOM_FOR_STYLE = 15;
