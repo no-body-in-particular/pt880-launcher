@@ -91,7 +91,7 @@ public class MapScreen extends Screen implements LocationListener {
      * the file just gets no warnings and everything else carries on.
      */
     private final Alerts alerts = Alerts.shared();
-    private String alertsFor = null;
+    private volatile String alertsFor = null;
 
     /** Cameras already spoken for, so each is announced once rather than on
      *  every fix for the four hundred metres it stays in range. */
@@ -649,7 +649,7 @@ public class MapScreen extends Screen implements LocationListener {
         if (say != null) voice().say(say);
 
         if (route.offRouteMetres(lat, lon) > Route.OFF_ROUTE_M) {
-            note = "off route";
+            note = OFF_ROUTE;
             offRouteFixes++;
             // Two fixes, not one. A single bad position - and this watch
             // takes plenty, seeded from the tracker or bounced off a
@@ -658,9 +658,22 @@ public class MapScreen extends Screen implements LocationListener {
             if (offRouteFixes >= 2) reroute();
         } else {
             offRouteFixes = 0;
-            note = "";
+            /*
+             * Only the note this method put there.
+             *
+             * It used to blank the note outright on every fix that was on
+             * route - which is every ten seconds - and that quietly erased
+             * everything else that had anything to say: the warning that the
+             * map under the route is not on the card, the one that says the
+             * receiver could not be switched on, the camera that was just
+             * announced. All of them were being set and then wiped before
+             * anyone could read them.
+             */
+            if (OFF_ROUTE.equals(note)) note = "";
         }
     }
+
+    private static final String OFF_ROUTE = "off route";
 
     // ---------------------------------------------------------------- data
 
@@ -796,12 +809,53 @@ public class MapScreen extends Screen implements LocationListener {
                         tiles.warm(c, ZOOM, tx + dx, ty + dy);
                     }
                 }
+                keepCardInBounds();
                 ui.post(new Runnable() {
                     public void run() { changed(); }
                 });
             }
         }).start();
     }
+
+    /**
+     * Keep the map inside its limit while simply driving.
+     *
+     * The limit was only ever applied from the map menu - once by the cleanup
+     * item and once at the end of a download - and neither happens on a drive.
+     * But prefetchAround runs on every fix, and a prefetch is not one tile: a
+     * tile that is missing pulls the whole block containing it, two hundred
+     * and fifty six of them, because that is the unit the card stores. So an
+     * afternoon of driving through country that was never downloaded fills the
+     * card a block at a time with nothing counting, until either the card is
+     * full or somebody happens to open the menu.
+     *
+     * It is cheap to ask: the size is cached for a minute, the check returns
+     * immediately while under the limit, and the scan behind it skips itself
+     * entirely while a download is running. The interval here is about not
+     * walking the tree on every fix, not about the cost of the question.
+     *
+     * Already on the prefetch thread, which is where a card walk belongs.
+     */
+    private void keepCardInBounds() {
+        long now = System.currentTimeMillis();
+        if (now - lastLimitCheck < LIMIT_EVERY_MS) return;
+        lastLimitCheck = now;
+        try {
+            long freed = MapTiles.enforceLimit(keepBoxes());
+            if (freed > 0) {
+                final String msg = "freed " + MapTiles.mb(freed);
+                Log.i("watchmap", "cache over limit while driving; " + msg);
+                ui.post(new Runnable() {
+                    public void run() { note = msg; changed(); }
+                });
+            }
+        } catch (Throwable t) {
+            Log.w("watchmap", "cache limit: " + t);
+        }
+    }
+
+    private long lastLimitCheck = 0;
+    private static final long LIMIT_EVERY_MS = 300000;      // five minutes
 
     // ---------------------------------------------------------------- keys
 
@@ -1348,6 +1402,7 @@ public class MapScreen extends Screen implements LocationListener {
      */
     private void loadAlerts(final String c) {
         if (c == null || Double.isNaN(lat)) return;
+        if (System.currentTimeMillis() < alertsRetryAt) return;
         boolean sameCountry = c.equals(alertsFor);
         if (sameCountry && !Double.isNaN(alertsAtLat)
                 && Geo.metresFlat(alertsAtLat, alertsAtLon, lat, lon) < ALERTS_REFRESH_M) {
@@ -1358,6 +1413,11 @@ public class MapScreen extends Screen implements LocationListener {
         alertsAtLon = lon;
 
         final double la = lat, lo = lon;
+        // Remembered so a failure can put them back. Marking the box fetched
+        // before knowing whether it was meant no warnings for the rest of the
+        // drive whenever the first attempt failed - and the first attempt is
+        // the one most likely to, because it happens as the map opens, while
+        // the country lookup and the route are competing for the same radio.
         new Thread(new Runnable() {
             public void run() {
                 try {
@@ -1369,16 +1429,36 @@ public class MapScreen extends Screen implements LocationListener {
                             + "&w=" + (lo - dLon) + "&s=" + (la - dLat)
                             + "&e=" + (lo + dLon) + "&n=" + (la + dLat);
                     if (!tiles.download(url, f)) {
-                        Log.i("watchmap", "no alert layer for " + c);
+                        Log.i("watchmap", "no alert layer for " + c + "; will retry");
+                        forgetAlertBox();
                         return;
                     }
-                    alerts.open(c);
+                    if (!alerts.open(c)) forgetAlertBox();
                 } catch (Throwable t) {
                     Log.w("watchmap", "alerts: " + t);
+                    forgetAlertBox();
                 }
             }
         }).start();
     }
+
+    /**
+     * Let the next fix try the alert layer again, but not the one after that.
+     *
+     * Forgetting the box outright would retry on every fix, which for a watch
+     * with no signal is a download attempt every ten seconds for the whole
+     * drive. Moving the remembered centre a long way instead means the
+     * distance test passes again, and the minute of backoff is what stops it
+     * becoming a loop.
+     */
+    private void forgetAlertBox() {
+        alertsFor = null;
+        alertsAtLat = Double.NaN;
+        alertsRetryAt = System.currentTimeMillis() + ALERTS_RETRY_MS;
+    }
+
+    private volatile long alertsRetryAt = 0;
+    private static final long ALERTS_RETRY_MS = 60000;
 
     /** How much of the world to hold warnings for, and how far the watch may
      *  travel before asking for a fresh box. Two hours of motorway between
@@ -1386,7 +1466,9 @@ public class MapScreen extends Screen implements LocationListener {
     private static final double ALERTS_RADIUS_M = 100000;
     private static final double ALERTS_REFRESH_M = 40000;
 
-    private double alertsAtLat = Double.NaN, alertsAtLon;
+    /** Volatile: forgetAlertBox() runs on the download thread and loadAlerts()
+     *  reads these from the fix that follows, on the UI thread. */
+    private volatile double alertsAtLat = Double.NaN, alertsAtLon;
 
     /**
      * Is the map for this route actually on the card?
