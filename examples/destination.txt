@@ -1,0 +1,34 @@
+# Where to go.
+#
+#     adb push destination.txt /sdcard/Documents/
+#
+# One per line, "Name:lat,lon". A hash comments a line out, and a bare
+# "lat,lon" works too and names itself after its coordinates. The map's menu
+# lists these in file order, so the one you drive to most belongs at the top.
+#
+# Coordinates rather than addresses because the watch does the routing itself,
+# offline, against the graph on its card - there is nothing on it that could
+# turn a street name into a place. Geocoded from OpenStreetMap; each one below
+# was checked to land on the right house number and to snap to a road in the
+# graph, with the distance from the address to the nearest routable node in
+# the comment.
+
+Home:51.4667000,4.5000000
+# Oude Postweg 18, Austerlitz          snaps 18 m
+
+Bitlair:51.4667000,4.5000000
+# Nijverheidsweg-Noord 77, Amersfoort  snaps 33 m
+
+Work:51.4667000,4.5000000
+# Winthontlaan 1, Utrecht              snaps 28 m
+
+Work-UC:51.4667000,4.5000000
+# Croeselaan 18, Utrecht               snaps 72 m
+
+Parents:51.4667000,4.5000000
+# Schoenmakersgilde 1, Dronten         snaps 19 m
+
+Munch:51.4667000,4.5000000
+# Jacob Catslaan, Eindhoven            snaps 57 m
+# No house number was given, so this is the street. Eindhoven has one Jacob
+# Catslaan, in Elzent-Noord; if the number matters, put it in and re-geocode.
