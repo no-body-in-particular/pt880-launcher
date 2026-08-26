@@ -84,6 +84,18 @@ public class MapScreen extends Screen implements LocationListener {
     private String driveLine = null;
 
     /**
+     * The next-turn line, worked out once a fix rather than once a frame.
+     *
+     * screenInstruction walks every turn on the route measuring the distance
+     * to each, and it was being called twice per frame - once to draw the
+     * text and once to decide how tall the band is. On a route with two
+     * hundred and fifty turns that is five hundred haversines a frame to
+     * answer a question whose answer changes when the watch moves, which is
+     * every ten seconds.
+     */
+    private String turnLine = null;
+
+    /**
      * Speed cameras and motorway exits, if the card has them.
      *
      * Kept out of the graph because they change nothing about which way to go
@@ -166,6 +178,7 @@ public class MapScreen extends Screen implements LocationListener {
 
     @Override
     public void onShow() {
+        releaseNavigation();      // the screen is on; it holds itself up
         // Opening the map is a reason to ask now, whatever the backoff had
         // wound itself out to while it sat in the background.
         reseedEvery = RESEED_MS;
@@ -180,15 +193,80 @@ public class MapScreen extends Screen implements LocationListener {
     }
 
     @Override
+    /**
+     * The screen going off is not the end of a drive.
+     *
+     * This used to stop the fixes and shut the voice engine down, and it is
+     * called whenever the map is covered - including by the screen turning
+     * off, which on a watch is thirty seconds after you last touched it. So
+     * navigation ended a few seconds into every drive, and the only way to be
+     * guided anywhere was to keep the screen lit the whole way, which is the
+     * most expensive thing this watch can do.
+     *
+     * While a route is being followed the fixes and the voice stay up and a
+     * partial wake lock keeps the processor available to handle them. That is
+     * a fraction of the cost of the backlight, and it is what the feature is
+     * for: the turn is spoken whether or not anybody is looking.
+     *
+     * Everything else about being hidden still applies - no drawing, no
+     * prefetching for a screen nobody can see - and the moment the route is
+     * done, or the map is left for something else, it all comes down.
+     */
     public void onHide() {
         ui.removeCallbacks(saySoon);
         soon = null;
+        if (navigating()) {
+            holdForNavigation();
+            return;
+        }
         stopFixes();
+        releaseNavigation();
         // The engine is shut down rather than kept warm: it holds an audio
         // focus path open, and the music player is the thing that should have
         // it when navigation is not running.
         if (speech != null) speech.stop();
     }
+
+    /** A route in hand that has not been finished. */
+    private boolean navigating() {
+        return route != null && !arrived;
+    }
+
+    private android.os.PowerManager.WakeLock navLock;
+
+    /**
+     * Keep the processor available for fixes while the screen is off.
+     *
+     * Timed rather than open ended, and renewed on each fix: a wake lock left
+     * holding is a flat battery by morning, and the failure mode of the
+     * timeout expiring is a missed instruction, which the next fix repairs.
+     */
+    private void holdForNavigation() {
+        try {
+            if (navLock == null) {
+                android.os.PowerManager pm = (android.os.PowerManager)
+                        shell.getSystemService(android.content.Context.POWER_SERVICE);
+                if (pm == null) return;
+                navLock = pm.newWakeLock(
+                        android.os.PowerManager.PARTIAL_WAKE_LOCK, "watchlauncher.nav");
+                navLock.setReferenceCounted(false);
+            }
+            navLock.acquire(NAV_HOLD_MS);
+            Log.i("watchmap", "screen off with a route: still navigating");
+        } catch (Throwable t) {
+            Log.w("watchmap", "nav wake lock: " + t);
+        }
+    }
+
+    private void releaseNavigation() {
+        try {
+            if (navLock != null && navLock.isHeld()) navLock.release();
+        } catch (Throwable t) { /* already gone */ }
+    }
+
+    /** Long enough to cover several fixes, short enough that a bug cannot
+     *  hold the processor up all night. */
+    private static final long NAV_HOLD_MS = 5 * 60 * 1000;
 
     /**
      * Redraw only when something has changed.
@@ -468,10 +546,14 @@ public class MapScreen extends Screen implements LocationListener {
         speedMs = l.hasSpeed() ? l.getSpeed() : -1;
         fixAt = System.currentTimeMillis();
         drive.fix(fixAt, lat, lon, speedMs);
+        // Renewed while the screen is off, so the timeout never runs out
+        // mid-drive; harmless while it is on, because onShow released it.
+        if (navLock != null && navigating() && !shell.showing()) holdForNavigation();
         // The watch's own fixes often arrive without a speed, so take the one
         // worked out from the ground covered instead of showing nothing.
         if (speedMs < 0) speedMs = drive.speedMs();
         updateDriveLine();
+        updateTurnLine();
         // Not inside follow(): a camera is worth knowing about whether or not
         // the watch happens to be navigating anywhere.
         warnCameras();
@@ -642,6 +724,7 @@ public class MapScreen extends Screen implements LocationListener {
             if (left <= Route.ARRIVED_M) {
                 if (!arrived) {
                     arrived = true;
+                    releaseNavigation();          // the drive is over
                     voice().say("you have arrived");
                     // The route has done its job. Keeping it drawn would leave
                     // a line to somewhere you already are.
@@ -1129,7 +1212,7 @@ public class MapScreen extends Screen implements LocationListener {
          */
         private void drawTurn(Canvas canvas, int w, int h) {
             if (route == null || Double.isNaN(lat)) return;
-            String say = route.screenInstruction(lat, lon);
+            String say = turnLine;
             String info = driveLine;
             if (say == null && info == null) return;
 
@@ -1164,7 +1247,7 @@ public class MapScreen extends Screen implements LocationListener {
         private int bandHeight() {
             if (route == null || Double.isNaN(lat)) return 0;
             int b = 0;
-            if (route.screenInstruction(lat, lon) != null) b += 20;
+            if (turnLine != null) b += 20;
             if (driveLine != null) b += 14;
             return b;
         }
@@ -1282,6 +1365,7 @@ public class MapScreen extends Screen implements LocationListener {
         route = r;
         if (r != null) r.signs(signs);
         arrived = false;
+        updateTurnLine();
         checkRouteCached(r);
         // Last drive's average is not evidence about this one - a route asked
         // for after parking would otherwise start out predicting arrival at
@@ -1301,6 +1385,13 @@ public class MapScreen extends Screen implements LocationListener {
      * server's format does not - because an arrival time invented from
      * nothing is worse than an empty half of a line.
      */
+    /** Recomputed on a fix, when the route changes, and when a turn is
+     *  spoken - the three things that can change what it says. */
+    private void updateTurnLine() {
+        turnLine = (route == null || Double.isNaN(lat))
+                ? null : route.screenInstruction(lat, lon);
+    }
+
     private void updateDriveLine() {
         if (route == null || Double.isNaN(lat) || approximate) {
             driveLine = null;
@@ -1586,6 +1677,8 @@ public class MapScreen extends Screen implements LocationListener {
             if (what == null) return;
             route.markSaid(t);
             voice().say(what);
+            updateTurnLine();
+            changed();
         }
     };
 

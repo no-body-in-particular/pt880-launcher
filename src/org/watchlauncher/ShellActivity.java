@@ -228,6 +228,10 @@ public class ShellActivity extends Activity {
         }).start();
     }
 
+    /** Whether the launcher is on screen. False from the moment something
+     *  covers it, including the screen turning off. */
+    public boolean showing() { return started; }
+
     @Override
     protected void onStart() {
         super.onStart();

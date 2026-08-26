@@ -84,6 +84,22 @@ public class Speech {
                         tts.setPitch(1.0f);
                     } catch (Exception e) { /* the defaults will do */ }
 
+                    // Deprecated on modern Android and the only one that
+                    // exists on this one: UtteranceProgressListener arrived in
+                    // API 15 but the engine here reports through the old
+                    // callback, and the point is to know when the queue is
+                    // empty so the audio path can be handed back.
+                    try {
+                        tts.setOnUtteranceCompletedListener(
+                                new TextToSpeech.OnUtteranceCompletedListener() {
+                            public void onUtteranceCompleted(String id) {
+                                doneSpeaking();
+                            }
+                        });
+                    } catch (Throwable e) {
+                        Log.w(TAG, "no utterance callback: " + e);
+                    }
+
                     if (audio != null) {
                         Log.i(TAG, "music volume "
                                 + audio.getStreamVolume(AudioManager.STREAM_MUSIC) + "/"
@@ -208,6 +224,11 @@ public class Speech {
             params.put(TextToSpeech.Engine.KEY_PARAM_STREAM,
                     String.valueOf(AudioManager.STREAM_MUSIC));
             params.put(TextToSpeech.Engine.KEY_PARAM_VOLUME, "1.0");
+            // An id, so the engine tells us when it has finished and the audio
+            // path can go back to whatever had it.
+            params.put(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID,
+                    String.valueOf(++utterance));
+            queued++;
 
             // Queued on the same stream and immediately before the words, so
             // the amplifier is already up by the time they start.
@@ -226,6 +247,28 @@ public class Speech {
     /** Long enough for a small amplifier to come up, short enough not to be a
      *  pause anyone notices before an instruction. */
     private static final long WARMUP_MS = 350;
+
+    private int utterance = 0;
+    private volatile int queued = 0;
+
+    /**
+     * Give the audio path back when there is nothing left to say.
+     *
+     * Focus is asked for per utterance and used to be handed back only when
+     * the engine shut down. That was harmless while the engine was shut down
+     * at the end of every screen - and stopped being harmless when navigation
+     * started continuing with the screen off, because the engine then lives
+     * for the whole drive and the music player would stay ducked for all of
+     * it. Handed back when the queue drains instead, which is a second or two
+     * after each instruction.
+     */
+    private void doneSpeaking() {
+        if (--queued > 0) return;
+        queued = 0;
+        try {
+            if (audio != null) audio.abandonAudioFocus(null);
+        } catch (Exception e) { /* nothing holding it */ }
+    }
 
     /** Say it even if it was just said - for a test, where silence is the
      *  thing being investigated. */
