@@ -34,8 +34,21 @@ public class Speech {
 
     private static final String TAG = "watchvoice";
 
-    /** Pico's default clips words on a small speaker; slower is clearer. */
-    private static final float RATE = 0.85f;
+    /**
+     * How fast it talks.
+     *
+     * This was 0.85 - slower than Pico's default - because words were coming
+     * out clipped on this speaker. That was the wrong fix for the right
+     * symptom: what was actually being lost was the beginning of each
+     * utterance, while the amplifier woke up, and slowing the whole phrase
+     * down only meant more of it arrived after the amplifier was ready.
+     *
+     * The silence queued ahead of the words deals with that properly, so the
+     * rate no longer has to compensate for it. Slightly above default: a turn
+     * instruction is three or four words and the useful thing is that it
+     * finishes before the junction.
+     */
+    private static final float RATE = 1.15f;
 
     /** The same phrase inside this window is a repeat, not a new instruction. */
     private static final long REPEAT_MS = 20000;
