@@ -417,11 +417,34 @@ public class MapTiles {
      * being looked at - and then every neighbouring tile is already there,
      * which is what panning wants anyway.
      */
+    /**
+     * Blocks being downloaded right now, so two callers do not fetch one twice.
+     *
+     * have() is the only thing that stood between a request and the wire, and
+     * it stays false for as long as the download is running - so on a slow
+     * link, where a block takes tens of seconds, every fix that arrived
+     * meanwhile started its own copy of the same download. Six threads, six
+     * times the data over the air, six times the writing to the card, and the
+     * card is the thing everything else here is waiting on.
+     *
+     * A block already in flight is not worth waiting for either: the caller is
+     * a prefetch that will be asked again on the next fix, by which time this
+     * one has either landed or failed.
+     */
+    private final java.util.Set<String> inFlight =
+            java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
+
     public boolean fetch(String country, int z, int x, int y) {
         if (have(country, z, x, y)) return true;
         int bx = blockOf(x), by = blockOf(y);
-        return fetchPack(country, z, bx << BLOCK_BITS, by << BLOCK_BITS,
-                BLOCK, BLOCK) > 0 && have(country, z, x, y);
+        String key = z + "/" + bx + "_" + by;
+        if (!inFlight.add(key)) return false;         // someone else has it
+        try {
+            return fetchPack(country, z, bx << BLOCK_BITS, by << BLOCK_BITS,
+                    BLOCK, BLOCK) > 0 && have(country, z, x, y);
+        } finally {
+            inFlight.remove(key);
+        }
     }
 
     /** Blocking download to a file, written via a temporary name so an
