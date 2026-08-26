@@ -78,7 +78,63 @@ if [ -n "$GOT" ] && [ "$GOT" != "$APK_SHA256" ]; then
 fi
 
 say "install"
-adbq install -r "$TMP/watchlauncher.apk" 2>&1 | tr -d '\r' | sed 's/^/  /'
+OUT="$(adbq install -r "$TMP/watchlauncher.apk" 2>&1 | tr -d '\r')"
+printf '%s\n' "$OUT" | sed 's/^/  /'
+
+# A signature that does not match the one already on the watch.
+#
+# This project has not always signed with the same key, and Android will not
+# upgrade a package across that change. Nor is there a way round it: -r does
+# not force it, and `pm uninstall -k` - which keeps the data directory - makes
+# it worse, because the retained data still belongs to the old signature and
+# the install then fails with INSTALL_FAILED_UPDATE_INCOMPATIBLE. The old
+# package and its data have to go.
+#
+# Two things make that safe to do unattended, and both matter:
+#
+#   * Everything worth keeping is on /sdcard - the maps, the sleep logs,
+#     destination.txt, contacts.txt, tracker.txt, the photos. An uninstall does
+#     not touch any of it. What goes is today's running sleep total, the screen
+#     and volume settings, and any tracker rows not yet uploaded.
+#
+#   * If the launcher is the home screen then the stock launcher is disabled,
+#     and a watch with neither is a recovery job on a device with no
+#     touchscreen. So the stock one is put back before the uninstall and the
+#     alias restored after, and the gap between them is a few seconds with no
+#     reboot in it.
+case "$OUT" in
+  *INSTALL_PARSE_FAILED_INCONSISTENT_CERTIFICATES*|*INSTALL_FAILED_UPDATE_INCOMPATIBLE*)
+    say "signed with a different key than the install on this watch"
+    echo "  The old package has to be removed. /sdcard is not touched, so maps,"
+    echo "  sleep logs and destination.txt all survive; today's sleep total and"
+    echo "  the settings do not."
+
+    WAS_HOME=0
+    if adbq shell "pm list packages -e org.watchlauncher" | tr -d '\r' | grep -q watchlauncher; then
+      if adbq shell "dumpsys package org.watchlauncher/.HomeAlias" \
+           | tr -d '\r' | grep -q "enabled=1"; then
+        WAS_HOME=1
+      fi
+    fi
+    if [ "$WAS_HOME" = "1" ]; then
+      echo "  it is the home screen - handing that back to the stock launcher first"
+      adbq shell "pm enable com.android.launcher" >/dev/null 2>&1 || true
+      adbq shell "pm disable-user org.watchlauncher/.HomeAlias" >/dev/null 2>&1 || true
+    fi
+
+    adbq uninstall org.watchlauncher 2>&1 | tr -d '\r' | sed 's/^/  /'
+    adbq install "$TMP/watchlauncher.apk" 2>&1 | tr -d '\r' | sed 's/^/  /'
+
+    if [ "$WAS_HOME" = "1" ]; then
+      echo "  putting the home screen back"
+      fetch "$BASE/set-as-home.sh" "$TMP/set-as-home.sh" \
+        && ADB="$ADB" bash "$TMP/set-as-home.sh" >/dev/null 2>&1 \
+        && echo "  done" \
+        || echo "  could not re-run set-as-home.sh - run it by hand"
+    fi
+    ;;
+esac
+
 adbq shell 'pm path org.watchlauncher' | tr -d '\r' | grep -q package: \
   || die "the package is not installed"
 
