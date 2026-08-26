@@ -155,6 +155,21 @@ public class ServerFix {
         }
         Log.i("watchmap", "ServerFix: GET " + u.replaceAll("viewonly=[^&]*", "viewonly=***"));
 
+        // Two attempts. The second asks for a fresh connection.
+        //
+        // Connections are pooled now, and this device's TLS is BouncyCastle
+        // rather than the platform's. A pooled socket that the server has
+        // since closed comes back as an IllegalStateException rather than as
+        // a clean retry, and once one is in the pool every request after it
+        // fails the same way - which is how the map came to sit on "no
+        // position" with the network working perfectly well.
+        for (int attempt = 0; attempt < 2; attempt++) {
+            if (fetchOnce(u, attempt > 0)) return;
+        }
+    }
+
+    /** @return true if it worked, or failed in a way a retry will not fix */
+    private boolean fetchOnce(String u, boolean fresh) {
         HttpURLConnection c = null;
         BufferedReader r = null;
         try {
@@ -169,12 +184,13 @@ public class ServerFix {
             c.setReadTimeout(READ_MS);
             c.setRequestProperty("Accept", "text/plain");
             c.setUseCaches(false);
+            if (fresh) c.setRequestProperty("Connection", "close");
 
             int code = c.getResponseCode();
             if (code != 200) {
                 problem = "server said " + code;
                 Log.w("watchmap", "ServerFix: http " + code);
-                return;
+                return true;                    // a retry will say the same
             }
 
             r = new BufferedReader(new InputStreamReader(c.getInputStream()));
@@ -185,7 +201,10 @@ public class ServerFix {
                 // plainly rather than reporting as a parse failure.
                 problem = (line != null && line.startsWith("<"))
                         ? "token rejected" : "bad reply";
+                return true;                    // the reply is wrong, not the socket
             }
+            problem = null;                     // worked; clear any earlier fault
+            return true;
         } catch (Exception e) {
             // The class name, not "offline". SSLHandshakeException,
             // UnknownHostException and ConnectException are three entirely
@@ -198,6 +217,7 @@ public class ServerFix {
             // read as "offline" without it.
             Log.w("watchmap", "ServerFix: " + e.getClass().getSimpleName()
                     + " " + String.valueOf(e.getMessage()));
+            return false;                       // worth one more go
         } finally {
             try { if (r != null) r.close(); } catch (Exception e) { /* ignore */ }
             if (c != null) c.disconnect();

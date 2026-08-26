@@ -630,6 +630,15 @@ public class MapTiles {
 
     /** Text from an endpoint, for the small answers. */
     public String get(String url) {
+        // Twice, the second time refusing a pooled connection. See the note in
+        // ServerFix: a socket the server has closed comes back from the pool
+        // as an IllegalStateException rather than as a clean retry, and BC's
+        // TLS is less forgiving of reuse than the platform's would be.
+        String s = getOnce(url, false);
+        return s != null ? s : getOnce(url, true);
+    }
+
+    private String getOnce(String url, boolean fresh) {
         HttpURLConnection c = null;
         boolean drained = false;
         try {
@@ -640,6 +649,7 @@ public class MapTiles {
             }
             c.setConnectTimeout(CONNECT_MS);
             c.setReadTimeout(READ_MS);
+            if (fresh) c.setRequestProperty("Connection", "close");
             if (c.getResponseCode() != 200) return null;
             java.io.BufferedReader r = new java.io.BufferedReader(
                     new java.io.InputStreamReader(c.getInputStream()));
@@ -648,6 +658,10 @@ public class MapTiles {
             while ((line = r.readLine()) != null) b.append(line).append('\n');
             r.close();
             drained = true;
+            // Cleared on success. It used to persist, so one failure minutes
+            // ago went on being displayed as the reason for everything after
+            // it - including things that were working.
+            lastError = null;
             return b.toString();
         } catch (Exception e) {
             lastError = e.getClass().getSimpleName().replace("Exception", "");
