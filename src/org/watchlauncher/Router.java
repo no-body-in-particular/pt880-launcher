@@ -91,15 +91,42 @@ public class Router {
      */
     public synchronized int[] path(double fromLat, double fromLon,
                                    double toLat, double toLon) {
+        // The whole search, guarded.
+        //
+        // It reads a memory-mapped file that came off the card, and a header
+        // that passes validation can still be internally inconsistent -
+        // arc targets pointing outside the node table, offsets that run past
+        // the mapping. Those surface as IndexOutOfBoundsException on this
+        // thread, which is a background thread, which on Android means the
+        // process. A route that cannot be found is worth reporting; one that
+        // takes the watch down with it is not.
+        try {
+            return search(fromLat, fromLon, toLat, toLon);
+        } catch (Throwable t) {
+            Log.w("watchnav", "routing failed: " + t);
+            release();
+            return null;
+        }
+    }
+
+    private int[] search(double fromLat, double fromLon,
+                         double toLat, double toLon) {
         if (!g.loaded()) return null;
         // Both ends have to be on the map we hold. Without this the snap
         // quietly returns the nearest node it can find - which for a
         // destination off the edge of the downloaded box is somewhere on the
         // boundary, and the route would confidently lead to the wrong place.
-        if (!g.covers(fromLat, fromLon) || !g.covers(toLat, toLon)) return null;
+        if (!g.covers(fromLat, fromLon) || !g.covers(toLat, toLon)) {
+            Log.i("watchnav", "outside the graph: from " + fromLat + "," + fromLon
+                    + " to " + toLat + "," + toLon);
+            return null;
+        }
         int s = g.snap(fromLat, fromLon);
         int t = g.snap(toLat, toLon);
-        if (s < 0 || t < 0) return null;
+        if (s < 0 || t < 0) {
+            Log.i("watchnav", "could not snap to a road: s=" + s + " t=" + t);
+            return null;
+        }
         if (s == t) return new int[] { s };
 
         long t0 = System.currentTimeMillis();
@@ -127,7 +154,7 @@ public class Router {
             if (tight == 2) return null;
         }
 
-        int[] path = search(s, t);
+        int[] path = run(s, t);
 
         // Found nothing: widen and try again. A corridor can be too tight to
         // hold any road at all - a coast road, a route through mountains -
@@ -135,7 +162,7 @@ public class Router {
         for (int wider = 0; path == null && wider < 2; wider++) {
             margin *= 2.2;
             if (!corridor(fromLat, fromLon, toLat, toLon, margin)) break;
-            path = search(s, t);
+            path = run(s, t);
         }
         millis = System.currentTimeMillis() - t0;
         release();
@@ -242,7 +269,7 @@ public class Router {
         return -1;
     }
 
-    private int[] search(int s, int t) {
+    private int[] run(int s, int t) {
         int ls = local(s), lt = local(t);
         if (ls < 0 || lt < 0) return null;
         // A generation counter instead of clearing ten megabytes on every

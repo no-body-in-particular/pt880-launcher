@@ -34,6 +34,17 @@ public class RoadGraph {
 
     private static final double CELL_DEG = 0.01;
 
+    /*
+     * What a graph file is allowed to claim.
+     *
+     * England, the largest built so far, is 6.4 million nodes in 157MB. Ten
+     * million and twenty-five million leave room for anywhere and still refuse
+     * a header that has been scribbled on.
+     */
+    private static final long MAX_NODES = 10000000L;
+    private static final long MAX_ARCS = 25000000L;
+    private static final long MAX_CELLS = 4000000L;
+
     private ByteBuffer buf;
     private RandomAccessFile file;
 
@@ -68,6 +79,14 @@ public class RoadGraph {
         File f = fileFor();
         if (buf != null && f.lastModified() == stamp) return true;
         close();
+        if (!f.isFile()) {
+            Log.i("watchnav", "no graph on the card at " + f);
+            return false;
+        }
+        if (f.length() < 56) {
+            Log.w("watchnav", "graph too small: " + f.length() + " bytes");
+            return false;
+        }
         if (!f.isFile() || f.length() < 56) return false;
         try {
             file = new RandomAccessFile(f, "r");
@@ -77,6 +96,9 @@ public class RoadGraph {
 
             if (b.get(0) != 'W' || b.get(1) != 'G' || b.get(2) != 'R'
                     || b.get(3) != '2' || b.get(4) != 2) {
+                Log.w("watchnav", "not a WGR2 graph: magic "
+                        + (char) b.get(0) + (char) b.get(1) + (char) b.get(2)
+                        + (char) b.get(3) + " version " + b.get(4));
                 close();
                 return false;
             }
@@ -89,17 +111,39 @@ public class RoadGraph {
             maxx = b.getDouble(40);
             maxy = b.getDouble(48);
 
-            nodesAt = 56;
-            adjAt = nodesAt + nodes * 8;
-            arcsAt = adjAt + (nodes + 1) * 4;
-            gridAt = arcsAt + arcs * 6;
+            // Every offset in long arithmetic, and the counts sanity checked
+            // before anything is cast back down.
+            //
+            // In int arithmetic a header claiming 2^31-1 nodes makes
+            // nodes*8 wrap to a small positive number, so the truncation
+            // check below passes and every read afterwards uses an offset
+            // that means nothing. A file on this card can say anything: it
+            // is written over wifi to FAT32 on cheap flash, and we have
+            // already seen torn writes.
+            long lNodes = nodes & 0xFFFFFFFFL;
+            long lArcs = arcs & 0xFFFFFFFFL;
+            long lCols = cols & 0xFFFFFFFFL;
+            long lRows = rows & 0xFFFFFFFFL;
+            long lNodesAt = 56L;
+            long lAdjAt = lNodesAt + lNodes * 8L;
+            long lArcsAt = lAdjAt + (lNodes + 1L) * 4L;
+            long lGridAt = lArcsAt + lArcs * 6L;
+            long need = lGridAt + (lCols * lRows + 1L) * 4L;
 
-            long need = (long) gridAt + ((long) cols * rows + 1) * 4;
-            if (need > f.length()) {
-                Log.w("watchnav", "graph truncated: need " + need + " have " + f.length());
+            if (lNodes <= 0 || lNodes > MAX_NODES || lArcs > MAX_ARCS
+                    || lCols <= 0 || lRows <= 0 || lCols * lRows > MAX_CELLS
+                    || need > f.length() || need > Integer.MAX_VALUE) {
+                Log.w("watchnav", "graph header refused: nodes=" + lNodes
+                        + " arcs=" + lArcs + " grid=" + lCols + "x" + lRows
+                        + " need=" + need + " have=" + f.length());
                 close();
                 return false;
             }
+
+            nodesAt = (int) lNodesAt;
+            adjAt = (int) lAdjAt;
+            arcsAt = (int) lArcsAt;
+            gridAt = (int) lGridAt;
 
             buf = b;
             country = c;
