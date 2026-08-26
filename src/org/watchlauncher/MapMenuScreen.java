@@ -397,8 +397,18 @@ public class MapMenuScreen extends ListScreen {
         String[] f = reply.trim().split("\n")[0].split(",");
         if (f.length < 5) return null;
         try {
-            return new double[]{Double.parseDouble(f[1]), Double.parseDouble(f[2]),
-                                Double.parseDouble(f[3]), Double.parseDouble(f[4])};
+            double[] box = {Double.parseDouble(f[1]), Double.parseDouble(f[2]),
+                            Double.parseDouble(f[3]), Double.parseDouble(f[4])};
+            // The bounds come off the network and decide what gets
+            // downloaded. A box that is not a box would either fetch nothing
+            // or try to fetch the world.
+            for (int i = 0; i < 4; i++) {
+                if (Double.isNaN(box[i]) || Double.isInfinite(box[i])) return null;
+            }
+            if (Math.abs(box[1]) > 90 || Math.abs(box[3]) > 90
+                    || Math.abs(box[0]) > 180 || Math.abs(box[2]) > 180
+                    || box[0] > box[2] || box[1] > box[3]) return null;
+            return box;
         } catch (Exception e) {
             return null;
         }

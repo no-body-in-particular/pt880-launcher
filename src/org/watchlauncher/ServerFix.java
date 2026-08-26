@@ -239,6 +239,20 @@ public class ServerFix {
             String sp = f[3].trim();
             float s = (sp.length() == 0) ? -1 : Float.parseFloat(sp);
 
+            // The reply comes off the network and is believed completely, so
+            // it is worth checking it describes somewhere. parseDouble
+            // accepts "NaN" and "Infinity" without complaint, and a NaN
+            // latitude does not throw - it quietly makes every comparison
+            // false, so the map would sit on "no position yet" for ever while
+            // holding a position it thought was fine.
+            if (Double.isNaN(la) || Double.isNaN(lo)
+                    || Double.isInfinite(la) || Double.isInfinite(lo)
+                    || la < -90 || la > 90 || lo < -180 || lo > 180) {
+                problem = "impossible position";
+                Log.w("watchmap", "ServerFix: refusing " + la + "," + lo);
+                return false;
+            }
+
             Log.i("watchmap", "ServerFix: parsed " + la + "," + lo + " type " + ty);
             at = when;
             lat = la;

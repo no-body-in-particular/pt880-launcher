@@ -88,6 +88,13 @@ public class Destination {
             double lon = Double.parseDouble(p[1].trim());
             // Coordinates the wrong way round are the commonest mistake in a
             // hand-written file, and a latitude past 90 is proof of it.
+            //
+            // The NaN test is not redundant: every comparison against NaN is
+            // false, so a line reading "Home:NaN,NaN" passes a range check
+            // and becomes a destination that can never be reached and never
+            // reports why.
+            if (Double.isNaN(lat) || Double.isNaN(lon)
+                    || Double.isInfinite(lat) || Double.isInfinite(lon)) return null;
             if (Math.abs(lat) > 90 || Math.abs(lon) > 180) return null;
             if (name == null || name.length() == 0) {
                 name = String.format("%.4f, %.4f", lat, lon);
