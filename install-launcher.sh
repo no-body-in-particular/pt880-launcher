@@ -22,7 +22,7 @@ SERIAL="${SERIAL:-}"
 adbq() { $ADB "$@" </dev/null; }
 
 BASE="${BASE:-https://coredump.ws/pt880}"
-APK_SHA256="ef0539d5d2a3c2512d9c5134b89a7a68975a70826faa6c0baf970c499b7ca914"
+APK_SHA256="18a96c89b8a96fdec4bc94c9b325494595ced136ec7fb7581004f8c8ecafda25"
 
 say() { printf '\n== %s\n' "$*"; }
 die() { printf '\nerror: %s\n' "$*" >&2; exit 1; }

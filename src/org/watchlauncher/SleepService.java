@@ -78,10 +78,22 @@ public class SleepService extends Service implements SensorEventListener {
     /** Do not bother scoring a stretch shorter than this. */
     private static final int MIN_SCORABLE_MIN = 90;
 
-    /** How often the live sleeping flag is resent when nothing has changed.
-     *  The chart treats a gap over 45 minutes as a break in the series, so
-     *  half an hour keeps the line solid without sending more than it must. */
-    private static final long FLAG_REFRESH_MS = 30 * 60 * 1000L;
+    /**
+     * How often the live sleeping flag is resent when nothing has changed.
+     *
+     * Five minutes, which is the same cadence the watch already wakes at, so
+     * it costs one small frame on a wakeup that was happening anyway rather
+     * than a wakeup of its own. While actually logging, bursts come every
+     * thirty seconds and this holds the flag down to one in ten of them.
+     *
+     * It was half an hour, chosen because the chart treats a gap over
+     * forty-five minutes as a break in the series. That left no margin at
+     * all: a single missed burst - a crash, a moment without signal - put two
+     * points more than forty-five minutes apart and the line came apart.
+     * Five minutes means eight bursts in a row have to fail before the graph
+     * shows a hole, and a hole then means something really was wrong.
+     */
+    private static final long FLAG_REFRESH_MS = 5 * 60 * 1000L;
 
     /** How long to sample for once awake. */
     private static final long BURST_MS = 5000;
