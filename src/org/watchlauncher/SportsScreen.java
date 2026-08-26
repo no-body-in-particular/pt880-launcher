@@ -206,7 +206,14 @@ public class SportsScreen extends Screen implements HeartRate.Listener {
 
     private final LocationListener updates = new LocationListener() {
         public void onLocationChanged(Location l) { take(l, "live"); }
-        public void onProviderEnabled(String p) { }
+        /** Subscribe to a provider that has just come up. Without this, a
+         *  receiver switched on while this screen was open - by the map,
+         *  which now does that for itself - went unheard until the screen was
+         *  closed and reopened. */
+        public void onProviderEnabled(String p) {
+            stopLocation();
+            startLocation();
+        }
         public void onProviderDisabled(String p) { }
         public void onStatusChanged(String p, int status, Bundle extras) { }
     };

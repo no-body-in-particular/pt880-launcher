@@ -205,8 +205,11 @@ public class MapDownload {
         java.util.LinkedHashMap<Long, Tile> want = new java.util.LinkedHashMap<Long, Tile>();
         for (int i = 0; i < r.line.size(); i++) {
             double[] pt = r.line.get(i);
-            double dLat = CORRIDOR_M / 111320.0;
-            double dLon = CORRIDOR_M / (111320.0 * Math.cos(Math.toRadians(pt[0])));
+            // Geo, not 111320 twice: that is the longitude constant, and using
+            // it for latitude makes the corridor the wrong width by the same
+            // fraction everything else here used to be wrong by.
+            double dLat = CORRIDOR_M / Geo.perLat(pt[0]);
+            double dLon = CORRIDOR_M / Geo.perLon(pt[0]);
             List<Tile> here = box(pt[1] - dLon, pt[0] - dLat,
                                   pt[1] + dLon, pt[0] + dLat, DETAIL_ZOOM);
             for (int k = 0; k < here.size(); k++) {

@@ -1217,6 +1217,7 @@ public class MapScreen extends Screen implements LocationListener {
         route = r;
         if (r != null) r.signs(signs);
         arrived = false;
+        checkRouteCached(r);
         // Last drive's average is not evidence about this one - a route asked
         // for after parking would otherwise start out predicting arrival at
         // the speed of the walk to the car.
@@ -1386,6 +1387,59 @@ public class MapScreen extends Screen implements LocationListener {
     private static final double ALERTS_REFRESH_M = 40000;
 
     private double alertsAtLat = Double.NaN, alertsAtLon;
+
+    /**
+     * Is the map for this route actually on the card?
+     *
+     * A route is followed offline - that is the whole point of computing it
+     * here - but the tiles under it are a separate thing, and nothing said so.
+     * The map fetches a three by three block around wherever you are, which is
+     * about forty seconds of lookahead at road speed and only while there is a
+     * signal. Drive out of the downloaded area and into a dead spot and the
+     * screen simply goes blank, with the route line drawn over nothing.
+     *
+     * The corridor download that fixes this already exists, in the map menu.
+     * Nobody starting a drive would think to go and find it. So the coverage
+     * is counted when the route arrives and said out loud if it is poor -
+     * before setting off, which is the only time the answer is useful.
+     *
+     * Sampled rather than exhaustive: a block is sixteen tiles square, so
+     * every twentieth point of the line is far more than enough to notice a
+     * gap, and this runs off the UI thread either way.
+     */
+    private void checkRouteCached(final Route r) {
+        if (r == null || r.line.size() < 2 || country == null) return;
+        final String c = country;
+        new Thread(new Runnable() {
+            public void run() {
+                int have = 0, want = 0;
+                java.util.HashSet<Long> seen = new java.util.HashSet<Long>();
+                for (int i = 0; i < r.line.size(); i += 20) {
+                    double[] pt = r.line.get(i);
+                    int tx = (int) Mercator.xOf(pt[1], ZOOM);
+                    int ty = (int) Mercator.yOf(pt[0], ZOOM);
+                    long key = ((long) (tx >> MapTiles.BLOCK_BITS) << 32)
+                             | ((ty >> MapTiles.BLOCK_BITS) & 0xFFFFFFFFL);
+                    if (!seen.add(key)) continue;
+                    want++;
+                    if (tiles.haveBlock(c, ZOOM, tx >> MapTiles.BLOCK_BITS,
+                                        ty >> MapTiles.BLOCK_BITS)) {
+                        have++;
+                    }
+                }
+                if (want == 0) return;
+                final int pct = have * 100 / want;
+                if (pct >= 90) return;               // good enough to drive on
+                ui.post(new Runnable() {
+                    public void run() {
+                        note = "map " + pct + "% cached - see menu";
+                        Log.i("watchmap", "route corridor " + pct + "% on the card");
+                        changed();
+                    }
+                });
+            }
+        }).start();
+    }
 
     /**
      * Ask less often, up to a point.
