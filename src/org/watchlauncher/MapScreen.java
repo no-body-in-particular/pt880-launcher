@@ -383,6 +383,8 @@ public class MapScreen extends Screen implements LocationListener {
         // Not inside follow(): a camera is worth knowing about whether or not
         // the watch happens to be navigating anywhere.
         warnCameras();
+        // Cheap unless the drive has left the box that was fetched.
+        loadAlerts(country);
 
         // Only when the position is outside what we already hold.
         if (!countryKnown || lon < cMinX || lon > cMaxX || lat < cMinY || lat > cMaxY) {
@@ -1246,25 +1248,43 @@ public class MapScreen extends Screen implements LocationListener {
     private double lastCameraLat = Double.NaN, lastCameraLon;
 
     /**
-     * Fetch the alert layer for a country, once.
+     * Fetch the alert layer for where the watch is.
      *
-     * A tenth of a megabyte, and optional: this never blocks anything and
-     * never retries. Failing means no warnings this run, which is what a watch
-     * without the file has anyway.
+     * A box, not a country. The server builds this from its store per request
+     * rather than serving a precomputed file, so asking for a hundred
+     * kilometres costs a hundred kilometres - the Netherlands is 114 kB whole
+     * and 3 kB around one town, and a continent would be neither.
+     *
+     * Refetched when the drive leaves the middle of what was fetched, which
+     * over a day's driving is a handful of requests. Optional throughout:
+     * this never blocks anything and never retries, and failing means no
+     * warnings, which is what a watch without the layer has anyway.
      */
     private void loadAlerts(final String c) {
-        if (c == null || c.equals(alertsFor)) return;
+        if (c == null || Double.isNaN(lat)) return;
+        boolean sameCountry = c.equals(alertsFor);
+        if (sameCountry && !Double.isNaN(alertsAtLat)
+                && Geo.metresFlat(alertsAtLat, alertsAtLon, lat, lon) < ALERTS_REFRESH_M) {
+            return;
+        }
         alertsFor = c;
+        alertsAtLat = lat;
+        alertsAtLon = lon;
+
+        final double la = lat, lo = lon;
         new Thread(new Runnable() {
             public void run() {
                 try {
+                    double dLat = ALERTS_RADIUS_M / Geo.perLat(la);
+                    double dLon = ALERTS_RADIUS_M / Geo.perLon(la);
                     File f = Alerts.fileFor(c);
-                    if (!f.isFile()) {
-                        if (f.getParentFile() != null) f.getParentFile().mkdirs();
-                        if (!tiles.download(tiles.base() + "alerts.php?c=" + c, f)) {
-                            Log.i("watchmap", "no alert layer for " + c);
-                            return;
-                        }
+                    if (f.getParentFile() != null) f.getParentFile().mkdirs();
+                    String url = tiles.base() + "alerts.php?c=" + c
+                            + "&w=" + (lo - dLon) + "&s=" + (la - dLat)
+                            + "&e=" + (lo + dLon) + "&n=" + (la + dLat);
+                    if (!tiles.download(url, f)) {
+                        Log.i("watchmap", "no alert layer for " + c);
+                        return;
                     }
                     alerts.open(c);
                 } catch (Throwable t) {
@@ -1273,6 +1293,14 @@ public class MapScreen extends Screen implements LocationListener {
             }
         }).start();
     }
+
+    /** How much of the world to hold warnings for, and how far the watch may
+     *  travel before asking for a fresh box. Two hours of motorway between
+     *  requests, and never a stale edge. */
+    private static final double ALERTS_RADIUS_M = 100000;
+    private static final double ALERTS_REFRESH_M = 40000;
+
+    private double alertsAtLat = Double.NaN, alertsAtLon;
 
     /**
      * The engine, started if it is not running.
