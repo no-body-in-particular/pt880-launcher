@@ -62,6 +62,9 @@ public class Route {
     /** Within this of the destination, the job is done. */
     public static final int ARRIVED_M = 30;
 
+    /** Two segments this close to equally near count as a tie. */
+    private static final double NEAR_M = 5;
+
     public static class Turn {
         public int kind;
         public int metres;          // length of the step that follows
@@ -75,6 +78,16 @@ public class Route {
     public final List<Turn> turns = new ArrayList<Turn>();
     public final List<double[]> line = new ArrayList<double[]>();
     public int totalMetres;
+
+    /** What the plan thought the drive would take, in seconds, or 0 when that
+     *  is not known - the server's route format does not carry it. Used only
+     *  as the arrival estimate's starting guess, before there is enough real
+     *  driving to average. */
+    public int totalSeconds;
+
+    /** Metres from each point of the line to the end of it. Built on first
+     *  use because most routes are drawn and never asked. */
+    private int[] toEnd;
 
     /**
      * Build a route from a path through the on-device graph.
@@ -93,11 +106,16 @@ public class Route {
 
         Route r = new Route();
         double total = 0;
+        long deci = 0;
         for (int i = 0; i < path.length; i++) {
             r.line.add(new double[] { g.lat(path[i]), g.lon(path[i]) });
-            if (i > 0) total += g.metres(path[i - 1], path[i]);
+            if (i > 0) {
+                total += g.metres(path[i - 1], path[i]);
+                deci += arcCost(g, path[i - 1], path[i]);
+            }
         }
         r.totalMetres = (int) Math.round(total);
+        r.totalSeconds = (int) (deci / 10);
 
         Turn depart = new Turn();
         depart.kind = DEPART;
@@ -262,6 +280,97 @@ public class Route {
     }
 
     /** How far off the line we are, for the off-route test. */
+    /** The cost the graph put on going from a to b, in deciseconds, or 0 if
+     *  they are not actually joined. */
+    private static int arcCost(RoadGraph g, int a, int b) {
+        int end = g.firstArc(a + 1);
+        for (int k = g.firstArc(a); k < end; k++) {
+            if (g.arcTarget(k) == b) return g.arcCost(k);
+        }
+        return 0;
+    }
+
+    /** The speed the route was planned at, metres per second, or -1. */
+    public float plannedMs() {
+        if (totalSeconds <= 0 || totalMetres <= 0) return -1;
+        return totalMetres / (float) totalSeconds;
+    }
+
+    /**
+     * How much driving is left, in metres, from wherever you are now.
+     *
+     * Measured along the route rather than to the destination as the crow
+     * flies: the point of the number is that it is what the arrival estimate
+     * is divided by, and driving round a firth is not the same journey as
+     * looking across it.
+     *
+     * The position is put onto the nearest segment first, so standing fifty
+     * metres off the line does not add fifty metres to the drive, and a route
+     * that doubles back near itself is measured from the leg you are on
+     * rather than from whichever leg happens to be closest - among segments
+     * within a few metres of each other, the one furthest along wins, which
+     * is the one you reach last.
+     */
+    public double metresRemaining(double lat, double lon) {
+        if (line.size() < 2) return -1;
+        suffix();
+
+        double best = Double.MAX_VALUE;
+        for (int i = 1; i < line.size(); i++) {
+            double d = pointToSegment(lat, lon, line.get(i - 1)[0], line.get(i - 1)[1],
+                                      line.get(i)[0], line.get(i)[1]);
+            if (d < best) best = d;
+        }
+        if (best == Double.MAX_VALUE) return -1;
+
+        // Among the segments that are equally close - the two legs of a road
+        // driven out and back, or a hairpin - take the last one. Being wrong
+        // that way says there is less driving left than there is, which the
+        // next fix corrects; being wrong the other way makes the estimate
+        // jump backwards every time you pass near an earlier part of the
+        // route.
+        int bestAt = -1;
+        double bestAlong = 0;
+        for (int i = 1; i < line.size(); i++) {
+            double[] a = line.get(i - 1), b = line.get(i);
+            double d = pointToSegment(lat, lon, a[0], a[1], b[0], b[1]);
+            if (d <= best + NEAR_M) {
+                bestAt = i;
+                bestAlong = alongSegment(lat, lon, a, b);
+            }
+        }
+        if (bestAt < 0) return -1;
+
+        // toEnd[i] is the distance from point i to the end, so what is left is
+        // the rest of the segment being driven plus everything after it.
+        double segment = metresBetween(line.get(bestAt - 1)[0], line.get(bestAt - 1)[1],
+                                       line.get(bestAt)[0], line.get(bestAt)[1]);
+        return toEnd[bestAt] + segment * (1 - bestAlong);
+    }
+
+    /** How far along a segment the nearest point to (lat,lon) is, 0 to 1. */
+    private static double alongSegment(double lat, double lon, double[] a, double[] b) {
+        double k = Math.cos(Math.toRadians(a[0]));
+        double ax = (b[1] - a[1]) * k, ay = b[0] - a[0];
+        double len = ax * ax + ay * ay;
+        if (len <= 0) return 0;
+        double t = (((lon - a[1]) * k) * ax + (lat - a[0]) * ay) / len;
+        return t < 0 ? 0 : (t > 1 ? 1 : t);
+    }
+
+    private void suffix() {
+        if (toEnd != null && toEnd.length == line.size()) return;
+        int n = line.size();
+        int[] t = new int[n];
+        double run = 0;
+        for (int i = n - 2; i >= 0; i--) {
+            run += metresBetween(line.get(i)[0], line.get(i)[1],
+                                 line.get(i + 1)[0], line.get(i + 1)[1]);
+            t[i] = (int) Math.round(run);
+        }
+        toEnd = t;
+    }
+
     public double offRouteMetres(double lat, double lon) {
         double best = Double.MAX_VALUE;
         for (int i = 1; i < line.size(); i++) {

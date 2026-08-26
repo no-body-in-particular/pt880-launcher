@@ -68,6 +68,23 @@ public class MapScreen extends Screen implements LocationListener {
     private double lat = Double.NaN, lon = Double.NaN;
     private float bearing = -1, speedMs = -1;
     private long fixAt = 0;
+
+    /**
+     * Speed and arrival, measured off the drive rather than taken from the
+     * plan.
+     *
+     * The route's own cost model is an average for a class of road, which is
+     * the right thing to choose a road with and the wrong thing to show next
+     * to a speedometer. These two numbers come from consecutive fixes, so
+     * they say what is happening now, and the second line of the bottom band
+     * is recomputed on each fix rather than each frame - working out how far
+     * along a sixty-thousand-point line you are is not a per-frame job.
+     */
+    private final Drive drive = new Drive();
+    private String driveLine = null;
+    /** Metres still to drive along the route, or -1. Kept so the hint line
+     *  and the arrival estimate quote the same journey. */
+    private double remainingM = -1;
     private String note = "";
     private boolean listening = false;
     private boolean arrived = false;
@@ -321,6 +338,11 @@ public class MapScreen extends Screen implements LocationListener {
         bearing = l.hasBearing() ? l.getBearing() : -1;
         speedMs = l.hasSpeed() ? l.getSpeed() : -1;
         fixAt = System.currentTimeMillis();
+        drive.fix(fixAt, lat, lon, speedMs);
+        // The watch's own fixes often arrive without a speed, so take the one
+        // worked out from the ground covered instead of showing nothing.
+        if (speedMs < 0) speedMs = drive.speedMs();
+        updateDriveLine();
 
         // Only when the position is outside what we already hold.
         if (!countryKnown || lon < cMinX || lon > cMaxX || lat < cMinY || lat > cMaxY) {
@@ -688,7 +710,12 @@ public class MapScreen extends Screen implements LocationListener {
         // The next turn is drawn on the map itself now, so this line is free
         // to say how far there is left to go.
         if (target != null) {
-            int m = (int) Route.metresBetween(lat, lon, target.lat, target.lon);
+            // Along the road while a route is loaded, as the crow flies
+            // otherwise. Showing 37 km next to an arrival time worked out
+            // over 43 km invites the reader to check the arithmetic and find
+            // it wrong.
+            int m = remainingM >= 0 ? (int) Math.round(remainingM)
+                    : (int) Route.metresBetween(lat, lon, target.lat, target.lon);
             hintCache = target.name + "  "
                     + (m >= 1000 ? ((m / 100) / 10.0 + " km") : (m + " m"));
         } else {
@@ -887,27 +914,65 @@ public class MapScreen extends Screen implements LocationListener {
          * half the backgrounds it lands on. Amber, matching the route it
          * refers to, so it is obvious which line the instruction is about.
          */
+        /**
+         * The bottom band: what to do next, and how the drive is going.
+         *
+         * Two lines, and the order matters. The instruction is the one that
+         * has to be read at a glance while moving, so it keeps the larger
+         * type and the position closest to the map; speed and arrival sit
+         * under it in smaller, dimmer type, because wanting them is never
+         * urgent. Either line may be missing - before the first turn is
+         * known, or before enough driving has happened to say how fast - and
+         * the band shrinks to whatever is actually there rather than leaving
+         * a black bar across a quarter of a 240 pixel screen.
+         */
         private void drawTurn(Canvas canvas, int w, int h) {
             if (route == null || Double.isNaN(lat)) return;
             String say = route.screenInstruction(lat, lon);
-            if (say == null) return;
+            String info = driveLine;
+            if (say == null && info == null) return;
 
-            final int band = 20;
+            final int band = (say != null ? 20 : 0) + (info != null ? 14 : 0);
+            // bandHeight() must agree with this, or the overlay lands on top
+            // of the text.
             paint.setStyle(Paint.Style.FILL);
             paint.setColor(0xD0000000);                 // dark, but not opaque
             canvas.drawRect(0, h - band, w, h, paint);
-
-            paint.setColor(approximate ? Ui.MUTED : Ui.ROUTE);
-            paint.setTextSize(13);
             paint.setTextAlign(Paint.Align.CENTER);
 
-            // Shrink rather than clip: "in 1.2 km turn sharp right" is longer
-            // than 240px at 13px, and half an instruction is worse than a
-            // small one.
-            while (paint.measureText(say) > w - 6 && paint.getTextSize() > 9) {
+            int y = h - band;
+            if (say != null) {
+                paint.setColor(approximate ? Ui.MUTED : Ui.ROUTE);
+                paint.setTextSize(13);
+                // Shrink rather than clip: "in 1.2 km turn sharp right" is
+                // longer than 240px at 13px, and half an instruction is worse
+                // than a small one.
+                fit(say, w);
+                canvas.drawText(say, w / 2f, y + 14, paint);
+                y += 20;
+            }
+            if (info != null) {
+                paint.setColor(Ui.MUTED);
+                paint.setTextSize(11);
+                fit(info, w);
+                canvas.drawText(info, w / 2f, y + 11, paint);
+            }
+        }
+
+        /** How tall the bottom band is, so nothing else is drawn under it. */
+        private int bandHeight() {
+            if (route == null || Double.isNaN(lat)) return 0;
+            int b = 0;
+            if (route.screenInstruction(lat, lon) != null) b += 20;
+            if (driveLine != null) b += 14;
+            return b;
+        }
+
+        /** Drop the type size until the line fits the width. */
+        private void fit(String s, int w) {
+            while (paint.measureText(s) > w - 6 && paint.getTextSize() > 8) {
                 paint.setTextSize(paint.getTextSize() - 1);
             }
-            canvas.drawText(say, w / 2f, h - 6, paint);
         }
 
         private void drawOverlay(Canvas canvas, int w, int h) {
@@ -923,8 +988,7 @@ public class MapScreen extends Screen implements LocationListener {
             if (approximate) {
                 paint.setColor(Ui.WARN);
                 paint.setTextAlign(Paint.Align.LEFT);
-                canvas.drawText("approx", 2,
-                        (route != null ? h - 24 : h - 2), paint);
+                canvas.drawText("approx", 2, h - bandHeight() - 4, paint);
             }
             long age = (fixAt == 0) ? -1 : (System.currentTimeMillis() - fixAt) / 1000;
             if (age > 30) {
@@ -996,7 +1060,52 @@ public class MapScreen extends Screen implements LocationListener {
     void setRoute(Route r) {
         route = r;
         arrived = false;
+        // Last drive's average is not evidence about this one - a route asked
+        // for after parking would otherwise start out predicting arrival at
+        // the speed of the walk to the car.
+        drive.restart();
+        driveLine = null;
+        updateDriveLine();
         view.invalidate();
+    }
+
+    /**
+     * The speed-and-arrival line, rebuilt on a fix.
+     *
+     * Speed appears as soon as two fixes are far enough apart to divide.
+     * Arrival waits for a made-good average, or for a route that carries the
+     * time it was planned to take - the on-device router knows it, the
+     * server's format does not - because an arrival time invented from
+     * nothing is worse than an empty half of a line.
+     */
+    private void updateDriveLine() {
+        if (route == null || Double.isNaN(lat) || approximate) {
+            driveLine = null;
+            remainingM = -1;
+            return;
+        }
+
+        StringBuilder b = new StringBuilder();
+        int kmh = drive.kmh();
+        if (kmh >= 0) b.append(kmh).append(" km/h");
+
+        double left = route.metresRemaining(lat, lon);
+        remainingM = left;
+        int eta = left < 0 ? -1 : drive.etaSeconds(left, route.plannedMs());
+        String t = Drive.shortTime(eta);
+        if (t != null) {
+            if (b.length() > 0) b.append("  \u00b7  ");
+            b.append(t);
+            String at = Drive.arrivalClock(System.currentTimeMillis(),
+                    java.util.TimeZone.getDefault().getOffset(System.currentTimeMillis()), eta);
+            if (at != null) b.append("  ").append(at);
+        }
+        driveLine = b.length() > 0 ? b.toString() : null;
+        // One line a fix, alongside the fix itself: when an arrival estimate
+        // looks wrong on the wrist there is otherwise no way to tell whether
+        // the distance or the speed was the wrong half.
+        Log.i("watchmap", "drive: " + driveLine + "  left="
+                + (left < 0 ? "?" : Math.round(left) + "m"));
     }
 
     void reloadDestination() {

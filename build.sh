@@ -173,6 +173,22 @@ if javac -nowarn -d "$TD2" "$HERE/src/org/watchlauncher/Circadian.java" 2>/dev/n
 fi
 rm -rf "$TD2"
 
+# Speed and time to arrival. Drive touches no Android class so that the cases
+# that actually bite - stopped at a light, a fix that teleports, the watch
+# waking an hour later - can be driven here rather than discovered on a road.
+TD3=$(mktemp -d)
+if javac -nowarn -d "$TD3" "$HERE/src/org/watchlauncher/Drive.java" 2>/dev/null \
+   && javac -nowarn -cp "$TD3" -d "$TD3" "$HERE/test/DriveTest.java" 2>/dev/null; then
+    if ! java -cp "$TD3" DriveTest > "$TD3/out"; then
+        echo "drive test FAILED:" >&2
+        cat "$TD3/out" >&2
+        rm -rf "$TD3"
+        exit 1
+    fi
+    tail -1 "$TD3/out"
+fi
+rm -rf "$TD3"
+
 echo "built: $APK"
 ls -l "$APK"
 echo
