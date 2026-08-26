@@ -220,9 +220,31 @@ public class MapScreen extends Screen implements LocationListener {
     /** The list as last read. Reloaded by Reload destination, not by drawing. */
     List<Destination> destinations() { return destinations; }
 
+    /**
+     * The route left over from last time, read off the card.
+     *
+     * On a background thread, and its tables built there too. A long route is
+     * four thousand points; parsing it and measuring it is not work to do
+     * while the screen is waiting to be drawn for the first time.
+     */
     private void loadRoute() {
-        File f = new File(MapTiles.DIR + "/route.bin");
-        route = f.isFile() ? Route.read(f) : null;
+        new Thread(new Runnable() {
+            public void run() {
+                File f = new File(MapTiles.DIR + "/route.bin");
+                final Route r = f.isFile() ? Route.read(f) : null;
+                if (r != null) r.prepare();
+                ui.post(new Runnable() {
+                    public void run() {
+                        // Only if nothing better arrived meanwhile: a route
+                        // just asked for beats one left on the card.
+                        if (route == null) {
+                            route = r;
+                            changed();
+                        }
+                    }
+                });
+            }
+        }).start();
     }
 
     // ---------------------------------------------------------------- fixes
@@ -416,7 +438,11 @@ public class MapScreen extends Screen implements LocationListener {
         if (router == null) router = new Router(graph);
         int[] path = router.path(fromLat, fromLon, toLat, toLon);
         if (path == null) return null;
-        return Route.fromNodes(graph, path);
+        Route r = Route.fromNodes(graph, path);
+        // This is called from the routing thread, which is the right place to
+        // pay for the route's tables rather than the first fix after it.
+        if (r != null) r.prepare();
+        return r;
     }
 
     boolean canRouteOffline() {
@@ -465,6 +491,8 @@ public class MapScreen extends Screen implements LocationListener {
                             + "?flat=" + la + "&flon=" + lo
                             + "&tlat=" + to.lat + "&tlon=" + to.lon;
                     if (tiles.download(url, out)) local = Route.read(out);
+                    // Off the UI thread while we are still on this one.
+                    if (local != null) local.prepare();
                 }
                 final Route r = local;
                 ui.post(new Runnable() {
@@ -1036,6 +1064,7 @@ public class MapScreen extends Screen implements LocationListener {
                             + "?flat=" + la + "&flon=" + lo
                             + "&tlat=" + d.lat + "&tlon=" + d.lon;
                     if (tiles.download(url, out)) found = Route.read(out);
+                    if (found != null) found.prepare();
                 }
                 final Route r = found;
                 ui.post(new Runnable() {

@@ -177,7 +177,8 @@ rm -rf "$TD2"
 # that actually bite - stopped at a light, a fix that teleports, the watch
 # waking an hour later - can be driven here rather than discovered on a road.
 TD3=$(mktemp -d)
-if javac -nowarn -d "$TD3" "$HERE/src/org/watchlauncher/Drive.java" 2>/dev/null \
+if javac -nowarn -d "$TD3" "$HERE/src/org/watchlauncher/Drive.java" \
+        "$HERE/src/org/watchlauncher/Geo.java" 2>/dev/null \
    && javac -nowarn -cp "$TD3" -d "$TD3" "$HERE/test/DriveTest.java" 2>/dev/null; then
     if ! java -cp "$TD3" DriveTest > "$TD3/out"; then
         echo "drive test FAILED:" >&2
@@ -188,6 +189,25 @@ if javac -nowarn -d "$TD3" "$HERE/src/org/watchlauncher/Drive.java" 2>/dev/null 
     tail -1 "$TD3/out"
 fi
 rm -rf "$TD3"
+
+# Where you are on a route and how much of it is left. The fast version is not
+# obviously the same as the slow one - the search starts where it finished
+# last time and looks at a window around that - so it is checked against a
+# full scan of every segment, over a route that doubles back near itself.
+TD4=$(mktemp -d)
+if javac -nowarn -d "$TD4" "$HERE/src/org/watchlauncher/Route.java" \
+        "$HERE/src/org/watchlauncher/Geo.java" \
+        "$HERE/test/stub/org/watchlauncher/RoadGraph.java" 2>/dev/null \
+   && javac -nowarn -cp "$TD4" -d "$TD4" "$HERE/test/RouteGeomTest.java" 2>/dev/null; then
+    if ! java -cp "$TD4" RouteGeomTest > "$TD4/out"; then
+        echo "route geometry test FAILED:" >&2
+        cat "$TD4/out" >&2
+        rm -rf "$TD4"
+        exit 1
+    fi
+    tail -2 "$TD4/out"
+fi
+rm -rf "$TD4"
 
 echo "built: $APK"
 ls -l "$APK"

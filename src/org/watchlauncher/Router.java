@@ -26,7 +26,27 @@ public class Router {
 
     /** Fastest thing on the network, for the lower bound. Too high only
      *  makes the search wider; too low would make it wrong. */
-    private static final double MAX_MPS = 110 / 3.6;
+    /**
+     * The fastest anything is driven, used to bound what is left to go.
+     *
+     * A* only returns the best route if this estimate never exceeds the
+     * truth. This was 110 km/h, chosen by eye; the Dutch extract has 1,589
+     * ways tagged 120 or 130, so it exceeded the truth on any route that
+     * could have used one, and the search was not strictly correct. It
+     * happened to return the same route anyway on every pair measured, which
+     * is not the same thing as being right.
+     *
+     * The graph now carries its own fastest road in its header, so this is
+     * only the fallback for a graph built before that - and a fallback has to
+     * be high enough to be safe rather than tight.
+     */
+    private static final double FALLBACK_MAX_MPS = 140 / 3.6;
+
+    /** From the graph when it says, conservative when it does not. */
+    private double maxMps() {
+        int kmh = g == null ? 0 : g.maxKmh();
+        return kmh > 0 ? kmh / 3.6 : FALLBACK_MAX_MPS;
+    }
 
     /** Give up rather than grind: a search this wide has either been asked
      *  for something unreachable or is about to run the battery down. */
@@ -139,10 +159,7 @@ public class Router {
         // rarely wanders more than a few tens of kilometres sideways even
         // when it goes a long way round, so the margin grows slowly and
         // stops.
-        double dy = (toLat - fromLat) * 110540;
-        double dx = (toLon - fromLon) * 111320
-                * Math.cos(Math.toRadians((fromLat + toLat) / 2));
-        double straight = Math.sqrt(dx * dx + dy * dy);
+        double straight = Geo.metresFlat(fromLat, fromLon, toLat, toLon);
         double margin = Math.min(35000, Math.max(10000, straight * 0.15));
 
         // Too much to search: narrow it before giving up. A tighter corridor
@@ -176,8 +193,9 @@ public class Router {
      */
     private boolean corridor(double aLat, double aLon, double bLat, double bLon,
                              double margin) {
-        double dLat = margin / 110540.0;
-        double dLon = margin / (111320.0 * Math.cos(Math.toRadians((aLat + bLat) / 2)));
+        double mid = (aLat + bLat) / 2;
+        double dLat = margin / Geo.perLat(mid);
+        double dLon = margin / Geo.perLon(mid);
 
         int y0 = g.cellY(Math.min(aLat, bLat) - dLat);
         int y1 = g.cellY(Math.max(aLat, bLat) + dLat);
@@ -286,12 +304,16 @@ public class Router {
         heapSize = 0;
 
         final double tla = g.lat(t), tlo = g.lon(t);
-        final double kx = Math.cos(Math.toRadians(tla));
+        // Fixed for the whole search: the target does not move, and these
+        // were being recomputed for every node taken off the heap.
+        final double kx = Geo.perLon(tla);
+        final double ky = Geo.perLat(tla);
+        final double mps = maxMps();
 
         dist[ls] = 0;
         parent[ls] = -1;
         stamp[ls] = (byte) generation;
-        push(s, heuristic(s, tla, tlo, kx));
+        push(s, heuristic(s, tla, tlo, kx, ky, mps));
 
         settled = 0;
         boolean found = false;
@@ -317,7 +339,7 @@ public class Router {
                     stamp[lv] = (byte) generation;
                     dist[lv] = nd;
                     parent[lv] = u;                // parents are global ids
-                    push(v, nd + heuristic(v, tla, tlo, kx));
+                    push(v, nd + heuristic(v, tla, tlo, kx, ky, mps));
                 }
             }
         }
@@ -349,10 +371,11 @@ public class Router {
         heapSize = 0;
     }
 
-    private int heuristic(int node, double tla, double tlo, double kx) {
-        double dy = (g.lat(node) - tla) * 110540;
-        double dx = (g.lon(node) - tlo) * 111320 * kx;
-        return (int) (Math.sqrt(dx * dx + dy * dy) / MAX_MPS * 10);
+    private int heuristic(int node, double tla, double tlo, double kx, double ky,
+                          double mps) {
+        double dy = (g.lat(node) - tla) * ky;
+        double dx = (g.lon(node) - tlo) * kx;
+        return (int) (Math.sqrt(dx * dx + dy * dy) / mps * 10);
     }
 
     // ------------------------------------------------------------ the heap

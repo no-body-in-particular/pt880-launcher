@@ -68,6 +68,7 @@ public class RoadGraph {
     private RandomAccessFile file;
 
     private int nodes, arcs, cols, rows;
+    private int maxKmh = 0;
     private double minx, miny, maxx, maxy;
     private int nodesAt, adjAt, arcsAt, gridAt;
 
@@ -92,6 +93,9 @@ public class RoadGraph {
     public String country() { return country; }
 
     public int nodeCount() { return nodes; }
+
+    /** The fastest road in this graph, km/h, or 0 if the file does not say. */
+    public int maxKmh() { return maxKmh; }
 
     /** @return true if this country's graph is on the card and usable. */
     public synchronized boolean open(String c) {
@@ -121,6 +125,11 @@ public class RoadGraph {
                 close();
                 return false;
             }
+            // The graph's own fastest road, in km/h, so the router's estimate
+            // of what is left can be both admissible and tight rather than a
+            // constant guessed at compile time. Zero means a graph built
+            // before this field was written.
+            maxKmh = b.getShort(6) & 0xFFFF;
             nodes = b.getInt(8);
             arcs = b.getInt(12);
             cols = b.getInt(16);
@@ -179,6 +188,7 @@ public class RoadGraph {
     }
 
     public synchronized void close() {
+        maxKmh = 0;
         buf = null;
         country = null;
         try { if (file != null) file.close(); } catch (Exception e) { }
@@ -280,8 +290,9 @@ public class RoadGraph {
     /** Metres between two nodes, near enough at these distances. */
     public double metres(int a, int b) {
         double la = lat(a), lb = lat(b);
-        double dy = (lb - la) * 110540;
-        double dx = (lon(b) - lon(a)) * 111320 * Math.cos(Math.toRadians((la + lb) / 2));
+        double mid = (la + lb) / 2;
+        double dy = (lb - la) * Geo.perLat(mid);
+        double dx = (lon(b) - lon(a)) * Geo.perLon(mid);
         return Math.sqrt(dx * dx + dy * dy);
     }
 }

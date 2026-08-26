@@ -62,8 +62,9 @@ public class Route {
     /** Within this of the destination, the job is done. */
     public static final int ARRIVED_M = 30;
 
-    /** Two segments this close to equally near count as a tie. */
-    private static final double NEAR_M = 5;
+    /** Two segments this close to equally near count as a tie, squared
+     *  because that is how the scan compares them. */
+    private static final double NEAR2 = 5 * 5;
 
     public static class Turn {
         public int kind;
@@ -85,9 +86,11 @@ public class Route {
      *  driving to average. */
     public int totalSeconds;
 
-    /** Metres from each point of the line to the end of it. Built on first
-     *  use because most routes are drawn and never asked. */
+    /** Metres from each point of the line to the end of it, and the metres in
+     *  a degree of longitude there. Built together on first use, because most
+     *  routes are drawn and never asked. */
     private int[] toEnd;
+    private double[] kxAt, kyAt;
 
     /**
      * Build a route from a path through the on-device graph.
@@ -300,87 +303,184 @@ public class Route {
      * How much driving is left, in metres, from wherever you are now.
      *
      * Measured along the route rather than to the destination as the crow
-     * flies: the point of the number is that it is what the arrival estimate
-     * is divided by, and driving round a firth is not the same journey as
-     * looking across it.
-     *
-     * The position is put onto the nearest segment first, so standing fifty
-     * metres off the line does not add fifty metres to the drive, and a route
-     * that doubles back near itself is measured from the leg you are on
-     * rather than from whichever leg happens to be closest - among segments
-     * within a few metres of each other, the one furthest along wins, which
-     * is the one you reach last.
+     * flies: the point of the number is that the arrival estimate is divided
+     * by it, and driving round a firth is not the same journey as looking
+     * across it.
      */
     public double metresRemaining(double lat, double lon) {
-        if (line.size() < 2) return -1;
+        return locate(lat, lon) ? atRemaining : -1;
+    }
+
+    /** How far the given position is from the route. */
+    public double offRouteMetres(double lat, double lon) {
+        return locate(lat, lon) ? atOff : Double.MAX_VALUE;
+    }
+
+    /** Where the last call to locate() put us, so a second question about the
+     *  same position costs nothing. */
+    private double atLat = Double.NaN, atLon = Double.NaN;
+    private double atOff, atRemaining;
+
+    /**
+     * Which piece of the route we are on, and how much of it is left.
+     *
+     * <h3>Why this is not a scan of the whole line</h3>
+     *
+     * It was, and on a 358 km route with four thousand points it took between
+     * 47 and 427 milliseconds - on the emulator, which is faster than the
+     * watch - and it ran on the UI thread on every fix. Two questions were
+     * being asked, how far off the route we are and how much of it is left,
+     * and each walked the whole line; the arrival estimate then made it three
+     * walks. Every one of them called Math.cos once per segment.
+     *
+     * Two things fix it. The cosines are precomputed with the distances, so
+     * the loop has no trigonometry in it at all. And a drive moves along a
+     * route rather than jumping about it, so the search starts from where it
+     * ended last time and looks only at a window around it. The whole line is
+     * only walked when nothing in that window is near - which is what leaving
+     * the route, or being handed a new one, actually looks like.
+     *
+     * @return false if there is no line to be on
+     */
+    private boolean locate(double lat, double lon) {
+        if (line.size() < 2) return false;
+        if (lat == atLat && lon == atLon) return true;
         suffix();
 
-        double best = Double.MAX_VALUE;
-        for (int i = 1; i < line.size(); i++) {
-            double d = pointToSegment(lat, lon, line.get(i - 1)[0], line.get(i - 1)[1],
-                                      line.get(i)[0], line.get(i)[1]);
-            if (d < best) best = d;
+        /*
+         * The window is only trusted while it is continuing a drive.
+         *
+         * Until the first match there is nothing for it to continue from, and
+         * starting it at the head of the line is not a neutral guess: on a
+         * route that comes back near where it started - any loop, and any
+         * there-and-back - the first point of the line is within eighty
+         * metres of the last, so a window at the head happily matches a
+         * position that is actually at the destination and reports the whole
+         * route still to drive.
+         */
+        int found = -1;
+        if (located) {
+            found = scan(lat, lon, Math.max(1, cursor - BACK),
+                         Math.min(line.size() - 1, cursor + AHEAD));
         }
-        if (best == Double.MAX_VALUE) return -1;
+        // Nothing near in the window means the drive is not where it was: a
+        // jump, a reroute, or leaving the road. Then the whole line is worth
+        // the walk.
+        if (found < 0 || bestD > OFF_ROUTE_M) {
+            int all = scan(lat, lon, 1, line.size() - 1);
+            if (all >= 0) found = all;
+        }
+        if (found < 0) return false;
+        located = true;
 
-        // Among the segments that are equally close - the two legs of a road
-        // driven out and back, or a hairpin - take the last one. Being wrong
-        // that way says there is less driving left than there is, which the
-        // next fix corrects; being wrong the other way makes the estimate
-        // jump backwards every time you pass near an earlier part of the
-        // route.
-        int bestAt = -1;
-        double bestAlong = 0;
-        for (int i = 1; i < line.size(); i++) {
+        cursor = found;
+        double[] a = line.get(found - 1), b = line.get(found);
+        double segment = metresBetween(a[0], a[1], b[0], b[1]);
+        atOff = bestD;
+        atRemaining = toEnd[found] + segment * (1 - bestT);
+        atLat = lat;
+        atLon = lon;
+        return true;
+    }
+
+    /** How far back and forward of the last position to look. Ten seconds of
+     *  motorway is under three hundred metres and the points are tens of
+     *  metres apart, so this is minutes of driving either way. */
+    private static final int BACK = 32, AHEAD = 256;
+
+    private int cursor = 1;
+    /** Whether cursor means anything yet. */
+    private boolean located = false;
+    private double bestD, bestT;
+
+    /**
+     * The nearest segment between from and to, leaving its distance in bestD
+     * and how far along it in bestT.
+     *
+     * Among segments equally close - the two legs of a road driven out and
+     * back, or a hairpin - the last one wins. Being wrong that way says there
+     * is less driving left than there is, and the next fix corrects it; being
+     * wrong the other way makes the estimate jump backwards every time the
+     * drive passes near an earlier part of the route.
+     */
+    private int scan(double lat, double lon, int from, int to) {
+        int at = -1;
+        double best = Double.MAX_VALUE, bestAlong = 0;
+        for (int i = from; i <= to; i++) {
             double[] a = line.get(i - 1), b = line.get(i);
-            double d = pointToSegment(lat, lon, a[0], a[1], b[0], b[1]);
-            if (d <= best + NEAR_M) {
-                bestAt = i;
-                bestAlong = alongSegment(lat, lon, a, b);
+            double kx = kxAt[i - 1], ky = kyAt[i - 1];
+            double px = (lon - a[1]) * kx, py = (lat - a[0]) * ky;
+            double bx = (b[1] - a[1]) * kx, by = (b[0] - a[0]) * ky;
+            double len = bx * bx + by * by;
+            double t, dx, dy;
+            if (len == 0) {
+                t = 0; dx = px; dy = py;
+            } else {
+                t = (px * bx + py * by) / len;
+                if (t < 0) t = 0; else if (t > 1) t = 1;
+                dx = px - t * bx; dy = py - t * by;
+            }
+            // Compared squared, so the loop has no square roots either.
+            double d2 = dx * dx + dy * dy;
+            if (at < 0 || d2 < best - NEAR2) {          // clearly nearer
+                best = d2; at = i; bestAlong = t;
+            } else if (d2 <= best + NEAR2) {            // a tie: the later wins
+                if (d2 < best) best = d2;
+                at = i; bestAlong = t;
             }
         }
-        if (bestAt < 0) return -1;
-
-        // toEnd[i] is the distance from point i to the end, so what is left is
-        // the rest of the segment being driven plus everything after it.
-        double segment = metresBetween(line.get(bestAt - 1)[0], line.get(bestAt - 1)[1],
-                                       line.get(bestAt)[0], line.get(bestAt)[1]);
-        return toEnd[bestAt] + segment * (1 - bestAlong);
+        if (at < 0) return -1;
+        bestD = Math.sqrt(best);
+        bestT = bestAlong;
+        return at;
     }
 
-    /** How far along a segment the nearest point to (lat,lon) is, 0 to 1. */
-    private static double alongSegment(double lat, double lon, double[] a, double[] b) {
-        double k = Math.cos(Math.toRadians(a[0]));
-        double ax = (b[1] - a[1]) * k, ay = b[0] - a[0];
-        double len = ax * ax + ay * ay;
-        if (len <= 0) return 0;
-        double t = (((lon - a[1]) * k) * ax + (lat - a[0]) * ay) / len;
-        return t < 0 ? 0 : (t > 1 ? 1 : t);
+    /**
+     * Build the tables now, on whatever thread is asking.
+     *
+     * They are built on first use otherwise, and first use is the first fix
+     * after a route loads - on the UI thread, where a four thousand point
+     * route costs a third of a second and the watch visibly stops. Every
+     * route arrives on a background thread, so it can be paid for there.
+     */
+    public void prepare() {
+        if (line.size() >= 2) suffix();
     }
 
+    /** Distance to the end from each point, and the metres-per-degree of
+     *  longitude there. Both are fixed for the life of a route and both were
+     *  being recomputed inside the loop that uses them. */
     private void suffix() {
         if (toEnd != null && toEnd.length == line.size()) return;
         int n = line.size();
         int[] t = new int[n];
+        double[] kx = new double[n];
+        double[] ky = new double[n];
         double run = 0;
+        kx[n - 1] = Geo.perLon(line.get(n - 1)[0]);
+        ky[n - 1] = Geo.perLat(line.get(n - 1)[0]);
         for (int i = n - 2; i >= 0; i--) {
-            run += metresBetween(line.get(i)[0], line.get(i)[1],
-                                 line.get(i + 1)[0], line.get(i + 1)[1]);
+            double[] a = line.get(i), b = line.get(i + 1);
+            kx[i] = Geo.perLon(a[0]);
+            ky[i] = Geo.perLat(a[0]);
+            // Flat, using the scales just computed, rather than a haversine
+            // per point. Consecutive points of a route are tens of metres
+            // apart, where the two agree to well under a millimetre, and the
+            // haversine's four trigonometric calls per point were most of the
+            // half second this took on a four thousand point route.
+            double dy = (b[0] - a[0]) * ky[i];
+            double dx = (b[1] - a[1]) * kx[i];
+            run += Math.sqrt(dx * dx + dy * dy);
             t[i] = (int) Math.round(run);
         }
         toEnd = t;
+        kxAt = kx;
+        kyAt = ky;
+        cursor = 1;
+        located = false;
+        atLat = Double.NaN;
     }
 
-    public double offRouteMetres(double lat, double lon) {
-        double best = Double.MAX_VALUE;
-        for (int i = 1; i < line.size(); i++) {
-            double d = pointToSegment(lat, lon,
-                    line.get(i - 1)[0], line.get(i - 1)[1],
-                    line.get(i)[0], line.get(i)[1]);
-            if (d < best) best = d;
-        }
-        return best;
-    }
 
     /** What to do at a turn, as a phrase. Shared by the voice and the screen
      *  so the two never word the same manoeuvre differently. */
@@ -495,13 +595,28 @@ public class Route {
 
     public static double metresBetween(double lat1, double lon1,
                                        double lat2, double lon2) {
-        double dLat = Math.toRadians(lat2 - lat1);
-        double dLon = Math.toRadians(lon2 - lon1);
-        double a = Math.sin(dLat / 2) * Math.sin(dLat / 2)
-                 + Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2))
-                 * Math.sin(dLon / 2) * Math.sin(dLon / 2);
-        return 6371000.0 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        return Geo.metres(lat1, lon1, lat2, lon2);
     }
+
+    /**
+     * Metres in a degree of latitude, and of longitude, at a given latitude.
+     *
+     * Everything here used to use 110540 for the first and 111320 times the
+     * cosine for the second. Those are the values at the equator: a degree of
+     * latitude is 110574 m there and 111267 m in the Netherlands, so every
+     * distance this watch reported was 0.65% short - and 0.78% short in
+     * Scotland, because the error grows with latitude. On a 358 km route that
+     * is two kilometres, and it is not a rounding difference that cancels: it
+     * is one-sided, and it made arrival times optimistic everywhere north of
+     * the tropics.
+     *
+     * These are the usual series for the WGS84 ellipsoid, good to a metre in
+     * a degree, which is far past what a route measured between junctions can
+     * make use of.
+     */
+    static double metresPerLat(double lat) { return Geo.perLat(lat); }
+
+    static double metresPerLon(double lat) { return Geo.perLon(lat); }
 
     /** Bearing from one point to another, degrees clockwise from north. */
     public static double bearing(double lat1, double lon1, double lat2, double lon2) {
@@ -513,19 +628,4 @@ public class Route {
         return (b + 360) % 360;
     }
 
-    /** Flat-earth is fine over a route segment and much cheaper than the
-     *  alternative on a processor this size. */
-    private static double pointToSegment(double lat, double lon,
-                                         double alat, double alon,
-                                         double blat, double blon) {
-        double kx = 111320.0 * Math.cos(Math.toRadians(alat));
-        double ky = 110540.0;
-        double px = (lon - alon) * kx, py = (lat - alat) * ky;
-        double bx = (blon - alon) * kx, by = (blat - alat) * ky;
-        double len = bx * bx + by * by;
-        if (len == 0) return Math.sqrt(px * px + py * py);
-        double t = Math.max(0, Math.min(1, (px * bx + py * by) / len));
-        double dx = px - t * bx, dy = py - t * by;
-        return Math.sqrt(dx * dx + dy * dy);
-    }
 }

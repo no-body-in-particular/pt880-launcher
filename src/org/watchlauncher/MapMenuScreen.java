@@ -219,6 +219,7 @@ public class MapMenuScreen extends ListScreen {
                             + "?flat=" + la + "&flon=" + lo
                             + "&tlat=" + d.lat + "&tlon=" + d.lon;
                     if (map.tiles().download(url, out)) found = Route.read(out);
+                    if (found != null) found.prepare();
                 }
                 final Route r = found;
                 shell.runOnUiThread(new Runnable() {
@@ -362,6 +363,7 @@ public class MapMenuScreen extends ListScreen {
                             map.lat(), map.lon(), p);
                 } else {
                     Route r = Route.read(new File(MapTiles.DIR + "/route.bin"));
+                    if (r != null) r.prepare();
                     if (r == null) { finish("no route yet"); return; }
                     failed = job.route(map.tiles(), country, r, p);
                 }

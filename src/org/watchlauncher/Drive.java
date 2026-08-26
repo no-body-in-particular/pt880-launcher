@@ -239,14 +239,10 @@ public class Drive {
 
     private static String pad2(int v) { return v < 10 ? "0" + v : String.valueOf(v); }
 
-    /** Equirectangular, which over the tens of metres between two fixes is
-     *  indistinguishable from the great circle and far cheaper. Kept here
-     *  rather than borrowed from Route so that this class pulls in nothing:
-     *  Route reaches the road graph, the road graph reaches Android, and then
-     *  none of this could be tested off the device. */
+    /** From Geo rather than Route: Route reaches the road graph and the road
+     *  graph reaches Android, and then none of this could be tested off the
+     *  device. Geo reaches nothing. */
     static double metres(double la1, double lo1, double la2, double lo2) {
-        double dy = (la2 - la1) * 110540;
-        double dx = (lo2 - lo1) * 111320 * Math.cos(Math.toRadians((la1 + la2) / 2));
-        return Math.sqrt(dx * dx + dy * dy);
+        return Geo.metresFlat(la1, lo1, la2, lo2);
     }
 }
