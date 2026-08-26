@@ -204,6 +204,19 @@ public class MapTiles {
     private static final int INDEX_LEN = SLOTS * 8;
     private static final int DATA_AT = HEAD_LEN + INDEX_LEN;
 
+    /**
+     * The largest a single tile may claim to be.
+     *
+     * The length comes out of the block's own index, and the card is FAT32 on
+     * cheap flash that has already given us torn writes. A corrupt entry
+     * claiming two gigabytes turns into new byte[len] and an
+     * OutOfMemoryError - which is an Error, not an Exception, so the catch
+     * around it would not have caught it and the process would have gone.
+     * A dense 256x256 tile of this map is a few kilobytes; half a megabyte is
+     * generous by two orders of magnitude and still safe.
+     */
+    private static final int MAX_TILE_BYTES = 512 * 1024;
+
     /** Tiles live under b<zoom>, so a card written by the old one-file-per-tile
      *  build is simply not found - and shows up under Clean up as reclaimable
      *  rather than being deleted out from under a working map. */
@@ -315,9 +328,19 @@ public class MapTiles {
         int off = t[slot], len = t[slot + 1];
         if (len <= 0) return null;
 
+        File bf = blockFile(z, bx, by);
+        long size = bf.length();
+        // Checked against the file rather than trusted. A torn write leaves
+        // an index pointing anywhere.
+        if (len > MAX_TILE_BYTES || off < DATA_AT || off + (long) len > size) {
+            Log.w("watchmap", "bad index entry at " + z + "/" + x + "/" + y
+                    + " off=" + off + " len=" + len + " file=" + size);
+            return null;
+        }
+
         java.io.RandomAccessFile r = null;
         try {
-            r = new java.io.RandomAccessFile(blockFile(z, bx, by), "r");
+            r = new java.io.RandomAccessFile(bf, "r");
             r.seek(off);
             byte[] png = new byte[len];
             r.readFully(png);
@@ -344,7 +367,11 @@ public class MapTiles {
             b = BitmapFactory.decodeByteArray(png, 0, len, o);
             if (b != null) memory.put(key, b);
             return b;
-        } catch (Exception e) {
+        } catch (Throwable t2) {
+            // Throwable, not Exception: decoding allocates, and running out
+            // of room while drawing should cost this tile rather than the
+            // watch.
+            Log.w("watchmap", "tile " + z + "/" + x + "/" + y + ": " + t2);
             return null;
         } finally {
             try { if (r != null) r.close(); } catch (Exception e) { }
