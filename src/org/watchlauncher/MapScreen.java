@@ -82,6 +82,20 @@ public class MapScreen extends Screen implements LocationListener {
      */
     private final Drive drive = new Drive();
     private String driveLine = null;
+
+    /**
+     * Speed cameras and motorway exits, if the card has them.
+     *
+     * Kept out of the graph because they change nothing about which way to go
+     * - they are what the watch says while going that way - so a card without
+     * the file just gets no warnings and everything else carries on.
+     */
+    private final Alerts alerts = Alerts.shared();
+    private String alertsFor = null;
+
+    /** Cameras already spoken for, so each is announced once rather than on
+     *  every fix for the four hundred metres it stays in range. */
+    private final java.util.HashSet<Long> saidCamera = new java.util.HashSet<Long>();
     /** Metres still to drive along the route, or -1. Kept so the hint line
      *  and the arrival estimate quote the same journey. */
     private double remainingM = -1;
@@ -239,6 +253,7 @@ public class MapScreen extends Screen implements LocationListener {
                         // just asked for beats one left on the card.
                         if (route == null) {
                             route = r;
+                            if (r != null) r.signs(signs);
                             changed();
                         }
                     }
@@ -365,6 +380,9 @@ public class MapScreen extends Screen implements LocationListener {
         // worked out from the ground covered instead of showing nothing.
         if (speedMs < 0) speedMs = drive.speedMs();
         updateDriveLine();
+        // Not inside follow(): a camera is worth knowing about whether or not
+        // the watch happens to be navigating anywhere.
+        warnCameras();
 
         // Only when the position is outside what we already hold.
         if (!countryKnown || lon < cMinX || lon > cMaxX || lat < cMinY || lat > cMaxY) {
@@ -586,7 +604,10 @@ public class MapScreen extends Screen implements LocationListener {
                         if (reply == null) {
                             // Offline: whatever is already on the card for
                             // this area is still the right map to draw.
-                            if (country == null) country = offlineGuess();
+                            if (country == null) {
+                                country = offlineGuess();
+                                loadAlerts(country);
+                            }
                             view.invalidate();
                             return;
                         }
@@ -596,6 +617,7 @@ public class MapScreen extends Screen implements LocationListener {
                         if (f.length < 5) return;
                         country = f[0];
                         Log.i("watchmap", "country = " + country);
+                        loadAlerts(country);
                         try {
                             cMinX = Double.parseDouble(f[1]);
                             cMinY = Double.parseDouble(f[2]);
@@ -632,6 +654,7 @@ public class MapScreen extends Screen implements LocationListener {
                     public void run() {
                         country = f[0];
                         Log.i("watchmap", "country = " + country);
+                        loadAlerts(country);
                         try {
                             cMinX = Double.parseDouble(f[1]);
                             cMinY = Double.parseDouble(f[2]);
@@ -1086,8 +1109,26 @@ public class MapScreen extends Screen implements LocationListener {
     double lon() { return lon; }
     boolean hasFix() { return !Double.isNaN(lat); }
 
+    /**
+     * What the sign at a junction says, for the voice.
+     *
+     * A motorway junction within eighty metres of the manoeuvre is the one it
+     * refers to; anything further is a different junction, and naming the
+     * wrong one is worse than naming none.
+     */
+    private final Route.Signs signs = new Route.Signs() {
+        public String junctionAt(double la, double lo) {
+            if (!alerts.loaded()) return null;
+            Alerts.Near n = alerts.nearest(la, lo, Alerts.EXIT, EXIT_NAME_M);
+            return n == null ? null : n.name;
+        }
+    };
+
+    private static final double EXIT_NAME_M = 80;
+
     void setRoute(Route r) {
         route = r;
+        if (r != null) r.signs(signs);
         arrived = false;
         // Last drive's average is not evidence about this one - a route asked
         // for after parking would otherwise start out predicting arrival at
@@ -1140,6 +1181,97 @@ public class MapScreen extends Screen implements LocationListener {
     void reloadDestination() {
         loadDestination();
         view.invalidate();
+    }
+
+    /**
+     * A speed camera far enough ahead to do something about it.
+     *
+     * Announced once each, and only when moving: a camera four hundred metres
+     * away is fourteen seconds at road speed and worth knowing, and the same
+     * camera while parked next to it is not news. Distance alone would fire
+     * on cameras on the far carriageway and on the road just left, so it also
+     * has to be roughly ahead - within a right angle of where the watch is
+     * pointing.
+     */
+    private void warnCameras() {
+        if (!alerts.loaded() || Double.isNaN(lat)) return;
+        // A server position can be hundreds of metres out, which is enough to
+        // put the warning on the wrong road entirely.
+        if (approximate) return;
+        if (speedMs < CAMERA_MIN_MS) return;
+
+        for (Alerts.Near n : alerts.near(lat, lon, Alerts.CAMERA, CAMERA_WARN_M)) {
+            long id = Math.round(n.lat * 1e5) * 40000000L + Math.round(n.lon * 1e5);
+            if (saidCamera.contains(id)) continue;
+            if (bearing >= 0) {
+                double to = Route.bearing(lat, lon, n.lat, n.lon);
+                double off = Math.abs(((to - bearing + 540) % 360) - 180);
+                if (off > 90) continue;                 // behind us
+            }
+            saidCamera.add(id);
+            /*
+             * One announcement per site, not per camera.
+             *
+             * A gantry carries a camera per lane and the data has each of
+             * them, so driving under one produced "speed camera ahead" twice
+             * in a row. Anything within a couple of hundred metres of what
+             * was just announced is the same site from the driver's point of
+             * view, whatever the map calls it - so it is marked as said and
+             * passed over silently.
+             */
+            boolean sameSite = !Double.isNaN(lastCameraLat)
+                    && Geo.metresFlat(lastCameraLat, lastCameraLon, n.lat, n.lon)
+                       < CAMERA_SITE_M;
+            if (sameSite) continue;
+            lastCameraLat = n.lat;
+            lastCameraLon = n.lon;
+
+            voice().say("speed camera ahead");
+            note = "speed camera " + Route.screenDistance((int) Math.round(n.metres));
+            break;                                      // one at a time
+        }
+        // The set would otherwise grow for the whole drive.
+        if (saidCamera.size() > 200) saidCamera.clear();
+    }
+
+    /** Far enough ahead to lift off, close enough to be about this road. */
+    private static final double CAMERA_WARN_M = 400;
+
+    /** Below this the watch is not driving, and a camera is scenery. */
+    private static final float CAMERA_MIN_MS = 5f;      // 18 km/h
+
+    /** Cameras closer together than this are one site with several lenses. */
+    private static final double CAMERA_SITE_M = 250;
+
+    private double lastCameraLat = Double.NaN, lastCameraLon;
+
+    /**
+     * Fetch the alert layer for a country, once.
+     *
+     * A tenth of a megabyte, and optional: this never blocks anything and
+     * never retries. Failing means no warnings this run, which is what a watch
+     * without the file has anyway.
+     */
+    private void loadAlerts(final String c) {
+        if (c == null || c.equals(alertsFor)) return;
+        alertsFor = c;
+        new Thread(new Runnable() {
+            public void run() {
+                try {
+                    File f = Alerts.fileFor(c);
+                    if (!f.isFile()) {
+                        if (f.getParentFile() != null) f.getParentFile().mkdirs();
+                        if (!tiles.download(tiles.base() + "alerts.php?c=" + c, f)) {
+                            Log.i("watchmap", "no alert layer for " + c);
+                            return;
+                        }
+                    }
+                    alerts.open(c);
+                } catch (Throwable t) {
+                    Log.w("watchmap", "alerts: " + t);
+                }
+            }
+        }).start();
     }
 
     /**

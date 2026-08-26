@@ -86,6 +86,40 @@ public class Route {
      *  driving to average. */
     public int totalSeconds;
 
+    /**
+     * Where a manoeuvre leads, if anything knows.
+     *
+     * A motorway exit has a name on the sign - 98% of them in this data do -
+     * and "take the exit for Nuenen" is what a driver is looking for, where
+     * "bear right" is what the geometry says. The names live in the alert
+     * layer, which is optional and knows nothing about routing, so Route asks
+     * through this rather than reaching for it: without one, or off the
+     * motorway, it answers null and the instruction is the plain one.
+     */
+    public interface Signs {
+        /** The name of the junction at this point, or null. */
+        String junctionAt(double lat, double lon);
+    }
+
+    private Signs signs;
+
+    public void signs(Signs s) { this.signs = s; }
+
+    /** The name for a manoeuvre, or null. Only for the kinds that can be an
+     *  exit: nobody signs a u-turn. */
+    private String signFor(Turn t) {
+        if (signs == null || t == null) return null;
+        if (t.kind != SLIGHT_RIGHT && t.kind != RIGHT
+                && t.kind != SLIGHT_LEFT && t.kind != LEFT) {
+            return null;
+        }
+        try {
+            return signs.junctionAt(t.lat, t.lon);
+        } catch (Throwable e) {
+            return null;                 // a sign is never worth a crash
+        }
+    }
+
     /** Metres from each point of the line to the end of it, and the metres in
      *  a degree of longitude there. Built together on first use, because most
      *  routes are drawn and never asked. */
@@ -245,7 +279,7 @@ public class Route {
         if (best <= NOW_M) {
             next.announced = true;
             next.spoken = -1;                       // every stage, done with
-            return phrase(next.kind, 0);
+            return phrase(next.kind, 0, signFor(next));
         }
 
         float ms = speedMs > 0.5f ? speedMs : ASSUMED_MS;
@@ -260,7 +294,7 @@ public class Route {
             // Everything further out is now moot whether or not it was said.
             for (int j = 0; j <= i; j++) next.spoken |= (1 << j);
             if (best / ms > MAX_LOOKAHEAD_S) return null;
-            return phrase(next.kind, (int) best);
+            return phrase(next.kind, (int) best, signFor(next));
         }
         return null;
     }
@@ -522,6 +556,8 @@ public class Route {
         Turn t = drawableTurn(lat, lon);
         if (t != null) {
             String what = action(t.kind);
+            String sign = signFor(t);
+            if (sign != null) what = what + " for " + sign;
             int m = metresTo(lat, lon, t);
             if (t.kind == ARRIVE) return what;
             if (m <= 20) return what;              // at it now, no distance
@@ -557,9 +593,13 @@ public class Route {
         return best;
     }
 
-    private static String phrase(int kind, int metres) {
+    private static String phrase(int kind, int metres, String sign) {
         String turn = action(kind);
         if (turn == null) return null;
+        // "bear right, exit for Nuenen" - the direction first, because that is
+        // the part that has to be acted on, and the name after it as
+        // confirmation rather than instruction.
+        if (sign != null) turn = turn + ", exit for " + sign;
         // Arrival is announced as itself; "in 300 metres, you have arrived"
         // is not something a person says.
         if (kind == ARRIVE) return turn;
