@@ -175,6 +175,41 @@ public class SleepLog {
         return new File(DIR, night + ".csv");
     }
 
+    /** A night's epochs as the rhythm maths wants them: times and movement,
+     *  with nothing of Android in it, so that side stays testable. */
+    public static Circadian.Day dayOf(String night) {
+        List<Epoch> e = read(night);
+        long[] at = new long[e.size()];
+        double[] en = new double[e.size()];
+        for (int i = 0; i < e.size(); i++) {
+            at[i] = e.get(i).at;
+            en[i] = e.get(i).enmo;
+        }
+        return new Circadian.Day(at, en);
+    }
+
+    /**
+     * The most recent nights that have a log, oldest first.
+     *
+     * The rhythm measures need several days rather than one - interdaily
+     * stability and the regularity index are about how alike the days are,
+     * and a single day is alike to nothing.
+     */
+    public static java.util.List<String> recentNights(int want) {
+        java.util.List<String> out = new java.util.ArrayList<String>();
+        File[] kids = new File(DIR).listFiles();
+        if (kids == null) return out;
+        java.util.List<String> names = new java.util.ArrayList<String>();
+        for (int i = 0; i < kids.length; i++) {
+            String n = kids[i].getName();
+            if (n.endsWith(".csv")) names.add(n.substring(0, n.length() - 4));
+        }
+        java.util.Collections.sort(names);
+        int from = Math.max(0, names.size() - want);
+        for (int i = from; i < names.size(); i++) out.add(names.get(i));
+        return out;
+    }
+
     /** The most recent night with a file, or null. */
     public static String latestNight() {
         File dir = new File(DIR);

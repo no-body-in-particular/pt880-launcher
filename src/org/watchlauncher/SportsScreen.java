@@ -408,9 +408,33 @@ public class SportsScreen extends Screen implements HeartRate.Listener {
             if (up.problem() != null) return up.problem();
             if (n == 0) return "no reply";
             SleepLog.markScored(shell, night);
+
+            // And the rhythm across the recent nights, if there are enough of
+            // them. Two weeks is what the measures want: interdaily stability
+            // and the regularity index are about how alike the days are, and
+            // a couple of days is not enough to say.
+            String rhythm = "";
+            try {
+                java.util.List<String> nights = SleepLog.recentNights(14);
+                if (nights.size() >= 3) {
+                    java.util.List<Circadian.Day> days = new java.util.ArrayList<Circadian.Day>();
+                    for (int i = 0; i < nights.size(); i++) {
+                        days.add(SleepLog.dayOf(nights.get(i)));
+                    }
+                    Circadian.Result c = Circadian.of(days);
+                    if (c.valid) {
+                        up.sendRhythm(cfg, c, -1, r.wakeAt);
+                        rhythm = ", RA " + String.format("%.2f", c.relativeAmplitude);
+                    }
+                }
+            } catch (Exception e) {
+                // The night's score is the thing that matters; the rhythm is
+                // a bonus and not worth failing the upload for.
+            }
+
             // The efficiency is the one number worth seeing on the watch; the
             // rest is on the website graph, which is a better place for it.
-            return r.tstMin + "min, " + r.efficiencyPct + "%";
+            return r.tstMin + "min, " + r.efficiencyPct + "%" + rhythm;
         } catch (Exception e) {
             return "score failed";
         }

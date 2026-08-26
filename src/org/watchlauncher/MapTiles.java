@@ -92,8 +92,27 @@ public class MapTiles {
 
     private String base = null;
 
-    public MapTiles(Context c) {
+    private MapTiles(Context c) {
         ctx = c.getApplicationContext();
+    }
+
+    private static MapTiles shared;
+
+    /**
+     * The one tile store.
+     *
+     * It used to be built per map screen, and each carried its own cache of
+     * sixteen decoded tiles - two megabytes of bitmaps. Opening the map a
+     * dozen times left a dozen of them for the collector to find, which on a
+     * 64MB heap is most of it, and measured as half a megabyte a minute of
+     * growth with nothing actually leaking.
+     *
+     * It is a cache of what is on the card, not state belonging to a screen,
+     * so there should only ever have been one.
+     */
+    public static synchronized MapTiles of(Context c) {
+        if (shared == null) shared = new MapTiles(c);
+        return shared;
     }
 
     Context context() { return ctx; }

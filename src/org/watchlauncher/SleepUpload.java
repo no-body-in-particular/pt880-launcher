@@ -93,6 +93,18 @@ public class SleepUpload {
      *  night plus any naps since. */
     public static final int TYPE_DAY_TOTAL = 14;
 
+    /*
+     * The rest-activity rhythm, from Circadian. Ratios are sent times a
+     * hundred, because the protocol carries integers and two decimal places
+     * is more than these measures can honestly claim.
+     */
+    public static final int TYPE_RA = 15;          // relative amplitude
+    public static final int TYPE_IV = 16;          // intradaily variability
+    public static final int TYPE_IS = 17;          // interdaily stability
+    public static final int TYPE_L5_START = 18;    // minutes past midnight
+    public static final int TYPE_M10_START = 19;
+    public static final int TYPE_SRI = 20;         // sleep regularity index
+
     private static final String LAST_SENT = "sleepLastSent";
 
     private static final int CONNECT_MS = 10000;
@@ -279,6 +291,58 @@ public class SleepUpload {
             sent += one(out, in, when, TYPE_WASO, r.wasoMin);
             sent += one(out, in, when, TYPE_EFFICIENCY, r.efficiencyPct);
             sent += one(out, in, when, TYPE_WAKEUPS, r.wakeups);
+            return sent;
+        } catch (Exception e) {
+            problem = "cannot reach " + cfg.host() + ":" + cfg.port();
+            return sent;
+        } finally {
+            try { if (s != null) s.close(); } catch (Exception e) { /* ignore */ }
+        }
+    }
+
+    /**
+     * The rest-activity rhythm, on one connection.
+     *
+     * Sent as its own measurements rather than folded into the nightly score,
+     * because they describe the run of days rather than last night: a
+     * fortnight of relative amplitude is a different line on the graph from
+     * one night's efficiency, and mixing them would make both harder to read.
+     *
+     * Scaled by a hundred where the value is a ratio, because the protocol
+     * carries integers and two decimal places is more than these measures
+     * can honestly claim.
+     *
+     * @return how many readings the server acknowledged
+     */
+    public int sendRhythm(TrackerConfig cfg, Circadian.Result r, int sri, long at) {
+        problem = null;
+        sent = 0;
+        if (r == null || !r.valid) { problem = "no rhythm"; return 0; }
+        if (!cfg.usable()) { problem = "no imei"; return 0; }
+
+        Socket s = null;
+        try {
+            s = new Socket();
+            s.connect(new InetSocketAddress(cfg.host(), cfg.port()), CONNECT_MS);
+            s.setSoTimeout(READ_MS);
+            OutputStream out = s.getOutputStream();
+            BufferedReader in = new BufferedReader(new InputStreamReader(s.getInputStream()));
+
+            write(out, "IWAP00" + cfg.imei() + "#");   // no comma; see send()
+
+            String when = FRAME.format(new Date(at));
+            sent += one(out, in, when, TYPE_RA, (int) Math.round(r.relativeAmplitude * 100));
+            sent += one(out, in, when, TYPE_L5_START, r.l5StartMin);
+            sent += one(out, in, when, TYPE_M10_START, r.m10StartMin);
+            if (!Double.isNaN(r.intradailyVariability)) {
+                sent += one(out, in, when, TYPE_IV,
+                        (int) Math.round(r.intradailyVariability * 100));
+            }
+            if (!Double.isNaN(r.interdailyStability)) {
+                sent += one(out, in, when, TYPE_IS,
+                        (int) Math.round(r.interdailyStability * 100));
+            }
+            if (sri >= 0) sent += one(out, in, when, TYPE_SRI, sri);
             return sent;
         } catch (Exception e) {
             problem = "cannot reach " + cfg.host() + ":" + cfg.port();

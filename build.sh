@@ -158,6 +158,21 @@ if [ -d "$HERE/test" ] && ls "$HERE"/test/*.bin >/dev/null 2>&1; then
     rm -rf "$TD"
 fi
 
+# The rest-activity maths, against days whose answer is known by
+# construction. Circadian touches no Android class for this reason.
+TD2=$(mktemp -d)
+if javac -nowarn -d "$TD2" "$HERE/src/org/watchlauncher/Circadian.java" 2>/dev/null \
+   && javac -nowarn -cp "$TD2" -d "$TD2" "$HERE/test/CircadianTest.java" 2>/dev/null; then
+    if ! java -cp "$TD2" CircadianTest > "$TD2/out"; then
+        echo "circadian test FAILED:" >&2
+        cat "$TD2/out" >&2
+        rm -rf "$TD2"
+        exit 1
+    fi
+    tail -1 "$TD2/out"
+fi
+rm -rf "$TD2"
+
 echo "built: $APK"
 ls -l "$APK"
 echo

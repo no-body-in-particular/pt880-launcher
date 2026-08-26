@@ -106,7 +106,7 @@ public class MapScreen extends Screen implements LocationListener {
 
     @Override
     protected View build() {
-        tiles = new MapTiles(shell);
+        tiles = MapTiles.of(shell);
         server = new ServerFix(shell);
         locations = (LocationManager) shell.getSystemService(Context.LOCATION_SERVICE);
         view = new MapView(shell);
@@ -376,7 +376,7 @@ public class MapScreen extends Screen implements LocationListener {
 
     /** The road network on the card, and the search over it. Opened lazily:
      *  most of the time the map is being looked at, not navigated. */
-    private final RoadGraph graph = new RoadGraph();
+    private final RoadGraph graph = RoadGraph.shared();
     private Router router;
 
     /**

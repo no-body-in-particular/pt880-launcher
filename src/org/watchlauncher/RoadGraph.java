@@ -32,6 +32,25 @@ import java.nio.channels.FileChannel;
  */
 public class RoadGraph {
 
+    private static RoadGraph shared;
+
+    /**
+     * The one road graph.
+     *
+     * Each map screen used to hold its own, and nothing ever closed it - so
+     * every visit that routed opened the file again and mapped another
+     * fourteen megabytes, leaving the previous mapping and its descriptor
+     * behind. Address space on a 32-bit device is not endless and neither are
+     * file descriptors.
+     *
+     * Sharing it is also faster: the mapping survives between visits, so the
+     * second route of a journey does not re-read the header.
+     */
+    public static synchronized RoadGraph shared() {
+        if (shared == null) shared = new RoadGraph();
+        return shared;
+    }
+
     private static final double CELL_DEG = 0.01;
 
     /*
