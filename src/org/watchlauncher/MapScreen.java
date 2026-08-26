@@ -179,6 +179,11 @@ public class MapScreen extends Screen implements LocationListener {
     @Override
     public void onShow() {
         releaseNavigation();      // the screen is on; it holds itself up
+        // Both lines and the tiles around us went unmaintained while the
+        // screen was off, on purpose. Catch them up before anything is drawn.
+        updateDriveLine();
+        updateTurnLine();
+        if (!Double.isNaN(lat)) prefetchAround();
         // Opening the map is a reason to ask now, whatever the backoff had
         // wound itself out to while it sat in the background.
         reseedEvery = RESEED_MS;
@@ -552,8 +557,29 @@ public class MapScreen extends Screen implements LocationListener {
         // The watch's own fixes often arrive without a speed, so take the one
         // worked out from the ground covered instead of showing nothing.
         if (speedMs < 0) speedMs = drive.speedMs();
-        updateDriveLine();
-        updateTurnLine();
+
+        /*
+         * With the screen off, only the parts that make a sound are worth
+         * doing.
+         *
+         * A fix arriving while the map is covered ran the whole lot: format
+         * two lines of text, walk the route for the next turn, fetch and
+         * decode the nine tiles around the position, and invalidate a view
+         * nobody can see. Prefetching is the expensive one - a tile that is
+         * missing pulls the block containing it, up to a megabyte and a half
+         * over the radio and as much again written to the card - and the most
+         * obviously pointless, because the map is not on screen and will be
+         * redrawn from wherever the watch is when it comes back.
+         *
+         * What still has to happen is the driving: the speed estimate, the
+         * camera warnings and the turn instructions, none of which anybody
+         * needs to be looking at to hear.
+         */
+        boolean visible = shell.showing();
+        if (visible) {
+            updateDriveLine();
+            updateTurnLine();
+        }
         // Not inside follow(): a camera is worth knowing about whether or not
         // the watch happens to be navigating anywhere.
         warnCameras();
@@ -564,9 +590,9 @@ public class MapScreen extends Screen implements LocationListener {
         if (!countryKnown || lon < cMinX || lon > cMaxX || lat < cMinY || lat > cMaxY) {
             findCountry();
         }
-        prefetchAround();
+        if (visible) prefetchAround();
         follow();
-        changed();
+        if (visible) changed();
     }
 
     /** Kept either side of an active route when the card fills up. */
