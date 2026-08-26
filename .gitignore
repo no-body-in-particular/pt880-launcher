@@ -1,0 +1,8 @@
+# Build intermediates. These are 13 MB across 178 files and every one of them
+# changes on every build, so tracking them meant a release commit carried more
+# churn in things nobody reads than in the source that produced them.
+#
+# watchlauncher.apk itself is NOT ignored: it is the artifact install-launcher.sh
+# pins a checksum against, and having it in the tree is how you check that the
+# published one is the one this source builds.
+build/

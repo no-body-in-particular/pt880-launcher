@@ -172,6 +172,8 @@ public class ServerFix {
     private boolean fetchOnce(String u, boolean fresh) {
         HttpURLConnection c = null;
         BufferedReader r = null;
+        boolean drained = false;
+        long t0 = System.currentTimeMillis();
         try {
             c = (HttpURLConnection) new URL(u).openConnection();
             if (c instanceof HttpsURLConnection) {
@@ -189,12 +191,29 @@ public class ServerFix {
             int code = c.getResponseCode();
             if (code != 200) {
                 problem = "server said " + code;
-                Log.w("watchmap", "ServerFix: http " + code);
+                Log.w("watchmap", "ServerFix: http " + code
+                        + " in " + (System.currentTimeMillis() - t0) + " ms");
+                // Read the error body away so the socket can go back to the
+                // pool. A refused token answers with a short page, and paying
+                // for a fresh TLS handshake on every refusal is how a wrong
+                // credential turns into a flat battery rather than a message.
+                drain(c.getErrorStream());
+                drained = true;
                 return true;                    // a retry will say the same
             }
 
             r = new BufferedReader(new InputStreamReader(c.getInputStream()));
             String line = r.readLine();
+            // Read to the end even though the answer is one line: a stream
+            // left part-read cannot be handed back to the pool, and this
+            // endpoint's replies are under a hundred bytes.
+            while (r.readLine() != null) { /* drain */ }
+            drained = true;
+            // Timed whatever the reply turns out to say. The number worth
+            // watching is whether it fell from seconds to tens of
+            // milliseconds, which is the difference between a fresh TLS
+            // handshake in pure Java and a request on a socket already open.
+            Log.i("watchmap", "ServerFix: " + (System.currentTimeMillis() - t0) + " ms");
             if (!parse(line)) {
                 // The endpoint answers with an HTML "please login" page when
                 // the token no longer matches the imei, which is worth saying
@@ -220,7 +239,35 @@ public class ServerFix {
             return false;                       // worth one more go
         } finally {
             try { if (r != null) r.close(); } catch (Exception e) { /* ignore */ }
-            if (c != null) c.disconnect();
+            /*
+             * Only when the socket is not worth keeping.
+             *
+             * disconnect() does not close a connection politely - it evicts it
+             * from the pool - and on this device the next request then pays
+             * for a fresh TLS handshake in pure Java, which was measured at
+             * 3.91 seconds of CPU when the same mistake was throttling the
+             * tile downloads. The map re-asks the tracker once a minute for as
+             * long as it is open without a GPS fix, and this watch usually has
+             * no GPS fix, so that was a handshake a minute for nothing.
+             *
+             * A stream read to the end can go back to the pool. One abandoned
+             * part-way cannot, and neither can one that threw - those are
+             * exactly the sockets worth evicting.
+             */
+            if (c != null && !drained) c.disconnect();
+        }
+    }
+
+    /** Read a stream to its end and close it, so its connection is reusable. */
+    private static void drain(java.io.InputStream in) {
+        if (in == null) return;
+        try {
+            byte[] buf = new byte[512];
+            while (in.read(buf) >= 0) { /* to the end */ }
+        } catch (Exception e) {
+            /* nothing to do: the socket is simply not worth keeping */
+        } finally {
+            try { in.close(); } catch (Exception e) { /* ignore */ }
         }
     }
 

@@ -124,8 +124,23 @@ public class MapScreen extends Screen implements LocationListener {
      */
     private long askedServerAt = 0;
 
-    /** How often to re-ask while the only position is the server's. */
+    /**
+     * How often to re-ask while the only position is the server's.
+     *
+     * Backed off rather than fixed. The server's answer is resolved from the
+     * wifi and cell readings the firmware uploads, so it changes on the order
+     * of minutes at best and not at all while the watch is sitting still -
+     * asking every minute for the rest of the day answers the same question
+     * over and over. It starts at a minute so that opening the map still
+     * settles quickly, doubles each time the answer has not moved, and stops
+     * lengthening at five.
+     *
+     * Reset whenever the position does move, or the map is opened again.
+     */
     private static final long RESEED_MS = 60000;
+    private static final long RESEED_MAX_MS = 300000;
+    private long reseedEvery = RESEED_MS;
+    private double lastSeedLat = Double.NaN, lastSeedLon;
 
     /** Why there is nothing on screen. A blank map with no explanation is the
      *  least useful thing this could show, and every reason it can be blank
@@ -151,6 +166,10 @@ public class MapScreen extends Screen implements LocationListener {
 
     @Override
     public void onShow() {
+        // Opening the map is a reason to ask now, whatever the backoff had
+        // wound itself out to while it sat in the background.
+        reseedEvery = RESEED_MS;
+        askedServerAt = 0;
         voice();                       // start it warming; it takes a moment
         loadDestination();
         loadRoute();
@@ -318,7 +337,7 @@ public class MapScreen extends Screen implements LocationListener {
         // A real fix beats the server's, so stop asking once we have one.
         if (!Double.isNaN(lat) && !approximate) return;
         long now = System.currentTimeMillis();
-        if (now - askedServerAt < RESEED_MS) return;
+        if (now - askedServerAt < reseedEvery) return;
         askedServerAt = now;
         new Thread(new Runnable() {
             public void run() {
@@ -351,6 +370,16 @@ public class MapScreen extends Screen implements LocationListener {
                         approximate = true;
                         bearing = -1;
                         speedMs = -1;
+                        // Moved: worth asking briskly again. Standing still:
+                        // ask less often, because the answer is not changing.
+                        if (!Double.isNaN(lastSeedLat)
+                                && Geo.metresFlat(lastSeedLat, lastSeedLon, la, lo) < 50) {
+                            slowDownReseed();
+                        } else {
+                            reseedEvery = RESEED_MS;
+                        }
+                        lastSeedLat = la;
+                        lastSeedLon = lo;
                         if (!countryKnown) findCountry();
                         prefetchAround();
                         changed();
@@ -1301,6 +1330,16 @@ public class MapScreen extends Screen implements LocationListener {
     private static final double ALERTS_REFRESH_M = 40000;
 
     private double alertsAtLat = Double.NaN, alertsAtLon;
+
+    /**
+     * Ask less often, up to a point.
+     *
+     * Called when the answer was no use - nothing came back, or it is the same
+     * position as last time. Anything that actually moves resets it.
+     */
+    private void slowDownReseed() {
+        reseedEvery = Math.min(RESEED_MAX_MS, reseedEvery * 2);
+    }
 
     /**
      * The engine, started if it is not running.
