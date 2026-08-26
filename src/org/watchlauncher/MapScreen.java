@@ -78,7 +78,23 @@ public class MapScreen extends Screen implements LocationListener {
      *  pick the right country and centre the map, not enough to navigate by,
      *  so the screen says so. */
     private boolean approximate = false;
-    private boolean askedServer = false;
+    /**
+     * When the tracker was last asked where we are.
+     *
+     * It used to be asked once and never again, which on this watch means
+     * once ever: the gps provider is not in Enabled Providers, so a real fix
+     * is rare and the server is in practice the only source of position. The
+     * map therefore showed wherever you were when you opened it, for as long
+     * as you left it open.
+     *
+     * The tracker has a new position every few minutes, so asking once a
+     * minute costs a small request and keeps the map somewhere near the
+     * truth. A real gps fix stops the asking, because it is better.
+     */
+    private long askedServerAt = 0;
+
+    /** How often to re-ask while the only position is the server's. */
+    private static final long RESEED_MS = 60000;
 
     /** Why there is nothing on screen. A blank map with no explanation is the
      *  least useful thing this could show, and every reason it can be blank
@@ -132,7 +148,14 @@ public class MapScreen extends Screen implements LocationListener {
      */
     @Override
     public void tick() {
-        boolean stale = (fixAt > 0) && (System.currentTimeMillis() - fixAt) > 30000;
+        // Keep asking the tracker while it is the only thing that knows.
+        if (Double.isNaN(lat) || approximate) seedFromServer();
+
+        // A server position is minutes old by nature, so warning that it is
+        // thirty seconds old would mean warning permanently - and a warning
+        // that is always on is one nobody reads.
+        long age = approximate ? 900000 : 30000;
+        boolean stale = (fixAt > 0) && (System.currentTimeMillis() - fixAt) > age;
         if (dirty || stale != wasStale) {
             wasStale = stale;
             dirty = false;
@@ -213,8 +236,11 @@ public class MapScreen extends Screen implements LocationListener {
      * replaces it.
      */
     private void seedFromServer() {
-        if (askedServer || !Double.isNaN(lat)) return;
-        askedServer = true;
+        // A real fix beats the server's, so stop asking once we have one.
+        if (!Double.isNaN(lat) && !approximate) return;
+        long now = System.currentTimeMillis();
+        if (now - askedServerAt < RESEED_MS) return;
+        askedServerAt = now;
         new Thread(new Runnable() {
             public void run() {
                 server.refresh();
@@ -708,26 +734,89 @@ public class MapScreen extends Screen implements LocationListener {
             }
         }
 
+        /*
+         * The route line, clipped to what can be seen and built only when it
+         * moves.
+         *
+         * A route from the server carries its full geometry - up to sixty-five
+         * thousand points - and at this zoom a forty kilometre route is eight
+         * thousand pixels long, so nearly all of them are off the screen. The
+         * whole lot was being put into one Path and stroked twice a frame,
+         * which is a great deal of tessellation to ask of the renderer that
+         * has already taken this process down once.
+         *
+         * Clipped to the screen and a margin, with points landing on a pixel
+         * already used dropped, what is left is a few hundred at most. And
+         * since it only changes when the map moves, it is kept between frames.
+         */
+        private final Path routePath = new Path();
+        private double pathAtX = Double.NaN, pathAtY = Double.NaN;
+        private Route pathOf = null;
+
         private void drawRoute(Canvas canvas, int w, int h, double cx, double cy) {
             if (route == null || route.line.size() < 2) return;
 
-            path.reset();
-            boolean first = true;
-            for (int i = 0; i < route.line.size(); i++) {
-                double[] p = route.line.get(i);
-                float px = (float) (Mercator.xOf(p[1], ZOOM) * Mercator.TILE_PX - cx + w / 2.0);
-                float py = (float) (Mercator.yOf(p[0], ZOOM) * Mercator.TILE_PX - cy + h / 2.0);
-                // Well off screen is not worth a path segment, but the points
-                // either side of the edge are, or the line stops at the border.
-                if (first) { path.moveTo(px, py); first = false; }
-                else { path.lineTo(px, py); }
+            if (route != pathOf || Math.abs(cx - pathAtX) > 0.5
+                    || Math.abs(cy - pathAtY) > 0.5) {
+                buildRoutePath(w, h, cx, cy);
+                pathOf = route;
+                pathAtX = cx;
+                pathAtY = cy;
             }
+            if (routePath.isEmpty()) return;
 
             // Casing first, then the line on top of it. Two strokes of the
             // same path is what keeps the route readable where it runs along
             // a white road, which a single stroke of any colour does not.
-            canvas.drawPath(path, casing);
-            canvas.drawPath(path, routeInk);
+            canvas.drawPath(routePath, casing);
+            canvas.drawPath(routePath, routeInk);
+        }
+
+        private void buildRoutePath(int w, int h, double cx, double cy) {
+            routePath.reset();
+            final float margin = 48;
+            final int n = route.line.size();
+
+            boolean pen = false;
+            int lastX = Integer.MIN_VALUE, lastY = Integer.MIN_VALUE;
+            boolean prevVisible = false;
+            float prevPx = 0, prevPy = 0;
+
+            for (int i = 0; i < n; i++) {
+                double[] p = route.line.get(i);
+                float px = (float) (Mercator.xOf(p[1], ZOOM) * Mercator.TILE_PX - cx + w / 2.0);
+                float py = (float) (Mercator.yOf(p[0], ZOOM) * Mercator.TILE_PX - cy + h / 2.0);
+                boolean vis = px > -margin && px < w + margin
+                        && py > -margin && py < h + margin;
+
+                if (vis) {
+                    // The point before this one goes in too, or the line
+                    // begins at the edge of the screen instead of coming in
+                    // from off it.
+                    if (!pen) {
+                        if (i > 0 && !prevVisible) {
+                            routePath.moveTo(prevPx, prevPy);
+                        } else {
+                            routePath.moveTo(px, py);
+                        }
+                        pen = true;
+                        lastX = Integer.MIN_VALUE;
+                    }
+                    int ix = (int) px, iy = (int) py;
+                    if (ix != lastX || iy != lastY) {
+                        routePath.lineTo(px, py);
+                        lastX = ix;
+                        lastY = iy;
+                    }
+                } else if (pen) {
+                    // Carry one point past the edge, then lift.
+                    routePath.lineTo(px, py);
+                    pen = false;
+                }
+                prevVisible = vis;
+                prevPx = px;
+                prevPy = py;
+            }
         }
 
         /** The position, and which way it is moving. */
@@ -897,7 +986,7 @@ public class MapScreen extends Screen implements LocationListener {
 
     /** For the menu, so a stuck map can be prodded without leaving it. */
     void retrySeed() {
-        askedServer = false;
+        askedServerAt = 0;
         why = "";
         seedFromServer();
         adoptOnlyCountry();
