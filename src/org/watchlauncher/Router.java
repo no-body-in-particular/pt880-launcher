@@ -36,8 +36,24 @@ public class Router {
 
     private int[] dist;
     private int[] parent;
-    private int[] stamp;
+    private byte[] stamp;
     private int generation = 0;
+
+    /**
+     * The most corridor this device will search.
+     *
+     * Working memory is nine bytes a node - a distance, a parent, and a
+     * visited stamp - so this is the ceiling on what a route can cost:
+     * about five megabytes, allocated while searching and dropped after.
+     * Beyond it the search is refused and the caller falls back to the
+     * server, which is a worse route than none only if you have signal, and
+     * is certainly better than an OutOfMemoryError on a watch whose whole
+     * heap is a few times this.
+     *
+     * An 80km area graph for the Netherlands is 1.45 million nodes, so a long
+     * enough journey inside one really can reach this.
+     */
+    private static final int MAX_CORRIDOR_NODES = 600000;
 
     /*
      * The search is bounded to a corridor, not to the country.
@@ -88,22 +104,38 @@ public class Router {
 
         long t0 = System.currentTimeMillis();
 
-        // Straight-line distance decides how much slack the corridor gets. A
-        // route is rarely more than a third longer than the crow flies, but
-        // a short hop needs absolute room rather than proportional room.
+        // How wide a corridor the route is allowed.
+        //
+        // It was a third of the straight-line distance, which for a
+        // cross-country run is a margin of eighty kilometres - and a buffer
+        // that wide swallows the whole map whatever shape it is. A route
+        // rarely wanders more than a few tens of kilometres sideways even
+        // when it goes a long way round, so the margin grows slowly and
+        // stops.
         double dy = (toLat - fromLat) * 110540;
         double dx = (toLon - fromLon) * 111320
                 * Math.cos(Math.toRadians((fromLat + toLat) / 2));
         double straight = Math.sqrt(dx * dx + dy * dy);
-        double margin = Math.max(8000, straight * 0.35);
+        double margin = Math.min(35000, Math.max(10000, straight * 0.15));
 
-        int[] path = null;
-        for (int attempt = 0; attempt < 3 && path == null; attempt++) {
-            if (!corridor(fromLat, fromLon, toLat, toLon, margin)) return null;
+        // Too much to search: narrow it before giving up. A tighter corridor
+        // still finds the motorway route, which is what a long journey is.
+        for (int tight = 0; tight < 3; tight++) {
+            if (corridor(fromLat, fromLon, toLat, toLon, margin)) break;
+            if (localCount == 0) return null;        // nothing there at all
+            margin *= 0.6;
+            if (tight == 2) return null;
+        }
+
+        int[] path = search(s, t);
+
+        // Found nothing: widen and try again. A corridor can be too tight to
+        // hold any road at all - a coast road, a route through mountains -
+        // and that is not the same as there being no way there.
+        for (int wider = 0; path == null && wider < 2; wider++) {
+            margin *= 2.2;
+            if (!corridor(fromLat, fromLon, toLat, toLon, margin)) break;
             path = search(s, t);
-            // A corridor too tight to hold any route at all: widen and retry
-            // rather than report that there is no way there.
-            margin *= 2.5;
         }
         millis = System.currentTimeMillis() - t0;
         release();
@@ -120,8 +152,6 @@ public class Router {
         double dLat = margin / 110540.0;
         double dLon = margin / (111320.0 * Math.cos(Math.toRadians((aLat + bLat) / 2)));
 
-        int x0 = g.cellX(Math.min(aLon, bLon) - dLon);
-        int x1 = g.cellX(Math.max(aLon, bLon) + dLon);
         int y0 = g.cellY(Math.min(aLat, bLat) - dLat);
         int y1 = g.cellY(Math.max(aLat, bLat) + dLat);
         int cols = g.gridCols();
@@ -137,6 +167,33 @@ public class Router {
         runs = 0;
         localCount = 0;
         for (int y = y0; y <= y1; y++) {
+            // Where the line is at this row's latitude, rather than where the
+            // two ends are. Boxing the ends of a long diagonal takes in a
+            // great deal of country the route was never going to touch; a
+            // band that follows the line is a third smaller, and costs
+            // nothing extra to express - a row is still one run of ids,
+            // because a row of cells is numbered left to right.
+            double bandS = g.south() + y * RoadGraph.cellDegrees() - dLat;
+            double bandN = bandS + RoadGraph.cellDegrees() + 2 * dLat;
+
+            double t1, t2;
+            if (Math.abs(bLat - aLat) < 1e-9) {
+                if (aLat < bandS || aLat > bandN) continue;      // parallel
+                t1 = 0; t2 = 1;
+            } else {
+                t1 = (bandS - aLat) / (bLat - aLat);
+                t2 = (bandN - aLat) / (bLat - aLat);
+                if (t1 > t2) { double t = t1; t1 = t2; t2 = t; }
+                if (t1 < 0) t1 = 0;
+                if (t2 > 1) t2 = 1;
+                if (t2 < t1) continue;                            // misses it
+            }
+
+            double lon1 = aLon + t1 * (bLon - aLon);
+            double lon2 = aLon + t2 * (bLon - aLon);
+            int x0 = g.cellX(Math.min(lon1, lon2) - dLon);
+            int x1 = g.cellX(Math.max(lon1, lon2) + dLon);
+
             int from = g.cellFirstNode(y * cols + x0);
             int to = g.cellFirstNode(y * cols + x1 + 1);
             if (to <= from) continue;
@@ -148,10 +205,25 @@ public class Router {
         }
         if (localCount <= 0) return false;
 
+        if (localCount > MAX_CORRIDOR_NODES) {
+            Log.w("watchnav", "corridor of " + localCount + " nodes is too wide");
+            return false;
+        }
+
         if (dist == null || dist.length < localCount) {
-            dist = new int[localCount];
-            parent = new int[localCount];
-            stamp = new int[localCount];
+            try {
+                dist = new int[localCount];
+                parent = new int[localCount];
+                stamp = new byte[localCount];
+            } catch (OutOfMemoryError e) {
+                // Asked for more than was left. Give it all back and let the
+                // caller use the server rather than take the process down.
+                dist = null;
+                parent = null;
+                stamp = null;
+                Log.w("watchnav", "no room to route: " + localCount + " nodes");
+                return false;
+            }
             generation = 0;
         }
         return true;
@@ -175,7 +247,15 @@ public class Router {
         if (ls < 0 || lt < 0) return null;
         // A generation counter instead of clearing ten megabytes on every
         // search: a stamp that is not this generation means "not visited".
+        // The stamp is a byte, so the generation cycles rather than growing.
+        // On the wrap the array is cleared once - which is the only time the
+        // five megabytes are touched wholesale, and is still cheaper than
+        // clearing them on every search, which is what the counter avoids.
         generation++;
+        if (generation > 255) {
+            java.util.Arrays.fill(stamp, (byte) 0);
+            generation = 1;
+        }
         heapSize = 0;
 
         final double tla = g.lat(t), tlo = g.lon(t);
@@ -183,7 +263,7 @@ public class Router {
 
         dist[ls] = 0;
         parent[ls] = -1;
-        stamp[ls] = generation;
+        stamp[ls] = (byte) generation;
         push(s, heuristic(s, tla, tlo, kx));
 
         settled = 0;
@@ -206,8 +286,8 @@ public class Router {
                 int lv = local(v);
                 if (lv < 0) continue;              // outside the corridor
                 int nd = du + g.arcCost(k);
-                if (stamp[lv] != generation || nd < dist[lv]) {
-                    stamp[lv] = generation;
+                if (stamp[lv] != (byte) generation || nd < dist[lv]) {
+                    stamp[lv] = (byte) generation;
                     dist[lv] = nd;
                     parent[lv] = u;                // parents are global ids
                     push(v, nd + heuristic(v, tla, tlo, kx));
