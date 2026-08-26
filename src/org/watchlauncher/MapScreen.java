@@ -285,6 +285,47 @@ public class MapScreen extends Screen implements LocationListener {
 
     private void startFixes() {
         if (locations == null || listening) return;
+
+        /*
+         * Switch the receiver on before asking it for anything.
+         *
+         * The watch ships with gps left out of location_providers_allowed, and
+         * the loop below only subscribes to providers that are enabled - so on
+         * a stock watch the map subscribed to nothing that could see a
+         * satellite, and every position it showed came from the tracker
+         * server. That is resolved from wifi and cell, it arrives when the
+         * server has one rather than when the watch asks, and it is the whole
+         * of "the fixes take a long time to start and then are sporadic".
+         *
+         * On a thread: it is a root shell, and the first frame should not wait
+         * for it. When it succeeds the framework calls onProviderEnabled and
+         * the subscription is redone there.
+         */
+        if (Gps.off(locations)) {
+            new Thread(new Runnable() {
+                public void run() {
+                    try {
+                        final boolean on = Gps.enable(shell, locations);
+                        if (!on) {
+                            // Worth saying. Silently falling back to the
+                            // server's position is what made this look like a
+                            // slow receiver rather than a switch left off.
+                            ui.post(new Runnable() {
+                                public void run() {
+                                    if (note == null || note.length() == 0) {
+                                        note = "gps off: install --root";
+                                    }
+                                    changed();
+                                }
+                            });
+                        }
+                    } catch (Throwable t) {
+                        Log.w("watchmap", "enabling gps: " + t);
+                    }
+                }
+            }).start();
+        }
+
         listening = true;
         boolean any = false;
         try {
@@ -390,8 +431,23 @@ public class MapScreen extends Screen implements LocationListener {
     }
 
     public void onLocationChanged(Location l) { take(l); }
-    public void onProviderEnabled(String p) { }
-    public void onProviderDisabled(String p) { }
+    /**
+     * A provider that has just come up is one to start listening to.
+     *
+     * startFixes() subscribes to whatever is enabled at the moment it runs, so
+     * without this a receiver switched on after the map opened was never
+     * subscribed to at all - the map went on using the server's position until
+     * the screen was closed and reopened.
+     */
+    public void onProviderEnabled(String p) {
+        Log.i("watchmap", "provider up: " + p);
+        stopFixes();
+        startFixes();
+    }
+
+    public void onProviderDisabled(String p) {
+        Log.i("watchmap", "provider down: " + p);
+    }
     public void onStatusChanged(String p, int s, Bundle b) { }
 
     private void take(Location l) {

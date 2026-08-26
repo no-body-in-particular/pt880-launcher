@@ -498,7 +498,7 @@ public class SportsScreen extends Screen implements HeartRate.Listener {
     void enableGps() {
         RootShell sh = shell.root();
         if (!sh.isRoot()) { shell.toast("needs the root helper"); return; }
-        sh.exec("settings put secure location_providers_allowed +gps");
+        Gps.enable(shell, locations);
         stopLocation();
         startLocation();
         shell.toast(gpsOff() ? "could not enable gps" : "gps enabled");
