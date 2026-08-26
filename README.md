@@ -6,6 +6,11 @@ API 19) with the apps it was missing built into it.
 240×240, no touchscreen, two hardware buttons. One APK, one screen stack, and
 the clock and battery across the top of every screen in it.
 
+<img src="docs/pt880.png" width="360" alt="pt880 tracker: rugged wrist unit with a small square screen, a camera above it, two buttons on the right edge and a perforated locking strap">
+
+Rooting the hardware this runs on, and the tooling to dump, patch and reflash
+it, is in [pt880-root](https://github.com/no-body-in-particular/pt880-root).
+
 ```
  10:42                      84% [|||]
  ─────────────────────────────────────
