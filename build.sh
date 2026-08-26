@@ -136,6 +136,28 @@ echo "[6/6] sign"
     --out "$(w "$APK")" "$(w "$OUT/aligned.apk")"
 
 echo
+
+# The route line, checked against real routes before anything ships.
+#
+# RouteLine touches no Android class precisely so this can run: every crash
+# this app has had was libhwui being handed more than it could take, so what
+# is worth proving on every build is that the path stays small however long
+# the route and wherever the map is centred.
+if [ -d "$HERE/test" ] && ls "$HERE"/test/*.bin >/dev/null 2>&1; then
+    TD=$(mktemp -d)
+    javac -nowarn -d "$TD" "$HERE/src/org/watchlauncher/RouteLine.java" \
+        "$HERE/src/org/watchlauncher/Mercator.java" 2>/dev/null
+    javac -nowarn -cp "$TD" -d "$TD" "$HERE/test/RouteLineTest.java" 2>/dev/null
+    if ! java -cp "$TD" RouteLineTest "$HERE"/test/*.bin > "$TD/out"; then
+        echo "route line test FAILED:" >&2
+        cat "$TD/out" >&2
+        rm -rf "$TD"
+        exit 1
+    fi
+    tail -3 "$TD/out"
+    rm -rf "$TD"
+fi
+
 echo "built: $APK"
 ls -l "$APK"
 echo

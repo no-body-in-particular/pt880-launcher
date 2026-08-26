@@ -124,6 +124,18 @@ public class MapMenuScreen extends ListScreen {
                         AppIcons.GEAR),
                 new Runnable() { public void run() { map.retrySeed(); render(); } });
 
+        // Silence has too many causes to guess at from the outside: no
+        // engine, no voice data, a muted stream, headphones that took the
+        // audio elsewhere. Saying something on request and reporting what the
+        // engine said back turns all of them into one answer.
+        row(l, new Item("Test voice", map.voiceStatus(), AppIcons.MUSIC,
+                        map.voiceReady() ? Ui.OK : Ui.WARN),
+                new Runnable() { public void run() {
+                    map.testVoice();
+                    shell.toast(map.voiceStatus());
+                    render();
+                } });
+
         row(l, new Item("Network", map.tiles().onWifi() ? "wifi"
                         : (map.tiles().online() ? "mobile" : "offline"),
                         AppIcons.NONE, Ui.DIM), NOTHING);

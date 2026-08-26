@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="org.watchlauncher"
-    android:versionCode="62"
-    android:versionName="7.8">
+    android:versionCode="63"
+    android:versionName="7.9">
 
     <uses-sdk android:minSdkVersion="19" android:targetSdkVersion="19" />
 
@@ -60,6 +60,23 @@
         android:allowBackup="false">
 
         <!--
+            Drawn in software, not on the GPU.
+
+            Every crash this application has had has been inside libhwui, and
+            each was it being handed something a 2013 GPU could not take: a
+            bitmap freed while a display list still referenced it, then a path
+            of tens of thousands of points stroked twice a frame. Both are
+            fixed, but the pattern is the point - this hardware's accelerated
+            renderer is fragile in ways a modern one is not, and a native
+            crash there cannot be caught, only survived by the watch
+            restarting.
+
+            The screen is 240 by 240. That is fifty-seven thousand pixels, a
+            fortieth of a phone of the same age, and the drawing is flat
+            colour, nine small bitmaps and some text. Software handles it
+            without difficulty, and libhwui is then not loaded into this
+            process at all - which is a guarantee rather than a mitigation.
+
             One activity for the whole watch. singleTask so that the media
             button receiver, the phone-state receiver and `am start` all land
             on the instance that is already running rather than stacking a
@@ -73,6 +90,7 @@
             android:launchMode="singleTask"
             android:screenOrientation="portrait"
             android:configChanges="orientation|keyboardHidden|screenSize|keyboard|navigation"
+            android:hardwareAccelerated="false"
             android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

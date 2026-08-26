@@ -772,50 +772,23 @@ public class MapScreen extends Screen implements LocationListener {
             canvas.drawPath(routePath, routeInk);
         }
 
+        private float[] routeXY = new float[RouteLine.MAX_POINTS * 2];
+
         private void buildRoutePath(int w, int h, double cx, double cy) {
             routePath.reset();
-            final float margin = 48;
-            final int n = route.line.size();
-
-            boolean pen = false;
-            int lastX = Integer.MIN_VALUE, lastY = Integer.MIN_VALUE;
-            boolean prevVisible = false;
-            float prevPx = 0, prevPy = 0;
-
-            for (int i = 0; i < n; i++) {
-                double[] p = route.line.get(i);
-                float px = (float) (Mercator.xOf(p[1], ZOOM) * Mercator.TILE_PX - cx + w / 2.0);
-                float py = (float) (Mercator.yOf(p[0], ZOOM) * Mercator.TILE_PX - cy + h / 2.0);
-                boolean vis = px > -margin && px < w + margin
-                        && py > -margin && py < h + margin;
-
-                if (vis) {
-                    // The point before this one goes in too, or the line
-                    // begins at the edge of the screen instead of coming in
-                    // from off it.
-                    if (!pen) {
-                        if (i > 0 && !prevVisible) {
-                            routePath.moveTo(prevPx, prevPy);
-                        } else {
-                            routePath.moveTo(px, py);
-                        }
-                        pen = true;
-                        lastX = Integer.MIN_VALUE;
+            int n = RouteLine.project(route.line, ZOOM, cx, cy, w, h, routeXY);
+            int i = 0;
+            while (i + 1 < n) {
+                if (Float.isNaN(routeXY[i])) {
+                    i += 2;
+                    if (i + 1 < n) {
+                        routePath.moveTo(routeXY[i], routeXY[i + 1]);
+                        i += 2;
                     }
-                    int ix = (int) px, iy = (int) py;
-                    if (ix != lastX || iy != lastY) {
-                        routePath.lineTo(px, py);
-                        lastX = ix;
-                        lastY = iy;
-                    }
-                } else if (pen) {
-                    // Carry one point past the edge, then lift.
-                    routePath.lineTo(px, py);
-                    pen = false;
+                } else {
+                    routePath.lineTo(routeXY[i], routeXY[i + 1]);
+                    i += 2;
                 }
-                prevVisible = vis;
-                prevPx = px;
-                prevPy = py;
             }
         }
 
@@ -981,6 +954,16 @@ public class MapScreen extends Screen implements LocationListener {
     }
 
     void speak(String s) { speech.say(s); }
+
+    String voiceStatus() { return speech == null ? "no voice" : speech.status(); }
+
+    boolean voiceReady() { return speech != null && speech.ready(); }
+
+    /** Say something on demand, bypassing the repeat guard: when the
+     *  complaint is silence, hearing it twice is the point. */
+    void testVoice() {
+        if (speech != null) speech.sayAgain("in three hundred metres, turn left");
+    }
 
     String why() { return why; }
 
