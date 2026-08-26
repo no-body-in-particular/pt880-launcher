@@ -61,6 +61,72 @@ public class RouteLineTest {
         }
     }
 
+    /**
+     * The scaled projection, which is how the map zooms without a second set
+     * of tiles.
+     *
+     * Two things have to hold. A point at the centre stays at the centre
+     * whatever the scale - otherwise zooming walks the map away from you -
+     * and a point off-centre moves proportionally, so half scale puts it half
+     * as far from the middle. Anything else and the tiles and the route line
+     * disagree about where north is.
+     */
+    static void checkScale() {
+        java.util.List<double[]> line = new java.util.ArrayList<double[]>();
+        double clat = 51.4667000, clon = 4.5000000;
+        line.add(new double[]{ clat, clon });                 // dead centre
+        line.add(new double[]{ clat + 0.004, clon + 0.004 }); // a little away
+        int w = 240, h = 240;
+        double cx = Mercator.xOf(clon, 15) * Mercator.TILE_PX;
+        double cy = Mercator.yOf(clat, 15) * Mercator.TILE_PX;
+
+        float[] out = new float[64];
+        float[] offAt = new float[3];
+        float[] scales = { 0.5f, 1f, 2f };
+        for (int i = 0; i < scales.length; i++) {
+            int n = RouteLine.project(line, 15, cx, cy, w, h, scales[i], out);
+            // The stream is a BREAK marker, then the pen-down point, then the
+            // points themselves - and the pen-down repeats the first one. So
+            // rather than index into it, find the centre and then the first
+            // thing that is not the centre.
+            float cxs = w / 2f, cys = h / 2f;
+            boolean sawCentre = false;
+            float ox = Float.NaN, oy = Float.NaN;
+            for (int k = 0; k + 1 < n; k += 2) {
+                if (Float.isNaN(out[k])) continue;
+                if (Math.abs(out[k] - cxs) < 0.6f && Math.abs(out[k + 1] - cys) < 0.6f) {
+                    sawCentre = true;
+                    continue;
+                }
+                ox = out[k]; oy = out[k + 1];
+                break;
+            }
+            if (!sawCentre) {
+                System.out.printf("FAIL the centre point moved at scale %.1f%n", scales[i]);
+                failures++;
+            }
+            if (Float.isNaN(ox)) {
+                System.out.printf("FAIL no off-centre point emitted at scale %.1f%n", scales[i]);
+                failures++;
+                offAt[i] = 0;
+                continue;
+            }
+            offAt[i] = (float) Math.hypot(ox - cxs, oy - cys);
+        }
+        // half the scale, half the distance from the middle; double, double.
+        boolean ok = offAt[1] > 10f
+                  && Math.abs(offAt[0] - offAt[1] / 2f) < 0.6f
+                  && Math.abs(offAt[2] - offAt[1] * 2f) < 1.2f;
+        if (!ok) {
+            System.out.printf("FAIL offsets do not scale: %.1f %.1f %.1f%n",
+                    offAt[0], offAt[1], offAt[2]);
+            failures++;
+        } else {
+            System.out.printf("  ok   the centre holds and offsets scale (%.0f, %.0f, %.0f px)%n",
+                    offAt[0], offAt[1], offAt[2]);
+        }
+    }
+
     public static void main(String[] args) throws Exception {
         float[] out = new float[RouteLine.MAX_POINTS * 2];
         int worst = 0;
@@ -113,6 +179,9 @@ public class RouteLineTest {
             check("stays under the cap for " + new File(path).getName(),
                     max <= RouteLine.MAX_POINTS, max + " points");
         }
+
+        System.out.println();
+        checkScale();
 
         System.out.println();
         check("worst case across every route and viewpoint",

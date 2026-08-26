@@ -46,6 +46,24 @@ import java.util.List;
 public class MapScreen extends Screen implements LocationListener {
 
     private static final int ZOOM = 15;
+
+    /**
+     * How much ground the screen shows, without a second set of tiles.
+     *
+     * Only one zoom level is ever downloaded - COUNTRY_ZOOM and DETAIL_ZOOM
+     * are both 15 - so zooming cannot mean fetching coarser tiles, because
+     * they are not on the card and will not be over a tunnel. It means drawing
+     * the tiles that are there at a different size: half size shows four times
+     * the area at the same detail, double magnifies it for reading a junction.
+     *
+     * Costs nothing extra to draw. The visible tile count goes up as the scale
+     * goes down, but each tile is drawn correspondingly smaller, so the number
+     * of destination pixels stays about one screen either way.
+     */
+    private static final float[] SCALES = { 0.5f, 1f, 2f };
+    private static final String[] SCALE_NAME = { "wide", "", "close" };
+    private int scaleAt = 1;
+    private float scale() { return SCALES[scaleAt]; }
     private static final long FIX_MS = 10000;
 
     private MapView view;
@@ -988,6 +1006,18 @@ public class MapScreen extends Screen implements LocationListener {
             shell.push(new MapMenuScreen(this));
             return true;
         }
+        // B did nothing at all on this screen - it was swallowed and returned
+        // true. It steps the zoom, which is the thing you want while driving
+        // and could not do: out to see where the next turn is, in to read a
+        // junction you are already at.
+        if (button == ShellActivity.BTN_B && kind == ShellActivity.TAP) {
+            scaleAt = (scaleAt + 1) % SCALES.length;
+            String n = SCALE_NAME[scaleAt];
+            if (n.length() > 0) shell.toast(n);
+            view.rescaled();
+            changed();
+            return true;
+        }
         return true;
     }
 
@@ -1104,20 +1134,37 @@ public class MapScreen extends Screen implements LocationListener {
             drawOverlay(canvas, w, h);
         }
 
+        private final android.graphics.RectF dst = new android.graphics.RectF();
+
         private void drawTiles(Canvas canvas, int w, int h, double cx, double cy) {
             if (country == null) return;
-            int t0x = (int) Math.floor((cx - w / 2.0) / Mercator.TILE_PX);
-            int t1x = (int) Math.floor((cx + w / 2.0) / Mercator.TILE_PX);
-            int t0y = (int) Math.floor((cy - h / 2.0) / Mercator.TILE_PX);
-            int t1y = (int) Math.floor((cy + h / 2.0) / Mercator.TILE_PX);
 
+            // How much world the screen covers, which grows as the scale
+            // shrinks: at half size the same 240 pixels show twice the ground
+            // in each direction, so four times the tiles.
+            float sc = scale();
+            double halfW = w / 2.0 / sc, halfH = h / 2.0 / sc;
+            int t0x = (int) Math.floor((cx - halfW) / Mercator.TILE_PX);
+            int t1x = (int) Math.floor((cx + halfW) / Mercator.TILE_PX);
+            int t0y = (int) Math.floor((cy - halfH) / Mercator.TILE_PX);
+            int t1y = (int) Math.floor((cy + halfH) / Mercator.TILE_PX);
+
+            float side = Mercator.TILE_PX * sc;
             for (int tx = t0x; tx <= t1x; tx++) {
                 for (int ty = t0y; ty <= t1y; ty++) {
                     Bitmap b = tiles.cached(country, ZOOM, tx, ty);
                     if (b == null) continue;
-                    float px = (float) (tx * Mercator.TILE_PX - cx + w / 2.0);
-                    float py = (float) (ty * Mercator.TILE_PX - cy + h / 2.0);
-                    canvas.drawBitmap(b, px, py, null);
+                    float px = (float) ((tx * Mercator.TILE_PX - cx) * sc + w / 2.0);
+                    float py = (float) ((ty * Mercator.TILE_PX - cy) * sc + h / 2.0);
+                    if (sc == 1f) {
+                        canvas.drawBitmap(b, px, py, null);
+                    } else {
+                        // Into a rectangle rather than at a point. The
+                        // destination area is about one screen whatever the
+                        // scale, so this costs what drawing it unscaled did.
+                        dst.set(px, py, px + side, py + side);
+                        canvas.drawBitmap(b, null, dst, null);
+                    }
                 }
             }
         }
@@ -1160,11 +1207,18 @@ public class MapScreen extends Screen implements LocationListener {
             canvas.drawPath(routePath, routeInk);
         }
 
+        /** The cached route path was projected at the old scale; throw it away
+         *  so the next frame rebuilds it at the new one. */
+        void rescaled() {
+            routePath.reset();
+            pathOf = null;
+        }
+
         private float[] routeXY = new float[RouteLine.MAX_POINTS * 2];
 
         private void buildRoutePath(int w, int h, double cx, double cy) {
             routePath.reset();
-            int n = RouteLine.project(route.line, ZOOM, cx, cy, w, h, routeXY);
+            int n = RouteLine.project(route.line, ZOOM, cx, cy, w, h, scale(), routeXY);
             int i = 0;
             while (i + 1 < n) {
                 if (Float.isNaN(routeXY[i])) {
