@@ -357,8 +357,18 @@ public class MapTiles {
         // Checked against the file rather than trusted. A torn write leaves
         // an index pointing anywhere.
         if (len > MAX_TILE_BYTES || off < DATA_AT || off + (long) len > size) {
+            /*
+             * An index that points past the end of its own file is a block
+             * that was interrupted while being written, and it is not going to
+             * get better on its own: have() reads the same index, says the
+             * tile is there, and nothing fetches it again. So the block is
+             * thrown away, which turns a permanent hole into one download.
+             */
             Log.w("watchmap", "bad index entry at " + z + "/" + x + "/" + y
-                    + " off=" + off + " len=" + len + " file=" + size);
+                    + " off=" + off + " len=" + len + " file=" + size
+                    + "; discarding the block");
+            bf.delete();
+            forgetIndex(z, bx, by);
             return null;
         }
 
@@ -666,10 +676,29 @@ public class MapTiles {
             File dir = out.getParentFile();
             if (dir != null && !dir.isDirectory() && !dir.mkdirs()) return -1;
 
+            /*
+             * Written beside the block and moved into place.
+             *
+             * It used to be written straight to its final name. An exception
+             * mid-write was handled - the partial file is deleted - but the
+             * failure this card actually produces is not an exception: the
+             * watch is switched off, or the battery goes, and what is left is
+             * a block of the right name and the wrong length.
+             *
+             * That is worse than no block at all. The index inside it still
+             * says a tile is there, so have() answers yes and nothing ever
+             * fetches it again, while cached() finds the offset runs past the
+             * end of the file and returns nothing. The tile is a permanent
+             * hole in the map.
+             *
+             * rename on the same filesystem is atomic, so what a reader sees
+             * is the old block or the new one.
+             */
+            File part = new File(out.getAbsolutePath() + ".part");
             java.io.BufferedOutputStream os = null;
             try {
                 os = new java.io.BufferedOutputStream(
-                        new FileOutputStream(out), 32768);
+                        new FileOutputStream(part), 32768);
                 os.write(MAGIC);
                 os.write(z);
                 os.write(BLOCK_BITS);
@@ -684,10 +713,16 @@ public class MapTiles {
             } catch (Exception e) {
                 try { if (os != null) os.close(); } catch (Exception ignored) { }
                 os = null;
-                out.delete();
+                part.delete();
                 return -1;
             } finally {
                 try { if (os != null) os.close(); } catch (Exception e) { }
+            }
+            // FAT32 will not rename onto an existing name.
+            out.delete();
+            if (!part.renameTo(out)) {
+                part.delete();
+                return -1;
             }
             forgetIndex(z, bx, by);
             writeMs = System.currentTimeMillis() - t0;
