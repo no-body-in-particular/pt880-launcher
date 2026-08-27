@@ -29,6 +29,26 @@ grep -q "$SUM" "$HERE/install-launcher.sh" || {
 install -m 644 "$APK" "$WEB/watchlauncher.apk"
 install -m 644 "$HERE/install-launcher.sh" "$WEB/install-launcher.sh"
 
+# The PPG gate patcher, same arrangement as the APK: patch-watch-ppg.sh pins the
+# python file's sha256 because it downloads it and runs it against a system
+# partition, so that pin is rewritten here rather than by hand.
+TOOLS="$HERE/../../tools"
+
+if [ -f "$TOOLS/patch_ppg_gate.py" ]; then
+    PSUM=$(sha256sum "$TOOLS/patch_ppg_gate.py" | cut -d' ' -f1)
+
+    sed -i -E "s/^PATCHER_SHA256=\"[a-f0-9]*\"$/PATCHER_SHA256=\"$PSUM\"/" \
+        "$TOOLS/patch-watch-ppg.sh"
+    grep -q "$PSUM" "$TOOLS/patch-watch-ppg.sh" || {
+        echo "failed to re-pin the patcher checksum -- has PATCHER_SHA256= been renamed?" >&2
+        exit 1
+    }
+
+    install -m 644 "$TOOLS/patch_ppg_gate.py" "$WEB/patch_ppg_gate.py"
+    install -m 644 "$TOOLS/patch-watch-ppg.sh" "$WEB/patch-watch-ppg.sh"
+    printf 'published patch-watch-ppg.sh\n  sha256 %s (patcher)\n' "$PSUM"
+fi
+
 VER=$(grep -o 'versionName="[^"]*"' "$HERE/AndroidManifest.xml" | cut -d'"' -f2)
 printf 'published v%s  %s bytes\n  sha256 %s\n  %s\n' \
     "$VER" "$(stat -c%s "$APK")" "$SUM" "$WEB"
