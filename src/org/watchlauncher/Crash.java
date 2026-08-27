@@ -188,6 +188,56 @@ public final class Crash {
 
     /** The most recent crash, or null. Shown once on the next start so a
      *  failure that only happens in the field is not silent. */
+    /**
+     * One line, for the screen.
+     *
+     * {@link #last()} trims a stack to about two hundred characters, which is the right size
+     * for a report and four times too much for a 240 pixel label - it arrives as a wall of
+     * package names with the useful part somewhere in the middle. What a wearer needs is
+     * that something broke and roughly where, in a glance: "crash: RuntimeException
+     * Ppg.java:140".
+     *
+     * The exception's simple name and the first frame that belongs to us. The platform
+     * frames above it are never the answer - Handler.&lt;init&gt; is where it threw, not
+     * where it went wrong.
+     */
+    public static String summary() {
+        String text = last();
+
+        if (text == null) {
+            return null;
+        }
+
+        String kind = null;
+        String where = null;
+
+        for (String raw : text.split("\n")) {
+            String l = raw.trim();
+
+            if (kind == null && l.indexOf("Exception") > 0 && l.indexOf(" at ") != 0) {
+                int colon = l.indexOf(':');
+                String full = colon > 0 ? l.substring(0, colon) : l;
+                int dot = full.lastIndexOf('.');
+                kind = dot >= 0 ? full.substring(dot + 1) : full;
+            }
+
+            if (where == null && l.contains("watchlauncher") && l.contains("(")) {
+                int open = l.lastIndexOf('(');
+                int close = l.lastIndexOf(')');
+
+                if (open >= 0 && close > open) {
+                    where = l.substring(open + 1, close);
+                }
+            }
+        }
+
+        if (kind == null && where == null) {
+            return null;
+        }
+
+        return "crash: " + (kind == null ? "?" : kind) + (where == null ? "" : "  " + where);
+    }
+
     public static String last() {
         try {
             File f = new File(FILE);

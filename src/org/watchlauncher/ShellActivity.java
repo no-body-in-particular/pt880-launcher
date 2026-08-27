@@ -139,7 +139,11 @@ public class ShellActivity extends Activity {
         // so fast that the wearer sees a screen change, not a failure.
         ui.postDelayed(new Runnable() {
             public void run() {
-                String why = Crash.last();
+                // The one line version. The full stack still goes to the card
+                // and out over the report, but a wall of package names on a
+                // 240px label tells the wearer nothing except that something
+                // alarming happened.
+                String why = Crash.summary();
                 if (why != null && Crash.freshlyCrashed()) toast(why);
 
                 // A kill leaves no stack, so it has to be inferred from a marker
