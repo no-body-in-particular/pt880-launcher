@@ -65,6 +65,17 @@ public class TrackerService extends Service {
     private static final String KEY_MESSAGE = "client_last_message";
     private static final String KEY_LANG = "client_language";
     private static final String KEY_CONTACTS = "client_contacts";
+    private static final String KEY_WORN = "client_worn";
+
+    /** How often to decide whether the watch is on a wrist. */
+    private static final int WEAR_CHECK_MS = 5 * 60 * 1000;
+
+    /**
+     * Movement below this, in m/s^2 of mean absolute deviation, is a watch that is not on
+     * anybody. A worn watch never sits this still: a wrist drifts even when its owner is
+     * asleep. Measured on a table it reads close to zero.
+     */
+    private static final float STILL_THRESHOLD = 0.12f;
     private static final String KEY_SOS = "client_sos_numbers";
     private static final String KEY_WHITELIST = "client_whitelist";
     private static final String KEY_ALLOW_WIPE = "client_allow_factory_reset";
@@ -211,6 +222,7 @@ public class TrackerService extends Service {
         long nextFix = SystemClock.elapsedRealtime() + cycleSeconds() * 1000L;
         long nextVitals = SystemClock.elapsedRealtime() + vitalsSeconds() * 1000L;
         long nextTemp = SystemClock.elapsedRealtime() + tempSeconds() * 1000L;
+        long nextWear = SystemClock.elapsedRealtime() + WEAR_CHECK_MS;
         StringBuilder buf = new StringBuilder();
         byte[] chunk = new byte[2048];
 
@@ -761,6 +773,76 @@ public class TrackerService extends Service {
         }
         prefs(this).edit().putInt(KEY_VITALS, seconds).commit();
         Log.i(TAG, "vitals cycle set to " + seconds + "s by the server");
+    }
+
+
+    // ------------------------------------------------------------------ wear detection
+
+    /**
+     * Decide whether the watch is being worn, and tell the server when that changes.
+     *
+     * <h3>Why from the sensors and not the strap switch</h3>
+     *
+     * This unit is the noAnti build: {@code persist.sys.hasAntisensor} is false and the strap
+     * contact the vendor used is not armed. The optical sensor and the accelerometer are both
+     * present and working, and between them they answer the same question.
+     *
+     * <h3>Two signals, because either alone is wrong</h3>
+     *
+     * A pulse is proof of a wrist, but its absence is not proof of no wrist: the optical sensor
+     * fails on tattoos, in cold weather and whenever the strap is loose, and a client that cried
+     * removal every time it missed a reading would be ignored within a day.
+     *
+     * Stillness is the opposite. A watch on a table is unmistakably still, but so is a sleeping
+     * arm for minutes at a time.
+     *
+     * So removal needs both to agree - no pulse and no movement - and either one alone puts it
+     * back on the wrist. That biases hard towards "worn", which is the right way round: a missed
+     * removal is a gap in a log, a false one is an alarm that wakes somebody.
+     *
+     * The state is kept in a preference rather than a field, because the launcher is restarted
+     * far more often than a watch is taken off, and an in-memory flag would report "put on"
+     * every time the process came back.
+     */
+    private void checkWornAsync(final String id) {
+        new Thread(new Runnable() {
+            public void run() {
+                try {
+                    float motion = TrackerSources.motionEnergy(TrackerService.this, 4000);
+                    boolean moving = motion > STILL_THRESHOLD;
+
+                    boolean pulse = false;
+                    if (!moving) {
+                        // Only worth lighting the LED when stillness has already made removal
+                        // plausible. Running the optical sensor every five minutes to confirm
+                        // something the accelerometer already settled would cost battery for
+                        // nothing.
+                        HeartRate hr = new HeartRate(TrackerService.this, null);
+                        if (hr.available()) {
+                            hr.start();
+                            for (int i = 0; i < 30 && hr.bpm() <= 0; i++) Thread.sleep(500);
+                            pulse = hr.bpm() > 0;
+                        } else {
+                            // No sensor to disagree with the accelerometer, so do not let a
+                            // missing one manufacture a removal.
+                            pulse = true;
+                        }
+                    }
+
+                    boolean worn = moving || pulse;
+                    boolean was = prefs(TrackerService.this).getBoolean(KEY_WORN, true);
+                    Log.i(TAG, "wear check: motion=" + motion + " moving=" + moving
+                            + " pulse=" + pulse + " -> " + (worn ? "worn" : "removed"));
+                    if (worn == was) return;
+
+                    prefs(TrackerService.this).edit().putBoolean(KEY_WORN, worn).commit();
+                    sendAsync(BeehomeCodec.frame("WR", id, worn ? "1" : "0"));
+                    Log.i(TAG, worn ? "reported: watch put on" : "reported: watch removed");
+                } catch (Throwable t) {
+                    Log.w(TAG, "wear check failed", t);
+                }
+            }
+        }, "wear").start();
     }
 
     // ------------------------------------------------------------------ media upload

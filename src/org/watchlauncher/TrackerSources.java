@@ -315,4 +315,61 @@ public final class TrackerSources {
         return lastTemp;
     }
 
+
+    // ------------------------------------------------------------------ motion
+
+    /**
+     * How much the watch moved over a short window, as the mean absolute deviation of the
+     * accelerometer magnitude in m/s^2.
+     *
+     * Gravity is not subtracted: the deviation from the window's own mean removes it, and that
+     * works whatever orientation the watch is lying in. A watch on a table reads near zero, a
+     * worn one reads well above it even when its owner is sitting still, because a wrist is
+     * never quite motionless.
+     */
+    public static float motionEnergy(Context c, int windowMs) {
+        final java.util.List<Float> mags = new java.util.ArrayList<Float>();
+        try {
+            SensorManager sm = (SensorManager) c.getSystemService(Context.SENSOR_SERVICE);
+            if (sm == null) return 0f;
+            Sensor acc = sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
+            if (acc == null) return 0f;
+
+            SensorEventListener l = new SensorEventListener() {
+                public void onSensorChanged(SensorEvent e) {
+                    if (e.values == null || e.values.length < 3) return;
+                    float x = e.values[0], y = e.values[1], z = e.values[2];
+                    synchronized (mags) {
+                        if (mags.size() < 400) {
+                            mags.add(Float.valueOf((float) Math.sqrt(x * x + y * y + z * z)));
+                        }
+                    }
+                }
+
+                public void onAccuracyChanged(Sensor s, int a) {
+                }
+            };
+            sm.registerListener(l, acc, SensorManager.SENSOR_DELAY_NORMAL);
+            try {
+                Thread.sleep(Math.max(500, windowMs));
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+            sm.unregisterListener(l);
+        } catch (Throwable t) {
+            Log.w(TAG, "no motion reading", t);
+            return 0f;
+        }
+
+        synchronized (mags) {
+            if (mags.size() < 4) return 0f;
+            float mean = 0f;
+            for (int i = 0; i < mags.size(); i++) mean += mags.get(i).floatValue();
+            mean /= mags.size();
+            float dev = 0f;
+            for (int i = 0; i < mags.size(); i++) dev += Math.abs(mags.get(i).floatValue() - mean);
+            return dev / mags.size();
+        }
+    }
+
 }
