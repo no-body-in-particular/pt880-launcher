@@ -288,6 +288,44 @@ public class ShellActivity extends Activity {
         if (!stack.isEmpty()) current().onShow();
     }
 
+    /**
+     * Give memory back when the system asks, instead of making it take some.
+     *
+     * Nothing here implemented this before, which had a consequence worth spelling out. This
+     * is the home activity, so Android protects it and reclaims from something else - and on
+     * this watch the something else is the vendor's tracker. When that is killed the watch
+     * stops talking to the server entirely, so the server cannot poll it and cannot send the
+     * reboot that clears a stalled sensor, and a half hour gap becomes an hour and ten.
+     *
+     * The routing graph is the thing worth giving back. It is a memory mapped file, so it
+     * costs no heap, but mapped pages still count in the RSS the low memory killer weighs,
+     * and RoadGraph.shared() is a static - once the map has been opened once it stays mapped
+     * for the life of the process, whether or not anyone is navigating.
+     *
+     * Only when the map is not the screen in front of you. Navigation carries on behind a
+     * dark screen by design, and the graph is read without a null check on every position
+     * fix, so unmapping it under a live route would not save memory, it would crash.
+     */
+    @Override
+    public void onTrimMemory(int level) {
+        super.onTrimMemory(level);
+
+        if (level < TRIM_MEMORY_RUNNING_LOW) {
+            return;                              // a hint, not pressure
+        }
+
+        if (!stack.isEmpty() && current() instanceof MapScreen) {
+            return;                              // in use, possibly mid route
+        }
+
+        try {
+            RoadGraph.shared().close();          // open() maps it again on next use
+
+        } catch (Throwable t) {
+            // never let housekeeping be the thing that fails
+        }
+    }
+
     @Override
     protected void onStop() {
         super.onStop();
