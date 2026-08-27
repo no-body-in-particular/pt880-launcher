@@ -56,6 +56,9 @@ public class TrackerService extends Service {
     private static final String KEY_PORT = "client_port";
     private static final String KEY_CYCLE = "client_cycle_s";
     private static final String KEY_VITALS = "client_vitals_s";
+    private static final String KEY_SOS = "client_sos_numbers";
+    private static final String KEY_WHITELIST = "client_whitelist";
+    private static final String KEY_ALLOW_WIPE = "client_allow_factory_reset";
 
     /** The vendor's own pulse type on the JK frame. */
     private static final int TYPE_PULSE = 2;
@@ -245,6 +248,41 @@ public class TrackerService extends Service {
             send(out, TrackerSources.positionFrame(this, id));
             return;
         }
+        if ("TM".equals(f.op)) {                    // time sync
+            send(out, BeehomeCodec.ack(f.op, f.token()));
+            applyTime(f);
+            return;
+        }
+        if ("31".equals(f.op)) {                    // power off
+            send(out, BeehomeCodec.ack(f.op, f.token()));
+            shell("reboot -p");
+            return;
+        }
+        if ("32".equals(f.op)) {                    // server-initiated dial
+            send(out, BeehomeCodec.ack(f.op, f.token()));
+            dial(numberIn(f));
+            return;
+        }
+        if ("12".equals(f.op) || "14".equals(f.op)) {   // SOS numbers / whitelist
+            // Stored, not acted on: the command only says what the list is. Whatever consults
+            // it later reads the preference.
+            storeList("12".equals(f.op) ? KEY_SOS : KEY_WHITELIST, f);
+            send(out, BeehomeCodec.ack(f.op, f.token()));
+            return;
+        }
+        if ("17".equals(f.op)) {                    // factory reset
+            // Acked but not obeyed unless explicitly allowed. It arrives over an unauthenticated
+            // plaintext link with no sender to check, and it is the one command whose cost
+            // cannot be undone. The vendor obeyed it unconditionally; that is a decision worth
+            // taking again deliberately rather than inheriting.
+            send(out, BeehomeCodec.ack(f.op, f.token()));
+            if (prefs(this).getBoolean(KEY_ALLOW_WIPE, false)) {
+                shell("am broadcast -a android.intent.action.MASTER_CLEAR");
+            } else {
+                Log.w(TAG, "refusing factory reset; set " + KEY_ALLOW_WIPE + " to allow it");
+            }
+            return;
+        }
         // XL, TE and anything else: echo the token so the server can close it out.
         send(out, BeehomeCodec.ack(f.op, f.token()));
     }
@@ -361,6 +399,96 @@ public class TrackerService extends Service {
         } finally {
             try { sh.close(); } catch (Throwable ignored) { }
         }
+    }
+
+
+    // ------------------------------------------------------------------ commands
+
+    /**
+     * Set the clock from a time-sync command.
+     *
+     * Worth having on this watch specifically: its clock ran about ten minutes fast against the
+     * server across a whole day of logs, and the position frames carry their own timestamp, so a
+     * drifting clock puts every fix at the wrong moment rather than merely showing the wrong
+     * time on screen.
+     *
+     * The field is found by shape rather than by index, because the frame's layout is not
+     * documented and guessing an index would set the clock from whatever happened to be there.
+     */
+    private void applyTime(BeehomeCodec.Frame f) {
+        for (int i = 0; i < f.fields.size(); i++) {
+            String v = f.fields.get(i).trim();
+            if (v.length() != 14 || !isDigits(v)) continue;       // YYYYMMDDhhmmss
+            String arg = v.substring(0, 8) + "." + v.substring(8);
+            if (shell("date -s " + arg)) Log.i(TAG, "clock set from server: " + v);
+            return;
+        }
+        Log.w(TAG, "time sync carried no recognisable timestamp: " + f.fields);
+    }
+
+    /** The first field that looks like a dialable number, or null. */
+    private static String numberIn(BeehomeCodec.Frame f) {
+        for (int i = 0; i < f.fields.size(); i++) {
+            String v = f.fields.get(i).trim();
+            // Long enough to be a number, short enough not to be the device id.
+            if (v.length() >= 5 && v.length() <= 15 && isDialable(v)) return v;
+        }
+        return null;
+    }
+
+    private void dial(String number) {
+        if (number == null) {
+            Log.w(TAG, "dial command carried no number");
+            return;
+        }
+        try {
+            Intent i = new Intent(Intent.ACTION_CALL, android.net.Uri.parse("tel:" + number));
+            i.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(i);
+        } catch (Throwable t) {
+            Log.w(TAG, "could not dial", t);
+        }
+    }
+
+    /** Keep every field that looks like a number, comma separated. */
+    private void storeList(String key, BeehomeCodec.Frame f) {
+        StringBuilder b = new StringBuilder();
+        String tok = f.token();
+        for (int i = 0; i < f.fields.size(); i++) {
+            String v = f.fields.get(i).trim();
+            if (v.length() < 5 || v.equals(tok) || !isDialable(v)) continue;
+            if (b.length() > 0) b.append(',');
+            b.append(v);
+        }
+        prefs(this).edit().putString(key, b.toString()).commit();
+        Log.i(TAG, key + " set (" + b.length() + " chars)");
+    }
+
+    private boolean shell(String command) {
+        RootShell sh = new RootShell();
+        try {
+            if (!sh.open() || !sh.isRoot()) return false;
+            return sh.runQuiet(command);
+        } catch (Throwable t) {
+            return false;
+        } finally {
+            try { sh.close(); } catch (Throwable ignored) { }
+        }
+    }
+
+    private static boolean isDigits(String s) {
+        for (int i = 0; i < s.length(); i++) {
+            if (!Character.isDigit(s.charAt(i))) return false;
+        }
+        return true;
+    }
+
+    private static boolean isDialable(String s) {
+        for (int i = 0; i < s.length(); i++) {
+            char ch = s.charAt(i);
+            if (!Character.isDigit(ch) && ch != '+' && ch != '*' && ch != '#') return false;
+        }
+        return true;
     }
 
     // ------------------------------------------------------------------ settings + hooks
