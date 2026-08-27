@@ -1,0 +1,238 @@
+package org.watchlauncher;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+
+/**
+ * The wire format the tracker server speaks, encoded and decoded here and nowhere else.
+ *
+ * <h3>Framing</h3>
+ *
+ * <pre>
+ *     IW &lt;dir&gt;&lt;opcode&gt; , field , field ... #
+ *
+ *     IWAP03,&lt;id&gt;,0,00,8,600#        watch -&gt; server   (AP = uplink)
+ *     IWBPXL,&lt;id&gt;,080835#            server -&gt; watch   (BP = downlink)
+ * </pre>
+ *
+ * Plaintext, comma separated, terminated by {@code #}. The opcode is two characters, digits or
+ * letters. There is no authentication beyond the device id.
+ *
+ * <h3>Why this class holds no state and touches no Android</h3>
+ *
+ * So it can be tested on a desktop against frames captured from the real server, which is the
+ * only way to be sure of a format nobody documented. {@link TrackerService} owns the socket and
+ * the scheduling; this only turns bytes into meaning and back.
+ *
+ * <h3>The correlation id</h3>
+ *
+ * Every command the server sends carries a token, and the watch echoes it in its
+ * acknowledgement so the server can match the two:
+ *
+ * <pre>
+ *     server: IWBP18,&lt;id&gt;,080835#
+ *     watch:  IWAP18,080835#
+ * </pre>
+ *
+ * It is a fixed {@code 080835} in every frame the current server emits, and it would be very
+ * easy to hardcode that -- it appears in all 794 command frames of the capture this was written
+ * from. It is not hardcoded, and must not be: it is the server's value, not the watch's. It
+ * appears nowhere in the vendor firmware, and the day the server starts issuing real sequence
+ * numbers a hardcoded echo would ack the wrong command while looking perfectly healthy.
+ * {@link Frame#token} carries whatever arrived.
+ *
+ * <h3>Positions</h3>
+ *
+ * {@code AP01} is positional, not comma separated, and NMEA-shaped:
+ *
+ * <pre>
+ *     260826 A 5128.0000N 00430.0000E 000.2 214309 015. &lt;id&gt;
+ *     YYMMDD fix   lat        lon     speed HHMMSS course
+ * </pre>
+ *
+ * Degrees-and-decimal-minutes, not decimal degrees: {@code 5128.0000N} is 52 degrees 05.1091
+ * minutes. Sending decimal degrees would put the watch a few hundred kilometres away and still
+ * look like a valid fix, which is the kind of bug that is only caught on a map.
+ *
+ * Course is three digits and a trailing dot ({@code 015.}), speed {@code NNN.N}. When there is
+ * no fix the status is {@code V} and the coordinates are zeroed, which the server already
+ * understands -- it is what the vendor sends indoors.
+ */
+public final class BeehomeCodec {
+
+    /** Uplink prefix: watch to server. */
+    private static final String UP = "IWAP";
+
+    private BeehomeCodec() {
+    }
+
+    // ------------------------------------------------------------------ decoding
+
+    /** One decoded downlink frame. */
+    public static final class Frame {
+        /** Two-character opcode without the {@code IWBP} prefix, e.g. {@code "18"}, {@code "XL"}. */
+        public final String op;
+        /** Fields after the opcode, in order, with the trailing {@code #} removed. */
+        public final List<String> fields;
+
+        Frame(String op, List<String> fields) {
+            this.op = op;
+            this.fields = fields;
+        }
+
+        /**
+         * The correlation token to echo back, or null if the frame carried none.
+         *
+         * The server puts the device id first and the token second, but not every command has
+         * both, so this takes the last field that looks like a token rather than assuming an
+         * index. Echoing the device id back by mistake would be a valid-looking wrong answer.
+         */
+        public String token() {
+            for (int i = fields.size() - 1; i >= 0; i--) {
+                String f = fields.get(i);
+                if (f.length() >= 4 && f.length() <= 10 && isDigits(f)) return f;
+            }
+            return null;
+        }
+
+        @Override
+        public String toString() {
+            return "BP" + op + fields;
+        }
+    }
+
+    /**
+     * Parse one downlink frame, or return null if it is not one.
+     *
+     * Tolerant on purpose: the socket hands over whatever arrived, which can be a partial line,
+     * two frames at once, or noise. Anything that is not recognisably {@code IWBP..} is dropped
+     * rather than guessed at.
+     */
+    public static Frame decode(String raw) {
+        if (raw == null) return null;
+        String s = raw.trim();
+        if (s.length() < 6) return null;
+        if (!s.startsWith("IWBP")) return null;
+        if (s.endsWith("#")) s = s.substring(0, s.length() - 1);
+
+        String op = s.substring(4, 6);
+        List<String> fields = new ArrayList<String>();
+        if (s.length() > 6) {
+            String rest = s.substring(6);
+            if (rest.startsWith(",")) rest = rest.substring(1);
+            // -1 keeps trailing empty fields: "IWBPSQ,<id>,080835,1,3,#" ends with one and
+            // dropping it would silently shift every index after it.
+            for (String f : rest.split(",", -1)) fields.add(f);
+        }
+        return new Frame(op, fields);
+    }
+
+    /** Split a read buffer into complete frames, returning the unconsumed tail. */
+    public static String[] split(String buffered) {
+        List<String> out = new ArrayList<String>();
+        int from = 0;
+        while (true) {
+            int end = buffered.indexOf('#', from);
+            if (end < 0) break;
+            out.add(buffered.substring(from, end + 1));
+            from = end + 1;
+        }
+        String[] r = new String[out.size() + 1];
+        for (int i = 0; i < out.size(); i++) r[i] = out.get(i);
+        r[out.size()] = buffered.substring(from);      // tail, possibly partial
+        return r;
+    }
+
+    // ------------------------------------------------------------------ encoding
+
+    /** {@code IWAP<op>,<field>,...#} */
+    public static String frame(String op, String... fields) {
+        StringBuilder b = new StringBuilder(UP).append(op);
+        for (String f : fields) b.append(',').append(f == null ? "" : f);
+        return b.append('#').toString();
+    }
+
+    /**
+     * Heartbeat, and in practice also the login: it is the first thing the watch sends on a new
+     * connection and the id in it is how the server decides which device the socket belongs to.
+     * There is no separate {@code AP00} on the wire despite the opcode existing.
+     */
+    public static String heartbeat(String id, int steps, int batteryPercent, int cycleSeconds) {
+        return frame("03", id, Integer.toString(steps), "00",
+                Integer.toString(batteryPercent), Integer.toString(cycleSeconds));
+    }
+
+    /** Firmware build string, sent unprompted after a reconnect. */
+    public static String version(String id, String build) {
+        return frame("VR", id, build);
+    }
+
+    /** Acknowledge a server command by echoing its token back under the same opcode. */
+    public static String ack(String op, String token) {
+        return frame(op, token == null ? "" : token);
+    }
+
+    /**
+     * A vitals reading. Type 3 is temperature in the capture this was built from; the value is
+     * sent as the vendor formats it, one decimal.
+     */
+    public static String health(String isoLocalTime, int type, double value) {
+        return frame("JK", isoLocalTime, Integer.toString(type),
+                String.format(Locale.US, "%.2f", value));
+    }
+
+    /**
+     * A position report.
+     *
+     * @param valid false sends the no-fix form the server already expects indoors
+     * @param cells {@code MCC,MNC,LAC,CI} as four fields
+     * @param wifi  {@code AP1|<bssid>|<rssi>&AP2|...}, or null to omit
+     */
+    public static String location(String id, boolean valid, double lat, double lon,
+                                  double speedKmh, double courseDeg,
+                                  int year, int month, int day,
+                                  int hour, int minute, int second,
+                                  String[] cells, String wifi) {
+        StringBuilder b = new StringBuilder(UP).append("01");
+        b.append(String.format(Locale.US, "%02d%02d%02d", year % 100, month, day));
+        b.append(valid ? 'A' : 'V');
+        if (valid) {
+            b.append(dm(lat, 2)).append(lat >= 0 ? 'N' : 'S');
+            b.append(dm(lon, 3)).append(lon >= 0 ? 'E' : 'W');
+        } else {
+            b.append("0000.0000N00000.0000E");
+        }
+        b.append(String.format(Locale.US, "%05.1f", clamp(speedKmh, 0, 999.9)));
+        b.append(String.format(Locale.US, "%02d%02d%02d", hour, minute, second));
+        b.append(String.format(Locale.US, "%03d.", ((int) Math.round(courseDeg) % 360 + 360) % 360));
+        b.append(id);
+        if (cells != null) {
+            for (String c : cells) b.append(',').append(c);
+        }
+        b.append(',').append(wifi == null ? "" : wifi);
+        return b.append('#').toString();
+    }
+
+    /**
+     * Degrees to the protocol's degrees-and-decimal-minutes, zero padded to {@code degDigits}.
+     * 51.4667000 -> {@code 5128.0000}.
+     */
+    public static String dm(double deg, int degDigits) {
+        double a = Math.abs(deg);
+        int d = (int) a;
+        double minutes = (a - d) * 60.0;
+        return String.format(Locale.US, "%0" + degDigits + "d%07.4f", d, minutes);
+    }
+
+    private static double clamp(double v, double lo, double hi) {
+        return v < lo ? lo : (v > hi ? hi : v);
+    }
+
+    private static boolean isDigits(String s) {
+        for (int i = 0; i < s.length(); i++) {
+            if (!Character.isDigit(s.charAt(i))) return false;
+        }
+        return true;
+    }
+}

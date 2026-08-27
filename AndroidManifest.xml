@@ -46,6 +46,12 @@
     <uses-permission android:name="android.permission.READ_CALL_LOG" />
     <uses-permission android:name="android.permission.PROCESS_OUTGOING_CALLS" />
 
+    <!-- The SMS control plane, taken over from the vendor app. RECEIVE_SMS is enough to
+         read commands: KitKat's default-SMS-app rule governs SMS_DELIVER, not SMS_RECEIVED,
+         so this does not have to become the messaging app to hold the channel. -->
+    <uses-permission android:name="android.permission.RECEIVE_SMS" />
+    <uses-permission android:name="android.permission.SEND_SMS" />
+
     <!-- Nothing here is required: the watch has no touchscreen, and the
          camera and modem must not gate installing the launcher. -->
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
@@ -166,5 +172,17 @@
                 <action android:name="android.intent.action.PHONE_STATE" />
             </intent-filter>
         </receiver>
+
+        <!-- Above ordinary priority so a command can be aborted before it reaches the inbox,
+             and so it is still seen if a messaging app is ever installed. -->
+        <receiver android:name=".SmsControl">
+            <intent-filter android:priority="999">
+                <action android:name="android.provider.Telephony.SMS_RECEIVED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Off unless client_enabled is set: two clients cannot share one device id, so
+             turning it on is the same decision as disabling the vendor app. -->
+        <service android:name=".TrackerService" android:exported="false" />
     </application>
 </manifest>

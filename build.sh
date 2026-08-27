@@ -80,11 +80,19 @@ echo "[1/6] resources + manifest + assets"
 # and cannot be given any: the cipher suites are absent from the system image,
 # not merely disabled. Without these the app can only reach a server willing to
 # speak 2013-era ciphers.
+# Classpath separator: javac on Windows splits on ";" -- a ":" there is part of the
+# drive letter, so a Unix-joined classpath silently resolves to nothing and the
+# bouncycastle jars are quietly not found. That fails only Tls12SocketFactory, which
+# the build then carries on without, shipping an apk with no TLS 1.2.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) CPSEP=";" ;;
+  *)                    CPSEP=":" ;;
+esac
 JARS=""
 if [ -d "$HERE/libs" ]; then
   for j in "$HERE"/libs/*.jar; do
     [ -f "$j" ] || continue
-    JARS="$JARS$(w "$j"):"
+    JARS="$JARS$(w "$j")$CPSEP"
   done
 fi
 
@@ -189,6 +197,22 @@ if javac -nowarn -d "$TD3" "$HERE/src/org/watchlauncher/Drive.java" \
     tail -1 "$TD3/out"
 fi
 rm -rf "$TD3"
+
+# The tracker wire format, against frames captured from the live server. The fields are
+# positional with no separators and nobody documented them, so this compares byte for byte
+# against something the server actually sent - a position in decimal degrees instead of
+# degrees-and-minutes is still a valid-looking fix, just a few hundred kilometres away.
+TD4=$(mktemp -d)
+if javac -nowarn -d "$TD4" "$HERE/src/org/watchlauncher/BeehomeCodec.java" 2>/dev/null && javac -nowarn -cp "$TD4" -d "$TD4" "$HERE/test/BeehomeCodecTest.java" 2>/dev/null; then
+    if ! java -cp "$TD4" BeehomeCodecTest > "$TD4/out"; then
+        echo "beehome codec test FAILED:" >&2
+        cat "$TD4/out" >&2
+        rm -rf "$TD4"
+        exit 1
+    fi
+    tail -1 "$TD4/out"
+fi
+rm -rf "$TD4"
 
 # Where you are on a route and how much of it is left. The fast version is not
 # obviously the same as the slow one - the search starts where it finished
