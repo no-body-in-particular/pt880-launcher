@@ -453,6 +453,15 @@ public class MapScreen extends Screen implements LocationListener {
         if (!any) {
             note = "no location provider enabled";
             Log.w("watchmap", "no location provider is enabled; only the server seed will work");
+
+        } else if (Gps.off(locations) && !Gps.wanted(shell)) {
+            //Network positioning counts as a provider, so the branch above stays quiet and
+            //the map just looks slow to find you - which is how "the gps is slow" gets
+            //reported for a receiver that was never switched on. Cell and wifi
+            //trilateration is hundreds of metres on a good day and barely updates while
+            //moving, so it is not a fix that improves with patience.
+            note = "gps off - Sports, hold A";
+            Log.i("watchmap", "gps provider is off; running on network position only");
         }
     }
 

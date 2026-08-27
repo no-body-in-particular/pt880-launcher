@@ -137,6 +137,15 @@ public class ShellActivity extends Activity {
             public void run() {
                 String why = Crash.last();
                 if (why != null && Crash.freshlyCrashed()) toast(why);
+
+                // And send it, so a crash on a wrist in a car is diagnosable
+                // without the watch and a cable being in the same room. Off the
+                // main thread: it shells out for the imei and opens a socket.
+                new Thread(new Runnable() {
+                    public void run() {
+                        WatchdogReport.sendCrash(ShellActivity.this);
+                    }
+                }).start();
             }
         }, 1200);
         prefs = getSharedPreferences("watchlauncher", MODE_PRIVATE);

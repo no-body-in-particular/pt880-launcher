@@ -88,7 +88,65 @@ public class WatchdogReport {
      * and opens a socket, and both can block for seconds.
      */
     public static void sendNow(Context context, String why) {
-        List<String> lines = collect(why);
+        send(context, collect(why));
+    }
+
+    /**
+     * The last crash, if there is one that has not been sent yet.
+     *
+     * Crashes already land in /sdcard/Documents/crash.txt, which is fine when somebody is
+     * holding the watch and a cable. It is no use at all for a crash that happens on a wrist
+     * in a car, which is where the ones that matter happen - and those are exactly the ones
+     * that get reported as "it quit a few times" with no stack to go on.
+     *
+     * Sent once. The file is deliberately not cleared - it is the wearer's copy and the
+     * launcher's own toast reads from it - so a preference remembers how long it was when it
+     * was last sent, and a crash only counts as new when the file has grown.
+     */
+    public static void sendCrash(Context context) {
+        try {
+            String text = Crash.last();
+
+            if (text == null || text.length() == 0) {
+                return;
+            }
+
+            android.content.SharedPreferences p =
+                    context.getSharedPreferences("watchlauncher", Context.MODE_PRIVATE);
+
+            if (p.getInt(SENT_LEN, 0) == text.length()) {
+                return;                              // already sent this one
+            }
+
+            p.edit().putInt(SENT_LEN, text.length()).apply();
+
+            List<String> lines = new ArrayList<String>();
+            lines.add("crash report");
+
+            //The top of a stack is the part that says what broke; the bottom is framework
+            //plumbing that is the same for every crash. Newest first, because the file
+            //accumulates and the last crash is the one being asked about.
+            String[] all = text.split("\n");
+            int from = Math.max(0, all.length - 40);
+
+            for (int i = from; i < all.length && lines.size() < MAX_FRAMES; i++) {
+                String line = all[i].trim();
+
+                if (line.length() > 0) {
+                    lines.add(clean(line));
+                }
+            }
+
+            send(context, lines);
+
+        } catch (Throwable t) {
+            //a crash report that cannot be sent must not become a second crash
+        }
+    }
+
+    private static final String SENT_LEN = "crash.sentlen";
+
+    private static void send(Context context, List<String> lines) {
 
         //The imei lives in the vendor's config, which is only readable with root - same way
         //SleepService gets it before an upload.
