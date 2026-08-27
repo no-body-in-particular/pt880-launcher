@@ -156,7 +156,11 @@ public class WatchdogReport {
             List<String> lines = new ArrayList<String>();
             lines.add("killed while showing " + clean(screen.length() > 0 ? screen : "launcher"));
             add(lines, "ps", "ps", 6, "ic.work|enqualcomm|watchlauncher|L009");
-            add(lines, "mem", "cat /proc/meminfo", 3, "MemTotal|MemFree|Cached");
+            add(lines, "mem", "cat /proc/meminfo", 4, "MemTotal|MemFree|Cached|SwapFree");
+
+            //Who was big enough to be worth killing, and who the killer had already taken.
+            //A kill names a victim; the process table names the reason.
+            add(lines, "top", "ps", 8, "u0_a|system|app_");
             add(lines, "log", "logcat -d -v brief", 8,
                 "lowmemory|LowMemory|am_kill|Killing|to free|watchlauncher");
             send(context, lines);
@@ -316,7 +320,17 @@ public class WatchdogReport {
             shell = new RootShell();
 
             if (shell.open()) {
-                return shell.exec(command);
+                String out = shell.exec(command);
+
+                //An empty answer from the root shell is not an answer. It comes back that way
+                //when the shell is busy or the command was not one it will run, and returning
+                //it as-is is what turned /proc/meminfo into "(no output)" in the first report
+                //that mattered - the field that would have said who took the memory. Fall
+                //through to the plain shell instead, which can read /proc perfectly well
+                //without root.
+                if (out != null && out.trim().length() > 0) {
+                    return out;
+                }
             }
 
         } catch (Throwable t) {
