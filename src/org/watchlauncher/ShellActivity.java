@@ -130,6 +130,10 @@ public class ShellActivity extends Activity {
         // like the app navigating rather than dying. Record it on the card.
         Crash.install(this);
 
+        // Before the marker is re-armed, so this reports the run before this one.
+        final boolean killed = Crash.wasKilled(this);
+        final String lastScreen = Crash.lastScreen(this);
+
         // And say so, once, if the last run ended badly. A crash that only
         // happens in the field is otherwise invisible: the watch relaunches
         // so fast that the wearer sees a screen change, not a failure.
@@ -138,12 +142,25 @@ public class ShellActivity extends Activity {
                 String why = Crash.last();
                 if (why != null && Crash.freshlyCrashed()) toast(why);
 
+                // A kill leaves no stack, so it has to be inferred from a marker
+                // that a clean exit would have cleared. Said out loud, because
+                // "the map disappeared" and "the map crashed" are different
+                // problems and the wrist cannot tell them apart.
+                if (killed) {
+                    String on = lastScreen.length() > 0 ? lastScreen : "the launcher";
+                    toast("killed while showing " + on);
+                }
+
                 // And send it, so a crash on a wrist in a car is diagnosable
                 // without the watch and a cable being in the same room. Off the
                 // main thread: it shells out for the imei and opens a socket.
                 new Thread(new Runnable() {
                     public void run() {
                         WatchdogReport.sendCrash(ShellActivity.this);
+
+                        if (killed) {
+                            WatchdogReport.sendKilled(ShellActivity.this, lastScreen);
+                        }
                     }
                 }).start();
             }
@@ -283,6 +300,7 @@ public class ShellActivity extends Activity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        Crash.noteCleanExit(this);
         for (int i = stack.size() - 1; i >= 0; i--) stack.get(i).onHide();
         if (bt != null) bt.stop();
         if (root != null) root.close();
@@ -442,6 +460,10 @@ public class ShellActivity extends Activity {
         s.attach(this);
         stack.add(s);
         show(s);
+        // So a kill can say what was open. The map is both the heaviest screen
+        // and the one being asked about, and a process that is gone cannot
+        // report anything about itself afterwards.
+        Crash.noteScreen(this, s.getClass().getSimpleName());
     }
 
     /** Leave the current screen. The launcher is the floor: backing out of it

@@ -144,6 +144,28 @@ public class WatchdogReport {
         }
     }
 
+    /**
+     * Report that the previous run was killed rather than having crashed.
+     *
+     * Worth its own frame because it is the opposite diagnosis from a crash: nothing here
+     * went wrong, something else on the device took the memory. The process table and the
+     * free memory go with it, because those are what say who.
+     */
+    public static void sendKilled(Context context, String screen) {
+        try {
+            List<String> lines = new ArrayList<String>();
+            lines.add("killed while showing " + clean(screen.length() > 0 ? screen : "launcher"));
+            add(lines, "ps", "ps", 6, "ic.work|enqualcomm|watchlauncher|L009");
+            add(lines, "mem", "cat /proc/meminfo", 3, "MemTotal|MemFree|Cached");
+            add(lines, "log", "logcat -d -v brief", 8,
+                "lowmemory|LowMemory|am_kill|Killing|to free|watchlauncher");
+            send(context, lines);
+
+        } catch (Throwable t) {
+            //never let the reporter be the thing that fails
+        }
+    }
+
     private static final String SENT_LEN = "crash.sentlen";
 
     private static void send(Context context, List<String> lines) {

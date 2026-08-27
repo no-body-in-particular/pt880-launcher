@@ -33,6 +33,73 @@ public final class Crash {
 
     private Crash() { }
 
+    /**
+     * Whether the previous run ended by being killed rather than by crashing or exiting.
+     *
+     * A crash writes a stack. A clean exit clears a marker. Anything else - the kernel's low
+     * memory killer picking this process, which on a watch with a 64 MB heap picks the
+     * largest app and that is usually this one - leaves no trace at all, because a SIGKILL
+     * runs no handler. So the last run is presumed killed until it says otherwise: a marker
+     * is written at startup and cleared on the way out, and finding it still there means the
+     * way out never happened.
+     *
+     * This matters because the two look identical from the wrist. The map vanishes and the
+     * launcher is on screen, and "it crashed" and "it was killed" are different problems with
+     * different fixes - one is a bug here, the other is memory pressure from somewhere else
+     * on the device.
+     *
+     * Called before the marker is re-armed, so it reports the run before this one.
+     */
+    public static boolean wasKilled(Context ctx) {
+        try {
+            android.content.SharedPreferences p =
+                    ctx.getSharedPreferences("watchlauncher", Context.MODE_PRIVATE);
+            boolean running = p.getBoolean(KEY_RUNNING, false);
+            String screen = p.getString(KEY_SCREEN, "");
+            p.edit().putBoolean(KEY_RUNNING, true).apply();
+            return running && screen.length() > 0;
+
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /** What was on screen when it went, which is the first thing anyone asks. */
+    public static String lastScreen(Context ctx) {
+        try {
+            return ctx.getSharedPreferences("watchlauncher", Context.MODE_PRIVATE)
+                    .getString(KEY_SCREEN, "");
+
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
+    /** Called as screens are pushed, so a kill can say what was open. */
+    public static void noteScreen(Context ctx, String name) {
+        try {
+            ctx.getSharedPreferences("watchlauncher", Context.MODE_PRIVATE)
+                    .edit().putString(KEY_SCREEN, name).apply();
+
+        } catch (Throwable t) {
+            //a marker that cannot be written only costs the diagnosis, not the run
+        }
+    }
+
+    /** Cleared on the way out, so the next start can tell a kill from a clean exit. */
+    public static void noteCleanExit(Context ctx) {
+        try {
+            ctx.getSharedPreferences("watchlauncher", Context.MODE_PRIVATE)
+                    .edit().putBoolean(KEY_RUNNING, false).apply();
+
+        } catch (Throwable t) {
+            //ignore
+        }
+    }
+
+    private static final String KEY_RUNNING = "crash.running";
+    private static final String KEY_SCREEN = "crash.screen";
+
     public static void install(final Context ctx) {
         final Thread.UncaughtExceptionHandler prev =
                 Thread.getDefaultUncaughtExceptionHandler();
