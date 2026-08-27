@@ -142,6 +142,14 @@ public class ShellActivity extends Activity {
                 String why = Crash.summary();
                 if (why != null && Crash.freshlyCrashed()) toast(why);
 
+                // And the full stack out over the report, when Diagnostics is
+                // on. Off the main thread: it shells out and opens a socket.
+                new Thread(new Runnable() {
+                    public void run() {
+                        WatchdogReport.sendCrash(ShellActivity.this);
+                    }
+                }).start();
+
             }
         }, 1200);
         prefs = getSharedPreferences("watchlauncher", MODE_PRIVATE);

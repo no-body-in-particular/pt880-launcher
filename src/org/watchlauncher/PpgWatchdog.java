@@ -246,11 +246,23 @@ public class PpgWatchdog {
         //nobody was reading anyway, against the alternative the server falls back on, which
         //is rebooting the whole watch - a dark screen for minutes, a lost GPS fix, and about
         //thirty three minutes of missing readings each time.
+        //Before acting, because restarting the sensor process destroys the evidence. This is
+        //gated on the Diagnostics switch and does nothing when it is off.
+        WatchdogReport.sendNow(context, "no pulse reading for " + silentMin + " min");
+
         boolean restarted = restartSensorService(context);
 
         if (restarted) {
             Log.i(TAG, "restarted com.ic.work");
         }
+
+        //And afterwards. A stall this morning ran the full thirty three minutes to a server
+        //reboot when the watchdog should have cleared it in ten, and there was no way to
+        //tell whether it had not tripped, or tripped and failed. One line either side of the
+        //recovery answers that.
+        WatchdogReport.sendNow(context, restarted
+                ? "restarted com.ic.work, now reading the sensor"
+                : "could not restart com.ic.work - no root?");
 
         //Then fill the gap the stall left, using the path that does not go through the queue
         //at all.
