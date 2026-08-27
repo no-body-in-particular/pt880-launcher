@@ -56,6 +56,7 @@ public class TrackerService extends Service {
     private static final String KEY_PORT = "client_port";
     private static final String KEY_CYCLE = "client_cycle_s";
     private static final String KEY_VITALS = "client_vitals_s";
+    private static final String KEY_TEMP = "client_temp_s";
     private static final String KEY_SOS = "client_sos_numbers";
     private static final String KEY_WHITELIST = "client_whitelist";
     private static final String KEY_ALLOW_WIPE = "client_allow_factory_reset";
@@ -66,6 +67,8 @@ public class TrackerService extends Service {
      *  own JK types; only pulse is confirmed against a live frame. */
     private static final int TYPE_BP = 4;
     private static final int TYPE_SPO2 = 5;
+    /** Temperature, confirmed against a live APJK frame. */
+    private static final int TYPE_TEMP = 3;
 
     /** Matches the cadence the vendor used, and what the server expects to see. */
     private static final int HEARTBEAT_MS = 10 * 60 * 1000;
@@ -199,6 +202,7 @@ public class TrackerService extends Service {
         long nextBeat = SystemClock.elapsedRealtime() + HEARTBEAT_MS;
         long nextFix = SystemClock.elapsedRealtime() + cycleSeconds() * 1000L;
         long nextVitals = SystemClock.elapsedRealtime() + vitalsSeconds() * 1000L;
+        long nextTemp = SystemClock.elapsedRealtime() + tempSeconds() * 1000L;
         StringBuilder buf = new StringBuilder();
         byte[] chunk = new byte[2048];
 
@@ -222,7 +226,7 @@ public class TrackerService extends Service {
                 nextFix = now + cycleSeconds() * 1000L;
             }
             if (now >= nextVitals) {
-                sendVitals(out);
+                measureAsync(TYPE_PULSE);
                 nextVitals = now + vitalsSeconds() * 1000L;
             }
             int n;
@@ -315,6 +319,15 @@ public class TrackerService extends Service {
             beginPhoto();
             return;
         }
+        if ("TE".equals(f.op)) {
+            // IWBPTE,<imei>,<serial>,<minutes>#  -- a period, not a switch. Sending a bare 1
+            // means "every minute", which is how this watch ended up taking 257 temperature
+            // readings in a day. Stored in seconds; clamped like every other server-set
+            // interval, because it arrives unauthenticated and a 1 is expensive.
+            applyMinutes(KEY_TEMP, f, 1, 24 * 60);
+            send(out, BeehomeCodec.ack(f.op, f.token()));
+            return;
+        }
         if ("42".equals(f.op)) {
             // The manual's media acknowledgement. Parsed and dropped, exactly as the vendor
             // does -- and specifically NOT acked. The generic reply below would send
@@ -371,6 +384,28 @@ public class TrackerService extends Service {
         // XL, TE and anything else: echo the token so the server can close it out.
         send(out, BeehomeCodec.ack(f.op, f.token()));
     }
+
+    /** Same as {@link #applyInterval} but the wire value is in minutes, not seconds. */
+    private void applyMinutes(String key, BeehomeCodec.Frame f, int loMin, int hiMin) {
+        String tok = f.token();
+        for (int i = f.fields.size() - 1; i >= 0; i--) {
+            String v = f.fields.get(i);
+            if (v.equals(tok) || v.length() == 0) continue;
+            try {
+                int n = Integer.parseInt(v.trim());
+                if (n < loMin || n > hiMin) {
+                    Log.w(TAG, "refusing out-of-range period " + n + " min for " + key);
+                    return;
+                }
+                prefs(this).edit().putInt(key, n * 60).commit();
+                Log.i(TAG, key + " set to " + n + " min by the server");
+                return;
+            } catch (NumberFormatException e) {
+                // not the field we wanted; keep looking backwards
+            }
+        }
+    }
+
 
     /**
      * Take an interval out of a command's trailing numeric field.
@@ -486,6 +521,24 @@ public class TrackerService extends Service {
     /** Location cycle, as the server last set it. 600 s is what the vendor shipped. */
     private int cycleSeconds() {
         return prefs(this).getInt(KEY_CYCLE, 600);
+    }
+
+    /** Temperature period, as the server last set it with BPTE. Ten minutes by default -- the
+     *  vendor was left on sixty seconds by accident and took 257 readings in a day. */
+    private int tempSeconds() {
+        return prefs(this).getInt(KEY_TEMP, 600);
+    }
+
+    /** Read the temperature off the loop thread and report it. */
+    private void sendTemperatureAsync() {
+        new Thread(new Runnable() {
+            public void run() {
+                float t = TrackerSources.temperature(TrackerService.this);
+                if (t > 0) {
+                    sendAsync(BeehomeCodec.health(TrackerSources.stamp(), TYPE_TEMP, t));
+                }
+            }
+        }, "temp").start();
     }
 
     /** Vitals period. The firmware managed one every three minutes when it was working. */

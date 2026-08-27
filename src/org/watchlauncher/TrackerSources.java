@@ -258,4 +258,61 @@ public final class TrackerSources {
                 cal.get(Calendar.YEAR), cal.get(Calendar.MONTH) + 1, cal.get(Calendar.DAY_OF_MONTH),
                 cal.get(Calendar.HOUR_OF_DAY), cal.get(Calendar.MINUTE), cal.get(Calendar.SECOND));
     }
+
+    // ------------------------------------------------------------------ temperature
+
+    /** Last body temperature in degrees C, or 0 if none has arrived yet. */
+    private static volatile float lastTemp = 0f;
+
+    /**
+     * Read the body temperature sensor.
+     *
+     * The sensor is a vendor one (GXTS02S) with a non-standard type, so it is found by name
+     * rather than by {@code TYPE_AMBIENT_TEMPERATURE}, which it does not answer to. It reports
+     * centi-degrees: the wire carries 36.35 where the sensor says 3635.
+     *
+     * On-demand like the step counter, so this registers, waits briefly for the first value and
+     * lets go again rather than holding a subscription open between the ten-minute reports.
+     */
+    public static float temperature(Context c) {
+        try {
+            SensorManager sm = (SensorManager) c.getSystemService(Context.SENSOR_SERVICE);
+            if (sm == null) return lastTemp;
+            Sensor found = null;
+            for (Sensor s : sm.getSensorList(Sensor.TYPE_ALL)) {
+                String n = s.getName();
+                if (n != null && n.toLowerCase(Locale.US).indexOf("temperature") >= 0) {
+                    found = s;
+                    break;
+                }
+            }
+            if (found == null) return lastTemp;
+
+            final SensorEventListener l = new SensorEventListener() {
+                public void onSensorChanged(SensorEvent e) {
+                    if (e.values == null || e.values.length == 0) return;
+                    float v = e.values[0];
+                    // Accept either scale: some builds report degrees directly. A body reading
+                    // is never 2771 degrees and never 0.3, so the magnitude disambiguates it
+                    // without having to know which firmware is underneath.
+                    if (v > 100f) v = v / 100f;
+                    if (v > 20f && v < 45f) lastTemp = v;
+                }
+
+                public void onAccuracyChanged(Sensor s, int a) {
+                }
+            };
+            sm.registerListener(l, found, SensorManager.SENSOR_DELAY_NORMAL);
+            try {
+                Thread.sleep(800);
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+            sm.unregisterListener(l);
+        } catch (Throwable t) {
+            Log.w(TAG, "no temperature reading", t);
+        }
+        return lastTemp;
+    }
+
 }
