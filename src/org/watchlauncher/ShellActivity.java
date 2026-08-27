@@ -318,12 +318,24 @@ public class ShellActivity extends Activity {
             return;                              // in use, possibly mid route
         }
 
-        try {
-            RoadGraph.shared().close();          // open() maps it again on next use
+        // Off the main thread, and this is not tidiness.
+        //
+        // onTrimMemory is delivered on the main thread, and both RoadGraph.shared() and
+        // close() are synchronized - shared() on the class, close() on the instance. A route
+        // being computed holds that instance for as long as the search takes, which on this
+        // graph is seconds. Closing from the main thread means the UI thread waiting on a
+        // router, which is an ANR and a black screen, for the sake of freeing memory nobody
+        // was short of.
+        new Thread(new Runnable() {
+            public void run() {
+                try {
+                    RoadGraph.shared().close();  // open() maps it again on next use
 
-        } catch (Throwable t) {
-            // never let housekeeping be the thing that fails
-        }
+                } catch (Throwable t) {
+                    // never let housekeeping be the thing that fails
+                }
+            }
+        }).start();
     }
 
     @Override

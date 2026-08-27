@@ -55,9 +55,37 @@ public final class Crash {
             android.content.SharedPreferences p =
                     ctx.getSharedPreferences("watchlauncher", Context.MODE_PRIVATE);
             boolean running = p.getBoolean(KEY_RUNNING, false);
+            long since = p.getLong(KEY_RUNNING_AT, 0);
             String screen = p.getString(KEY_SCREEN, "");
-            p.edit().putBoolean(KEY_RUNNING, true).apply();
-            return running && screen.length() > 0;
+
+            p.edit().putBoolean(KEY_RUNNING, true)
+                    .putLong(KEY_RUNNING_AT, System.currentTimeMillis()).apply();
+
+            if (!running || screen.length() == 0) {
+                return false;
+            }
+
+            //Installing a new build kills the running app, and it looks exactly like every
+            //other kill from in here: no onDestroy, marker still set, a screen recorded.
+            //Six builds went onto this watch in one morning and two of them were reported
+            //back as "killed while showing MapScreen" - which sent a whole diagnosis chasing
+            //the low memory killer for something that was an adb install.
+            //
+            //The package's own update time settles it. Updated since this run started means
+            //the run ended because it was replaced.
+            try {
+                long updated = ctx.getPackageManager()
+                        .getPackageInfo(ctx.getPackageName(), 0).lastUpdateTime;
+
+                if (since > 0 && updated >= since) {
+                    return false;
+                }
+
+            } catch (Throwable t) {
+                //no package info; fall through and report it as a kill
+            }
+
+            return true;
 
         } catch (Throwable t) {
             return false;
@@ -98,6 +126,7 @@ public final class Crash {
     }
 
     private static final String KEY_RUNNING = "crash.running";
+    private static final String KEY_RUNNING_AT = "crash.runningat";
     private static final String KEY_SCREEN = "crash.screen";
 
     public static void install(final Context ctx) {
