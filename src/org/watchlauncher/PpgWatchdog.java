@@ -176,8 +176,34 @@ public class PpgWatchdog {
 
         prefs(context).edit().putLong(KEY_LAST_FORCED, System.currentTimeMillis()).apply();
 
-        long silentMin = silentFor(context) / 60000L;
-        Log.i(TAG, "no pulse reading for " + silentMin + " min - asking the sensor directly");
+        final long silentMin = silentFor(context) / 60000L;
+        Log.i(TAG, "no pulse reading for " + silentMin + " min");
+
+        //Say what the watch was doing before doing anything about it. Restarting the sensor
+        //process destroys the evidence, and the evidence is the only way this gets diagnosed
+        //rather than guessed at - twice now a theory has been argued from the shape of the
+        //gaps and been wrong.
+        WatchdogReport.sendNow(context, "no pulse reading for " + silentMin + " min");
+
+        //Then the recovery. com.ic.work runs one work queue for both sensors: requests
+        //become items, a single worker takes them one at a time, and each item carries a
+        //creation timestamp that nothing ever reads. There is no timeout. A measurement
+        //whose sensor callback never arrives holds the queue forever, and because heart rate
+        //and temperature share it, both stop together and stay stopped.
+        //
+        //Nothing reachable from outside clears that. Binding the service and asking for a
+        //reading - which is what this used to do - only puts another item behind the stuck
+        //one. stopCurrentWork would be the escape hatch and this build does not implement
+        //it: the binder answers three transactions and that is not one of them.
+        //
+        //So restart the process that holds the queue. Android brings it straight back, and
+        //CoreService's next alarm finds a working service. That is seconds and a sensor
+        //nobody was reading anyway, against the alternative the server falls back on, which
+        //is rebooting the whole watch - a dark screen for minutes, a lost GPS fix, and about
+        //thirty three minutes of missing readings each time.
+        if (restartSensorService(context)) {
+            Log.i(TAG, "restarted com.ic.work");
+        }
 
         new Ppg(context, new Ppg.Listener() {
             @Override
@@ -197,6 +223,49 @@ public class PpgWatchdog {
                 Log.i(TAG, "forced reading did not happen: " + why);
             }
         }).request(Ppg.TEST_ALL);
+    }
+
+    /**
+     * Restart the process that owns the sensor queue.
+     *
+     * Needs root, which the launcher has where the root helper is installed and does not
+     * where it is not - so a failure here is reported and shrugged off rather than treated as
+     * an error. Without it the server's reboot is still the backstop; this only makes the
+     * cheap recovery available when it can be.
+     *
+     * Killed by name rather than by a remembered pid: the pid changes every time this works,
+     * and killing a stale one would eventually kill something else.
+     */
+    private static boolean restartSensorService(Context context) {
+        RootShell shell = null;
+
+        try {
+            shell = new RootShell();
+
+            if (!shell.open() || !shell.isRoot()) {
+                Log.i(TAG, "no root - leaving the sensor process alone");
+                return false;
+            }
+
+            //SIGKILL rather than SIGTERM: the worker is stuck inside a call that is not
+            //coming back, so there is nothing to unwind politely.
+            shell.exec("for p in $(ps | grep com.ic.work | awk '{print $2}'); do kill -9 $p; done");
+            return true;
+
+        } catch (Throwable t) {
+            Log.w(TAG, "could not restart the sensor process", t);
+            return false;
+
+        } finally {
+            try {
+                if (shell != null) {
+                    shell.close();
+                }
+
+            } catch (Throwable t) {
+                //ignore
+            }
+        }
     }
 
     /** Quiet for long enough, and not tried too recently. */
