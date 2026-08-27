@@ -105,6 +105,7 @@ public class Speech {
                                 + audio.getStreamVolume(AudioManager.STREAM_MUSIC) + "/"
                                 + audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
                                 + " a2dp=" + audio.isBluetoothA2dpOn());
+                        raiseSpeakerVolume();
                     }
 
                     String queued = pending;
@@ -287,4 +288,33 @@ public class Speech {
         ready = false;
         status = "stopped";
     }
+
+    /**
+     * Put STREAM_MUSIC at maximum when navigation is coming out of the case speaker.
+     *
+     * The speaker on this watch is quiet enough that anything below full is inaudible
+     * outdoors, which is the only place turn instructions matter. There is nothing to lose by
+     * running it flat out: it is a watch speaker, and the alternative is an announcement
+     * nobody hears.
+     *
+     * Not when A2DP or a wired headset is connected. Those are already loud, they are inches
+     * from an eardrum, and forcing them to maximum for a navigation prompt is unpleasant. The
+     * check runs each time rather than once, because buds connect and disconnect while the
+     * launcher stays up.
+     */
+    private void raiseSpeakerVolume() {
+        try {
+            if (audio.isBluetoothA2dpOn() || audio.isWiredHeadsetOn()) return;
+            int max = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
+            if (audio.getStreamVolume(AudioManager.STREAM_MUSIC) >= max) return;
+            // Flag 0: no volume panel. A 240px screen has nowhere to put one, and it would
+            // cover the map at the moment a turn is being announced.
+            audio.setStreamVolume(AudioManager.STREAM_MUSIC, max, 0);
+            Log.i(TAG, "speaker output: music volume raised to " + max);
+        } catch (Throwable t) {
+            // A volume we cannot set is not a reason to stay silent.
+            Log.w(TAG, "could not raise the speaker volume", t);
+        }
+    }
+
 }
