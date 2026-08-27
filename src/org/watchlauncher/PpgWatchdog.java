@@ -125,6 +125,25 @@ public class PpgWatchdog {
         }
     }
 
+    /**
+     * When the firmware last completed a measurement, or 0 if it never has here.
+     *
+     * Exposed so other things can stay out of its way. The vendor broadcasts a result when it
+     * finishes, and it works to a fixed cycle, so the last one plus the cycle is a good
+     * estimate of when the next is due.
+     */
+    public static long lastVendorReadingAt(Context context) {
+        try {
+            return prefs(context).getLong(KEY_LAST_READING, 0);
+
+        } catch (Throwable t) {
+            return 0;
+        }
+    }
+
+    /** The firmware's measurement period, as the server sets it with IWBPSQ. */
+    public static final long VENDOR_CYCLE_MS = 3 * 60 * 1000L;
+
     /** Remember that the pipeline is alive. */
     static void noteReading(Context context) {
         prefs(context).edit().putLong(KEY_LAST_READING, System.currentTimeMillis()).apply();

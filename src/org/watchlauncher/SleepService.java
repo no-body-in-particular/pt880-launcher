@@ -195,6 +195,29 @@ public class SleepService extends Service implements SensorEventListener {
             return START_NOT_STICKY;
         }
 
+        // Stay off the sensor while the firmware is using it.
+        //
+        // A five second burst every thirty seconds against a PPG measurement that needs tens
+        // of seconds of clean signal means colliding with most of them, and a vendor
+        // measurement that is interrupted does not fail - it never calls back, and
+        // com.ic.work has no timeout on the item at the head of its queue, so one lost
+        // callback stops heart rate and temperature until the process restarts.
+        //
+        // The firmware broadcasts a result when it finishes and works to a fixed cycle, so
+        // the next one is due about VENDOR_CYCLE_MS after the last. Around that, this stands
+        // back and tries again shortly after. It costs one sample in six; the alternative
+        // costs the night's vitals.
+        long yield = yieldFor();
+
+        if (yield > 0) {
+            //Not finishBurst(): that reschedules from its own reading of the night, and with
+            //no samples taken it picks the five minute watching interval - which would
+            //override the short yield below and quietly drop sleep sampling to a fifth of
+            //its rate every time it stood back. Release and stop, and let the yield stand.
+            standBack(yield);
+            return START_NOT_STICKY;
+        }
+
         reset();
         try {
             sensors.registerListener(this, accel, SensorManager.SENSOR_DELAY_GAME);
@@ -205,6 +228,63 @@ public class SleepService extends Service implements SensorEventListener {
         ui.postDelayed(stop, BURST_MS);
         return START_NOT_STICKY;
     }
+
+    /** Skip this burst and come back after {@code delayMs}, leaving the sensor alone. */
+    private void standBack(long delayMs) {
+        ui.removeCallbacks(stop);
+        sampling = false;
+
+        if (SleepLog.enabled(this)) {
+            schedule(this, delayMs);
+        }
+
+        releaseWakeLock();
+        stopSelf();
+    }
+
+    /**
+     * How long to stand back for, or 0 to sample now.
+     *
+     * Returns a delay when the firmware's next measurement is close - either just about to
+     * start, or likely still running. With no reading ever seen there is nothing to avoid and
+     * this yields nothing, so a watch whose firmware is not reporting is sampled normally
+     * rather than being starved by a guess.
+     */
+    private long yieldFor() {
+        long last = PpgWatchdog.lastVendorReadingAt(this);
+
+        if (last <= 0) {
+            return 0;
+        }
+
+        long since = System.currentTimeMillis() - last;
+
+        if (since < 0) {
+            return 0;                            // clock stepped; no useful phase
+        }
+
+        long cycle = PpgWatchdog.VENDOR_CYCLE_MS;
+        long intoCycle = since % cycle;
+        long untilNext = cycle - intoCycle;
+
+        //Its measurement runs for a while after it starts, so the window to avoid straddles
+        //the boundary: shortly before the next one is due, and while it is likely still going.
+        if (intoCycle < MEASURE_MS) {
+            return MEASURE_MS - intoCycle + 2000;
+        }
+
+        if (untilNext < GUARD_MS) {
+            return untilNext + MEASURE_MS + 2000;
+        }
+
+        return 0;
+    }
+
+    /** Roughly how long a firmware PPG measurement takes from start to result. */
+    private static final long MEASURE_MS = 25000;
+
+    /** How early to get out of its way. */
+    private static final long GUARD_MS = 10000;
 
     private final Runnable stop = new Runnable() {
         public void run() { finishBurst(); }

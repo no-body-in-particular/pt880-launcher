@@ -40,12 +40,29 @@ public class SystemMenuScreen extends ListScreen {
                 shell.toast("One-button mode after restart");
                 break;
             case 2:
-                shell.push(new TermScreen());
+                boolean on = !SleepLog.enabled(shell);
+                SleepLog.setEnabled(shell, on);
+
+                if (on) {
+                    SleepService.schedule(shell, 10000);
+
+                } else {
+                    // Cancel the alarm as well as clearing the flag. Leaving it
+                    // armed means one more burst fires after switching off,
+                    // which is the sort of thing that makes an A/B say nothing.
+                    SleepService.cancel(shell);
+                }
+
+                shell.toast(on ? "Sleep logging on" : "Sleep logging off");
+                render();
                 break;
             case 3:
-                shell.push(new AboutScreen());
+                shell.push(new TermScreen());
                 break;
             case 4:
+                shell.push(new AboutScreen());
+                break;
+            case 5:
                 shell.pop();
                 break;
             default:
