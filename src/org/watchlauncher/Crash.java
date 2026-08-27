@@ -33,102 +33,6 @@ public final class Crash {
 
     private Crash() { }
 
-    /**
-     * Whether the previous run ended by being killed rather than by crashing or exiting.
-     *
-     * A crash writes a stack. A clean exit clears a marker. Anything else - the kernel's low
-     * memory killer picking this process, which on a watch with a 64 MB heap picks the
-     * largest app and that is usually this one - leaves no trace at all, because a SIGKILL
-     * runs no handler. So the last run is presumed killed until it says otherwise: a marker
-     * is written at startup and cleared on the way out, and finding it still there means the
-     * way out never happened.
-     *
-     * This matters because the two look identical from the wrist. The map vanishes and the
-     * launcher is on screen, and "it crashed" and "it was killed" are different problems with
-     * different fixes - one is a bug here, the other is memory pressure from somewhere else
-     * on the device.
-     *
-     * Called before the marker is re-armed, so it reports the run before this one.
-     */
-    public static boolean wasKilled(Context ctx) {
-        try {
-            android.content.SharedPreferences p =
-                    ctx.getSharedPreferences("watchlauncher", Context.MODE_PRIVATE);
-            boolean running = p.getBoolean(KEY_RUNNING, false);
-            long since = p.getLong(KEY_RUNNING_AT, 0);
-            String screen = p.getString(KEY_SCREEN, "");
-
-            p.edit().putBoolean(KEY_RUNNING, true)
-                    .putLong(KEY_RUNNING_AT, System.currentTimeMillis()).apply();
-
-            if (!running || screen.length() == 0) {
-                return false;
-            }
-
-            //Installing a new build kills the running app, and it looks exactly like every
-            //other kill from in here: no onDestroy, marker still set, a screen recorded.
-            //Six builds went onto this watch in one morning and two of them were reported
-            //back as "killed while showing MapScreen" - which sent a whole diagnosis chasing
-            //the low memory killer for something that was an adb install.
-            //
-            //The package's own update time settles it. Updated since this run started means
-            //the run ended because it was replaced.
-            try {
-                long updated = ctx.getPackageManager()
-                        .getPackageInfo(ctx.getPackageName(), 0).lastUpdateTime;
-
-                if (since > 0 && updated >= since) {
-                    return false;
-                }
-
-            } catch (Throwable t) {
-                //no package info; fall through and report it as a kill
-            }
-
-            return true;
-
-        } catch (Throwable t) {
-            return false;
-        }
-    }
-
-    /** What was on screen when it went, which is the first thing anyone asks. */
-    public static String lastScreen(Context ctx) {
-        try {
-            return ctx.getSharedPreferences("watchlauncher", Context.MODE_PRIVATE)
-                    .getString(KEY_SCREEN, "");
-
-        } catch (Throwable t) {
-            return "";
-        }
-    }
-
-    /** Called as screens are pushed, so a kill can say what was open. */
-    public static void noteScreen(Context ctx, String name) {
-        try {
-            ctx.getSharedPreferences("watchlauncher", Context.MODE_PRIVATE)
-                    .edit().putString(KEY_SCREEN, name).apply();
-
-        } catch (Throwable t) {
-            //a marker that cannot be written only costs the diagnosis, not the run
-        }
-    }
-
-    /** Cleared on the way out, so the next start can tell a kill from a clean exit. */
-    public static void noteCleanExit(Context ctx) {
-        try {
-            ctx.getSharedPreferences("watchlauncher", Context.MODE_PRIVATE)
-                    .edit().putBoolean(KEY_RUNNING, false).apply();
-
-        } catch (Throwable t) {
-            //ignore
-        }
-    }
-
-    private static final String KEY_RUNNING = "crash.running";
-    private static final String KEY_RUNNING_AT = "crash.runningat";
-    private static final String KEY_SCREEN = "crash.screen";
-
     public static void install(final Context ctx) {
         final Thread.UncaughtExceptionHandler prev =
                 Thread.getDefaultUncaughtExceptionHandler();
@@ -195,7 +99,7 @@ public final class Crash {
      * for a report and four times too much for a 240 pixel label - it arrives as a wall of
      * package names with the useful part somewhere in the middle. What a wearer needs is
      * that something broke and roughly where, in a glance: "crash: RuntimeException
-     * Ppg.java:140".
+     * MapScreen.java:812".
      *
      * The exception's simple name and the first frame that belongs to us. The platform
      * frames above it are never the answer - Handler.&lt;init&gt; is where it threw, not
