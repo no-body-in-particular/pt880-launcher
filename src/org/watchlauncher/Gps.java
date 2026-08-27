@@ -102,8 +102,48 @@ public final class Gps {
     public static void setWanted(ShellActivity shell, boolean on) {
         try {
             shell.getSharedPreferences("watchlauncher", ShellActivity.MODE_PRIVATE)
-                    .edit().putBoolean(PREF, on).commit();
+                    .edit().putBoolean(PREF, on)
+                    .putBoolean(PREF_CHOSEN, true).commit();
         } catch (Exception e) { /* nothing to do */ }
+    }
+
+    private static final String PREF_CHOSEN = "gps.chosen";
+    private static final String PREF_HANDED_BACK = "gps.handedback";
+
+    /** True once the wearer has actually made the choice themselves. */
+    public static boolean chosen(ShellActivity shell) {
+        try {
+            return shell.getSharedPreferences("watchlauncher", ShellActivity.MODE_PRIVATE)
+                    .getBoolean(PREF_CHOSEN, false);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * Undo, once, what the app switched on without being asked.
+     *
+     * An earlier build turned the framework's provider on by itself, and that
+     * is a persistent system setting - it survives the upgrade that stopped
+     * doing it, so simply not doing it any more leaves the watch exactly as it
+     * was. Since nobody asked for it, it is handed back.
+     *
+     * Once only, and never against a choice: if the wearer has since used the
+     * toggle in the Sports menu, that is theirs and this does nothing.
+     */
+    public static void undoAutoEnable(ShellActivity shell, LocationManager lm) {
+        try {
+            android.content.SharedPreferences p = shell.getSharedPreferences(
+                    "watchlauncher", ShellActivity.MODE_PRIVATE);
+            if (p.getBoolean(PREF_HANDED_BACK, false)) return;
+            p.edit().putBoolean(PREF_HANDED_BACK, true).commit();
+            if (chosen(shell)) return;           // their decision, not ours
+            if (off(lm)) return;                 // already back with the firmware
+            Log.i("watchmap", "handing the receiver back: it was switched on without asking");
+            disable(shell, lm);
+        } catch (Throwable t) {
+            Log.w("watchmap", "handing the receiver back: " + t);
+        }
     }
 
     /** Hand the receiver back to the firmware. */

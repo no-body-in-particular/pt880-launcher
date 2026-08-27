@@ -150,6 +150,20 @@ public class ShellActivity extends Activity {
         // from this, and it is a static because everything that asks whether a
         // graph is on the card asks before it has a graph to ask through.
         RoadGraph.useMode(Travel.mode(this));
+
+        // An earlier build switched the GNSS receiver on by itself, which is a
+        // system setting that outlives the build that did it. Hand it back,
+        // once, unless the wearer has since asked for it.
+        new Thread(new Runnable() {
+            public void run() {
+                try {
+                    android.location.LocationManager lm =
+                            (android.location.LocationManager)
+                            getSystemService(android.content.Context.LOCATION_SERVICE);
+                    Gps.undoAutoEnable(ShellActivity.this, lm);
+                } catch (Throwable t) { /* nothing to undo */ }
+            }
+        }).start();
         keepAwake = prefs.getBoolean("keepAwake", false);
 
         audio = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
