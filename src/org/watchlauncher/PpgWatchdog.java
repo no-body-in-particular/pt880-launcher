@@ -229,11 +229,6 @@ public class PpgWatchdog {
         final long silentMin = silentFor(context) / 60000L;
         Log.i(TAG, "no pulse reading for " + silentMin + " min");
 
-        //Say what the watch was doing before doing anything about it. Restarting the sensor
-        //process destroys the evidence, and the evidence is the only way this gets diagnosed
-        //rather than guessed at - twice now a theory has been argued from the shape of the
-        //gaps and been wrong.
-        WatchdogReport.sendNow(context, "no pulse reading for " + silentMin + " min");
 
         //Then the recovery. com.ic.work runs one work queue for both sensors: requests
         //become items, a single worker takes them one at a time, and each item carries a
