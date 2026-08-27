@@ -86,10 +86,30 @@ public class RootShell {
             proc = p; in = w; out = o; err = e;
             launcher = cmd[0];
 
-            String id = exec("id");
-            if (id == null) { close(); return false; }
+            // Probe with a short deadline. A shell that cannot answer "id" in a few
+            // seconds is not going to become useful later, and five candidates at the
+            // full timeout is a minute and a half of a frozen caller.
+            String id = exec("id", PROBE_MS);
+
+            // An answer that is not an id is a failed candidate, not a working shell.
+            //
+            // This used to take anything non-null as success. wsu exits 1 when it cannot
+            // reach root and says why on stderr, collect() picks that up, and the result
+            // was a "shell" whose identity was "wsu: setuid: Operation not permitted",
+            // root false, and - because collect() had already closed the dead process -
+            // proc null behind a true return. The remaining candidates were never tried
+            // and the one line explaining the whole thing was filed as an identity.
+            if (id == null || id.indexOf("uid=") < 0 || proc == null) {
+                failure = (id == null || id.trim().length() == 0)
+                        ? cmd[0] + ": no answer"
+                        : cmd[0] + ": " + firstLine(id);
+                close();
+                return false;
+            }
+
             identity = id.trim();
             root = identity.contains("uid=0");
+            failure = null;
             return true;
         } catch (Exception ex) {
             proc = null; in = null; out = null; err = null;
@@ -102,8 +122,24 @@ public class RootShell {
     public String identity() { return identity; }
 
     /** One line for the About and system-menu rows. */
+    /** Why the last probe failed, or null. The useful half of "not root". */
+    public String failure() { return failure; }
+
+    private String failure;
+
+    private static String firstLine(String s) {
+        String t = s.trim();
+        int nl = t.indexOf('\n');
+        return nl > 0 ? t.substring(0, nl) : t;
+    }
+
+    /** How long a candidate gets to answer "id" before it is written off. */
+    private static final long PROBE_MS = 3000;
+
     public String describe() {
-        if (proc == null && launcher == null) return "not opened";
+        if (proc == null && launcher == null) {
+            return failure != null ? failure : "not opened";
+        }
         if (proc == null) return "unavailable";
         if (root) return "root (" + launcher + ")";
         return "uid " + uid() + " (" + launcher + ")";
@@ -126,6 +162,10 @@ public class RootShell {
      * shell is not usable.
      */
     public synchronized String exec(String command) {
+        return exec(command, TIMEOUT_MS);
+    }
+
+    private synchronized String exec(String command, long timeoutMs) {
         if (proc == null && !open()) return null;
         if (in == null) return null;
         try {
@@ -135,7 +175,7 @@ public class RootShell {
             // echo's own status that gets reported.
             in.write("__s=$?; echo \"" + SENTINEL + " $__s\"\n");
             in.flush();
-            return collect();
+            return collect(timeoutMs);
         } catch (Exception e) {
             close();
             return null;
@@ -148,9 +188,9 @@ public class RootShell {
         return r != null;
     }
 
-    private String collect() throws Exception {
+    private String collect(long timeoutMs) throws Exception {
         StringBuilder b = new StringBuilder();
-        long deadline = System.currentTimeMillis() + TIMEOUT_MS;
+        long deadline = System.currentTimeMillis() + timeoutMs;
         while (true) {
             if (System.currentTimeMillis() > deadline) {
                 b.append("\n[timed out]");
