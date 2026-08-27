@@ -75,15 +75,27 @@ public final class Gps {
     /**
      * Whether the watch has been told to use its own receiver.
      *
-     * Off by default, and that default is not caution for its own sake.
-     * Turning the framework's provider on made the firmware's health sensor
-     * wedge roughly seven times sooner - measured over a day, the stretches
-     * where a pulse was arriving fell from a mean of 147 minutes to 22, and
-     * the change lines up with the hour this was first switched on
-     * automatically. The tracker firmware owns the receiver through its own
-     * gpsd; asking the platform to open the same hardware is a plausible way
-     * to upset the process that is also doing the health polling, and the
-     * watch was then being restarted hourly by the server's recovery.
+     * Off by default, and that default is caution rather than a measured fact.
+     *
+     * It was put here on the strength of a day's numbers - the stretches where
+     * a pulse was arriving fell from a mean of 147 minutes to 22, lining up
+     * with the hour this was first switched on automatically. That comparison
+     * does not hold up: the window it was measured over also contained
+     * fourteen installs, each of which restarts things, so the two causes
+     * cannot be told apart in it. Treat "seven times sooner" as withdrawn.
+     *
+     * What is known is the failure it was reaching for. com.ic.work runs one
+     * work queue for both sensors with no timeout on the item at its head, so
+     * any measurement whose callback never arrives stalls heart rate and
+     * temperature together until the process restarts. The tracker firmware
+     * owns the receiver through its own gpsd, and asking the platform to open
+     * the same hardware is a credible way to produce a callback that never
+     * comes - but credible is not demonstrated, and nothing here has
+     * demonstrated it.
+     *
+     * So the default stays off, because the cost of being wrong that way is a
+     * slower first fix and the cost of being wrong the other way is the
+     * night's readings.
      *
      * So it is a choice rather than something the map does behind your back:
      * a faster fix, or a heart rate. Sports, hold A, "GPS provider".

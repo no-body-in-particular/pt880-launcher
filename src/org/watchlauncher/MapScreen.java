@@ -409,8 +409,9 @@ public class MapScreen extends Screen implements LocationListener {
         // the sky, and this watch has both already.
         Gps.assist(locations);
 
-        // Only if it has been asked for. Switching it on automatically made
-        // the firmware's health sensor wedge seven times sooner; see Gps.
+        // Only if it has been asked for. Switching it on automatically was
+        // followed by the health sensor wedging far sooner - the size of that
+        // effect did not survive scrutiny, but the default stays off; see Gps.
         if (Gps.wanted(shell) && Gps.off(locations)) {
             new Thread(new Runnable() {
                 public void run() {

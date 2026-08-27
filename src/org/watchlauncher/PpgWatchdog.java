@@ -85,6 +85,12 @@ public class PpgWatchdog {
      */
     private static final long CHECK_INTERVAL_MS = 5 * 60 * 1000L;
 
+    /** An optical reading needs seconds of clean signal; past this it is not coming. */
+    private static final long READ_TIMEOUT_MS = 40000;
+
+    /** The vendor's own pulse type on the JK frame. */
+    private static final int TYPE_PULSE = 2;
+
     private static final int ALARM_ID = 0x9917;
     static final String ACTION_CHECK = "org.watchlauncher.PPG_CHECK";
 
@@ -201,8 +207,30 @@ public class PpgWatchdog {
         //nobody was reading anyway, against the alternative the server falls back on, which
         //is rebooting the whole watch - a dark screen for minutes, a lost GPS fix, and about
         //thirty three minutes of missing readings each time.
-        if (restartSensorService(context)) {
+        boolean restarted = restartSensorService(context);
+
+        if (restarted) {
             Log.i(TAG, "restarted com.ic.work");
+        }
+
+        //Then fill the gap the stall left, using the path that does not go through the queue
+        //at all.
+        //
+        //HeartRate reads gh30x_sensor through the platform's SensorManager, which is a
+        //different route to the same hardware from the one com.ic.work queues work onto. It
+        //predates all of this and it is the reason the Sports screen can still show a pulse
+        //on a watch whose vitals stopped reaching the server half an hour ago. Asking the
+        //vendor's service instead - which is what this used to do - only put another item
+        //behind the one that is stuck.
+        //
+        //Only when the restart above actually worked. A reading uploaded here counts as a
+        //reading on the server, which resets the timer behind its reboot-the-watch recovery.
+        //That is exactly right when the cause has just been cleared and exactly wrong when it
+        //has not: it would leave the vendor stack wedged, the readings pulse-only, and the
+        //one backstop that reliably fixes it disarmed. So if there was no root and no
+        //restart, the gap is left visible and the server is left free to act on it.
+        if (restarted) {
+            fillGap(context);
         }
 
         new Ppg(context, new Ppg.Listener() {
@@ -223,6 +251,95 @@ public class PpgWatchdog {
                 Log.i(TAG, "forced reading did not happen: " + why);
             }
         }).request(Ppg.TEST_ALL);
+    }
+
+    /**
+     * Take one reading over the platform sensor and send it, so the gap has something in it.
+     *
+     * Blocking, with a ceiling: an optical measurement needs seconds of clean signal and may
+     * never converge on a wrist that has moved, so it waits {@link #READ_TIMEOUT_MS} and
+     * gives up rather than holding the alarm's thread open.
+     */
+    private static void fillGap(final Context context) {
+        final int[] got = new int[] { -1 };
+        final Object done = new Object();
+        HeartRate hr = null;
+
+        try {
+            hr = new HeartRate(context, new HeartRate.Listener() {
+                @Override
+                public void onHeartRate(int bpm) {
+                    synchronized (done) {
+                        got[0] = bpm;
+                        done.notifyAll();
+                    }
+                }
+            });
+
+            if (!hr.available()) {
+                Log.i(TAG, "no platform pulse sensor - nothing to fill the gap with");
+                return;
+            }
+
+            hr.start();
+
+            synchronized (done) {
+                if (got[0] <= 0) {
+                    done.wait(READ_TIMEOUT_MS);
+                }
+            }
+
+        } catch (Throwable t) {
+            Log.w(TAG, "could not read the pulse directly", t);
+
+        } finally {
+            try {
+                if (hr != null) {
+                    hr.stop();                       //the LED costs battery for as long as it runs
+                }
+
+            } catch (Throwable t) {
+                //ignore
+            }
+        }
+
+        if (got[0] <= 0) {
+            Log.i(TAG, "no pulse from the platform sensor either");
+            return;
+        }
+
+        upload(context, got[0]);
+    }
+
+    /** Send it as the vendor's own pulse frame, so it lands where every other reading does. */
+    private static void upload(Context context, int bpm) {
+        RootShell root = new RootShell();
+
+        try {
+            TrackerConfig cfg = new TrackerConfig(context, root);
+            cfg.load();
+
+            if (!cfg.usable()) {
+                return;
+            }
+
+            //TYPE_PULSE is the vendor's own type 2 on the JK frame - the same one the
+            //firmware uses - so this is recorded as a heart rate rather than as something
+            //the launcher invented, and it needs no server change to be understood.
+            new SleepUpload().sendOne(cfg, TYPE_PULSE, bpm, System.currentTimeMillis());
+            Log.i(TAG, "filled the gap with " + bpm + " bpm from the platform sensor");
+
+        } catch (Throwable t) {
+            Log.w(TAG, "could not upload the pulse", t);
+
+        } finally {
+            try {
+                root.close();
+
+            } catch (Throwable t) {
+                //ignore
+            }
+        }
     }
 
     /**
