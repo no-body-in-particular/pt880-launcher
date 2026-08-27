@@ -57,6 +57,14 @@ public class TrackerService extends Service {
     private static final String KEY_CYCLE = "client_cycle_s";
     private static final String KEY_VITALS = "client_vitals_s";
     private static final String KEY_TEMP = "client_temp_s";
+    private static final String KEY_HOURS = "client_hours_format";
+    private static final String KEY_PHONE = "client_phone_setting";
+    private static final String KEY_MOTION = "client_motion";
+    private static final String KEY_WORKMODE = "client_work_mode";
+    private static final String KEY_LOCMODE = "client_loc_mode";
+    private static final String KEY_MESSAGE = "client_last_message";
+    private static final String KEY_LANG = "client_language";
+    private static final String KEY_CONTACTS = "client_contacts";
     private static final String KEY_SOS = "client_sos_numbers";
     private static final String KEY_WHITELIST = "client_whitelist";
     private static final String KEY_ALLOW_WIPE = "client_allow_factory_reset";
@@ -317,6 +325,69 @@ public class TrackerService extends Service {
         if ("46".equals(f.op)) {                    // take a picture now
             send(out, BeehomeCodec.ack(f.op, f.token()));
             beginPhoto();
+            return;
+        }
+        if ("JK".equals(f.op) || "T6".equals(f.op) || "BL".equals(f.op)) {
+            // Responses to frames this client sent, not commands. The generic reply below
+            // would answer "IWAPJK,<token>#", which the server reads as a health reading with
+            // a garbage value -- the same shape of mistake as acknowledging BP42.
+            return;
+        }
+        if ("20".equals(f.op)) {
+            // LANG=. "<language>,<time zone>", 1 English and 0 Chinese.
+            storeSetting(KEY_LANG, f);
+            send(out, BeehomeCodec.ack(f.op, f.token()));
+            return;
+        }
+        if ("51".equals(f.op) || "52".equals(f.op)) {   // CONTACT= / DELCONTACT=
+            storeList(KEY_CONTACTS, f);
+            send(out, BeehomeCodec.ack(f.op, f.token()));
+            return;
+        }
+        if ("19".equals(f.op)) {
+            // SERVER=. Acked but not obeyed: this is the command that hands the watch to
+            // another server, arriving over an unauthenticated plaintext link with no sender to
+            // check. The SMS path gates the same thing behind an allowlist; there is no
+            // equivalent here, so it is logged and left for a human.
+            send(out, BeehomeCodec.ack(f.op, f.token()));
+            Log.w(TAG, "refusing an over-the-wire server change: " + f.fields);
+            return;
+        }
+        if ("84".equals(f.op)) {                    // WHITELIST=
+            storeList(KEY_WHITELIST, f);
+            send(out, BeehomeCodec.ack(f.op, f.token()));
+            return;
+        }
+        if ("86".equals(f.op)) {
+            // HEALTHINT=. IWBP86,<imei>,<serial>,<switch>,<value># -- the switch opens (1) or
+            // closes (0) health monitoring, the value is the interval. A 0 switch is honoured
+            // by parking the cycle at a day rather than by adding a separate on/off flag that
+            // could disagree with the interval.
+            applyHealthInterval(f);
+            send(out, BeehomeCodec.ack(f.op, f.token()));
+            return;
+        }
+        if ("TF".equals(f.op) || "PH".equals(f.op)) {   // HOURS= / PHONE=
+            storeSetting("TF".equals(f.op) ? KEY_HOURS : KEY_PHONE, f);
+            send(out, BeehomeCodec.ack(f.op, f.token()));
+            return;
+        }
+        if ("MC".equals(f.op)) {                    // MOTION=
+            storeSetting(KEY_MOTION, f);
+            send(out, BeehomeCodec.ack(f.op, f.token()));
+            return;
+        }
+        if ("33".equals(f.op) || "34".equals(f.op)) {   // MODE= / LOCMODE=
+            storeSetting("33".equals(f.op) ? KEY_WORKMODE : KEY_LOCMODE, f);
+            send(out, BeehomeCodec.ack(f.op, f.token()));
+            return;
+        }
+        if ("01".equals(f.op) || "05".equals(f.op) || "40".equals(f.op)) {
+            // MSG=. Text pushed from the server. Kept rather than shown: putting a dialog over
+            // whatever screen is open, from an unauthenticated link, is the kind of thing that
+            // interrupts navigation at a junction. The launcher can surface it when asked.
+            storeMessage(f);
+            send(out, BeehomeCodec.ack(f.op, f.token()));
             return;
         }
         if ("TE".equals(f.op)) {
@@ -626,6 +697,70 @@ public class TrackerService extends Service {
         } catch (Throwable t) {
             Log.w(TAG, "could not answer find-device", t);
         }
+    }
+
+
+    /** Store the last non-token field of a settings command verbatim. */
+    private void storeSetting(String key, BeehomeCodec.Frame f) {
+        String tok = f.token();
+        for (int i = f.fields.size() - 1; i >= 0; i--) {
+            String v = f.fields.get(i).trim();
+            if (v.length() == 0 || v.equals(tok)) continue;
+            prefs(this).edit().putString(key, v).commit();
+            Log.i(TAG, key + " = " + v);
+            return;
+        }
+    }
+
+    /** Text pushed by the server, kept with the time it arrived. */
+    private void storeMessage(BeehomeCodec.Frame f) {
+        StringBuilder b = new StringBuilder();
+        String tok = f.token();
+        for (int i = 0; i < f.fields.size(); i++) {
+            String v = f.fields.get(i).trim();
+            if (v.length() == 0 || v.equals(tok) || isDigits(v)) continue;
+            if (b.length() > 0) b.append(' ');
+            b.append(v);
+        }
+        if (b.length() == 0) return;
+        prefs(this).edit().putString(KEY_MESSAGE, TrackerSources.stamp() + "  " + b).commit();
+        Log.i(TAG, "message from the server: " + b);
+    }
+
+    /**
+     * HEALTHINT=: a switch and an interval in one command.
+     *
+     * Switch 0 parks the cycle at a day rather than setting a separate disable flag. Two pieces
+     * of state that can disagree about whether monitoring is on is how a watch ends up measuring
+     * when it was told not to.
+     */
+    private void applyHealthInterval(BeehomeCodec.Frame f) {
+        String tok = f.token();
+        java.util.List<Integer> nums = new java.util.ArrayList<Integer>();
+        for (int i = 0; i < f.fields.size(); i++) {
+            String v = f.fields.get(i).trim();
+            if (v.length() == 0 || v.equals(tok)) continue;
+            try {
+                nums.add(Integer.valueOf(Integer.parseInt(v)));
+            } catch (NumberFormatException e) {
+                // the imei and anything else non-numeric
+            }
+        }
+        if (nums.isEmpty()) return;
+        int onOff = nums.get(0).intValue();
+        int minutes = nums.size() > 1 ? nums.get(1).intValue() : 0;
+        int seconds;
+        if (onOff == 0) {
+            seconds = 24 * 3600;
+            Log.i(TAG, "health monitoring switched off by the server");
+        } else if (minutes >= 1 && minutes <= 24 * 60) {
+            seconds = minutes * 60;
+        } else {
+            Log.w(TAG, "refusing health interval " + minutes + " min");
+            return;
+        }
+        prefs(this).edit().putInt(KEY_VITALS, seconds).commit();
+        Log.i(TAG, "vitals cycle set to " + seconds + "s by the server");
     }
 
     // ------------------------------------------------------------------ media upload
