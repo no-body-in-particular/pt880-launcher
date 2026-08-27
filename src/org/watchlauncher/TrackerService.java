@@ -62,6 +62,10 @@ public class TrackerService extends Service {
 
     /** The vendor's own pulse type on the JK frame. */
     private static final int TYPE_PULSE = 2;
+    /** Temperature is 3 on the wire, as seen in the capture. The other two are the vendor's
+     *  own JK types; only pulse is confirmed against a live frame. */
+    private static final int TYPE_BP = 4;
+    private static final int TYPE_SPO2 = 5;
 
     /** Matches the cadence the vendor used, and what the server expects to see. */
     private static final int HEARTBEAT_MS = 10 * 60 * 1000;
@@ -75,6 +79,14 @@ public class TrackerService extends Service {
     private volatile boolean running;
     private Thread worker;
     private volatile Socket sock;
+
+    /** The live output stream, so sensor work running off the loop can answer without
+     *  handing the stream around. Null between sessions. */
+    private volatile OutputStream outStream;
+
+    /** One writer at a time. Two threads interleaving inside a frame would corrupt it, and
+     *  media packets are long enough that this is not theoretical. */
+    private final Object sendLock = new Object();
     private volatile String lastState = "not started";
 
     /** Set by requestFix() so an out-of-band ask does not wait for the next cycle. */
@@ -171,6 +183,7 @@ public class TrackerService extends Service {
         lastState = "connected";
 
         OutputStream out = s.getOutputStream();
+        outStream = out;
         InputStream in = s.getInputStream();
 
         // The heartbeat is the login: nothing else identifies this socket to the server.
@@ -262,9 +275,51 @@ public class TrackerService extends Service {
             send(out, TrackerSources.positionFrame(this, id));
             return;
         }
+        if ("XL".equals(f.op)) {
+            // HEARTRATE# on the server sends this. It was being answered with a bare ack and
+            // nothing else, which is why it is the most frequent downlink in the logs and never
+            // produced a reading: the server kept asking.
+            send(out, BeehomeCodec.ack(f.op, f.token()));
+            measureAsync(TYPE_PULSE);
+            return;
+        }
+        if ("XY".equals(f.op)) {                    // BLOODPRESSURE#
+            send(out, BeehomeCodec.ack(f.op, f.token()));
+            measureAsync(TYPE_BP);
+            return;
+        }
+        if ("OX".equals(f.op) || "XZ".equals(f.op)) {   // SPO2# / OXYGEN#
+            send(out, BeehomeCodec.ack(f.op, f.token()));
+            measureAsync(TYPE_SPO2);
+            return;
+        }
+        if ("00".equals(f.op)) {
+            // SYNCTIME#. IWBP00,<YYYYMMDDHHMMSS>,<tz># -- not BPTM, which the server never
+            // sends. The watch clock runs about ten minutes fast, so this is worth honouring.
+            send(out, BeehomeCodec.ack(f.op, f.token()));
+            applyTime(f);
+            return;
+        }
+        if ("16".equals(f.op)) {                    // LOCATE# -- report position now
+            send(out, BeehomeCodec.ack(f.op, f.token()));
+            send(out, TrackerSources.positionFrame(this, id));
+            return;
+        }
+        if ("88".equals(f.op)) {                    // FIND# -- make the watch findable
+            send(out, BeehomeCodec.ack(f.op, f.token()));
+            findMe();
+            return;
+        }
         if ("46".equals(f.op)) {                    // take a picture now
             send(out, BeehomeCodec.ack(f.op, f.token()));
             beginPhoto();
+            return;
+        }
+        if ("42".equals(f.op)) {
+            // The manual's media acknowledgement. Parsed and dropped, exactly as the vendor
+            // does -- and specifically NOT acked. The generic reply below would send
+            // "IWAP42,<token>#", which the server reads as an image packet header with a
+            // nonsense length, in the middle of an upload. It is a reply, not a command.
             return;
         }
         if ("07".equals(f.op)) {                    // media packet acknowledgement
@@ -370,9 +425,27 @@ public class TrackerService extends Service {
     }
 
     private void send(OutputStream out, String frame) throws Exception {
-        Log.i(TAG, "-> " + frame);
-        out.write(frame.getBytes("UTF-8"));
-        out.flush();
+        synchronized (sendLock) {
+            Log.i(TAG, "-> " + frame);
+            out.write(frame.getBytes("UTF-8"));
+            out.flush();
+        }
+    }
+
+    /**
+     * Send from a background task, if the session is still up.
+     *
+     * Quiet when it is not: a measurement that finishes after a disconnect has nowhere to go,
+     * and that is an ordinary outcome rather than an error.
+     */
+    private void sendAsync(String frame) {
+        OutputStream o = outStream;
+        if (o == null) return;
+        try {
+            send(o, frame);
+        } catch (Throwable t) {
+            Log.w(TAG, "could not send " + frame, t);
+        }
     }
 
     private void closeQuietly() {
@@ -432,6 +505,75 @@ public class TrackerService extends Service {
     }
 
 
+
+
+    /**
+     * Take a reading and send it, off the connection thread.
+     *
+     * The optical sensor needs several seconds of clean signal. Doing that inline would stop
+     * the client answering the server for the whole measurement, and the server polls heart
+     * rate often enough that the connection would spend much of its life deaf.
+     */
+    private void measureAsync(final int type) {
+        new Thread(new Runnable() {
+            public void run() {
+                HeartRate hr = null;
+                try {
+                    hr = new HeartRate(TrackerService.this, null);
+                    if (!hr.available()) {
+                        Log.w(TAG, "no optical sensor; cannot answer a vitals request");
+                        return;
+                    }
+                    hr.start();
+                    for (int i = 0; i < 40 && hr.bpm() <= 0; i++) Thread.sleep(500);
+
+                    if (type == TYPE_BP) {
+                        int sys = hr.systolic(), dia = hr.diastolic();
+                        if (sys > 0 && dia > 0) {
+                            sendAsync(BeehomeCodec.frame("JZ", TrackerSources.stamp(),
+                                    Integer.toString(sys), Integer.toString(dia)));
+                        }
+                        return;
+                    }
+                    int bpm = hr.bpm();
+                    if (bpm > 0) {
+                        sendAsync(BeehomeCodec.health(TrackerSources.stamp(), type, bpm));
+                    } else {
+                        Log.w(TAG, "no reading after 20s; the wrist is probably not there");
+                    }
+                } catch (Throwable t) {
+                    Log.w(TAG, "vitals request failed", t);
+                }
+            }
+        }, "vitals").start();
+    }
+
+    /**
+     * Answer FIND#: make the watch draw attention to itself.
+     *
+     * Sound and vibration together, and at full volume deliberately. This is the command whose
+     * entire purpose is to be noticed from under a cushion, so respecting a quiet volume
+     * setting here would defeat it.
+     */
+    private void findMe() {
+        try {
+            android.media.AudioManager am = (android.media.AudioManager)
+                    getSystemService(Context.AUDIO_SERVICE);
+            if (am != null) {
+                int max = am.getStreamMaxVolume(android.media.AudioManager.STREAM_ALARM);
+                am.setStreamVolume(android.media.AudioManager.STREAM_ALARM, max, 0);
+            }
+            android.media.Ringtone r = android.media.RingtoneManager.getRingtone(this,
+                    android.media.RingtoneManager.getDefaultUri(
+                            android.media.RingtoneManager.TYPE_ALARM));
+            if (r != null) r.play();
+
+            android.os.Vibrator v = (android.os.Vibrator) getSystemService(Context.VIBRATOR_SERVICE);
+            if (v != null) v.vibrate(new long[]{0, 400, 200, 400, 200, 400}, -1);
+        } catch (Throwable t) {
+            Log.w(TAG, "could not answer find-device", t);
+        }
+    }
 
     // ------------------------------------------------------------------ media upload
 
