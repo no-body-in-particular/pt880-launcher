@@ -181,6 +181,13 @@ public class ShellActivity extends Activity {
         // cheapest way to recover from anything that stopped it.
         if (SleepLog.enabled(this)) SleepService.schedule(this, 10000);
 
+        // Same idempotent re-arm for the pulse watchdog, and for the same
+        // reason: whatever stopped it, the next launch puts it back. It is
+        // cheap when nothing is wrong -- a clock comparison every ten minutes
+        // -- and it does not ask the sensor for anything unless the watch has
+        // gone quiet for more than half an hour.
+        PpgWatchdog.start(this);
+
         // BouncyCastle registers a few hundred algorithms when it is first
         // touched, which is a visible stall if it happens inside a screen
         // opening. Done here, on a thread, so it is ready before anything

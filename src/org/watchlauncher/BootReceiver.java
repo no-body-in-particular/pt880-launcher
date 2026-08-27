@@ -5,7 +5,7 @@ import android.content.Context;
 import android.content.Intent;
 
 /**
- * Re-arms sleep tracking after a reboot.
+ * Re-arms sleep tracking, and the pulse watchdog, after a reboot.
  *
  * The alarm that drives the sampling does not survive a restart, and the watch
  * reboots more often than anyone opens the launcher. Without this, tracking
@@ -17,6 +17,13 @@ public class BootReceiver extends BroadcastReceiver {
 
     @Override
     public void onReceive(Context c, Intent in) {
+        // Before the sleep-logging check, not after: the pulse watchdog has
+        // nothing to do with sleep logging, and putting it below the early
+        // return would leave it disarmed on any watch that does not log sleep.
+        // A restart is also exactly when it needs re-arming, because replacing
+        // the package cancels every alarm it owned.
+        PpgWatchdog.start(c);
+
         if (!SleepLog.enabled(c)) return;
 
         boolean rebooted = in == null || in.getAction() == null
