@@ -168,6 +168,59 @@ public final class BeehomeCodec {
         return frame("VR", id, build);
     }
 
+    /** Bytes per media packet. The server defines one as 1024, the last one shorter. */
+    public static final int MEDIA_CHUNK = 1024;
+
+    /**
+     * One packet of a picture ({@code AP42}) or a recording ({@code AP07}).
+     *
+     * <pre>
+     *     IWAP42,&lt;yyyymmddhhmmss&gt;,&lt;total&gt;,&lt;packet no&gt;,&lt;length&gt;,&lt;length bytes&gt;#
+     * </pre>
+     *
+     * Built as bytes, not a String, and delimited by the length rather than by the trailing
+     * {@code #}. The payload is raw JPEG or AMR: it contains NUL, {@code #} and {@code ,}
+     * constantly, so anything that treats it as text truncates the file at the first {@code #}
+     * and silently corrupts what survives. Packet numbers are 1-based -- the server starts a
+     * new image when it sees packet 1.
+     */
+    public static byte[] mediaPacket(String op, String devTime, int total, int no,
+                                     byte[] data, int off, int len) {
+        byte[] head;
+        try {
+            head = (UP + op + "," + devTime + "," + total + "," + no + "," + len + ",")
+                    .getBytes("UTF-8");
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
+        byte[] out = new byte[head.length + len + 1];
+        System.arraycopy(head, 0, out, 0, head.length);
+        System.arraycopy(data, off, out, head.length, len);
+        out[out.length - 1] = '#';
+        return out;
+    }
+
+    /**
+     * True if this frame is the acknowledgement that lets the next media packet go.
+     *
+     * It is {@code BP07}, not the {@code BP42} the manual documents. The picture is pushed
+     * through the voice-packet sender, and the only place its position index is written is the
+     * BP07 handler -- BP42 is parsed, logged, and then ignored. A client waiting on BP42 sends
+     * packet one and stops forever, having been acknowledged at the TCP level the whole time.
+     *
+     * Five fields, and it only counts when the last is {@code "1"}.
+     */
+    public static boolean advancesMedia(Frame f, int packetJustSent) {
+        if (f == null || !"07".equals(f.op)) return false;
+        if (f.fields.size() < 4) return false;
+        if (!"1".equals(f.fields.get(f.fields.size() - 1).trim())) return false;
+        try {
+            return Integer.parseInt(f.fields.get(f.fields.size() - 2).trim()) == packetJustSent;
+        } catch (NumberFormatException e) {
+            return false;
+        }
+    }
+
     /** Acknowledge a server command by echoing its token back under the same opcode. */
     public static String ack(String op, String token) {
         return frame(op, token == null ? "" : token);

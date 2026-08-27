@@ -26,7 +26,7 @@ public class BeehomeCodecTest {
         check(what, want.equals(got), want.equals(got) ? "" : "\n      got  " + got + "\n      want " + want);
     }
 
-    public static void main(String[] args) {
+    public static void main(String[] args) throws Exception {
         String id = "05700507200008";
 
         // --- degrees to degrees-and-decimal-minutes -------------------------------
@@ -83,6 +83,27 @@ public class BeehomeCodecTest {
         String[] parts = BeehomeCodec.split("IWBPXL," + id + ",080835#IWBP50," + id + ",080835#IWBP1");
         check("two whole frames split out", parts.length == 3, "n=" + parts.length);
         eq("partial tail is kept for the next read", parts[parts.length - 1], "IWBP1");
+
+        // --- media packets ---------------------------------------------------------
+        // A payload full of the bytes that would break a text codec: NUL, '#', ','.
+        byte[] nasty = new byte[]{(byte) 0xFF, (byte) 0xD8, 0x00, '#', ',', 0x00, (byte) 0xAB};
+        byte[] pkt = BeehomeCodec.mediaPacket("42", "20260828120000", 3, 1, nasty, 0, nasty.length);
+        String header = new String(pkt, 0, 28, "UTF-8");
+        eq("AP42 header", header, "IWAP42,20260828120000,3,1,7,");
+        check("payload survives NUL, '#' and ',' intact",
+                pkt.length == 28 + 7 + 1
+                        && pkt[28] == (byte) 0xFF && pkt[30] == 0x00 && pkt[31] == '#'
+                        && pkt[32] == ',' && pkt[pkt.length - 1] == '#',
+                "len=" + pkt.length);
+
+        // the ack that actually advances an upload is BP07, not the BP42 the manual documents
+        BeehomeCodec.Frame ok7 = BeehomeCodec.decode("IWBP07,20260828120000,3,1,1#");
+        check("BP07 with ok=1 advances packet 1", BeehomeCodec.advancesMedia(ok7, 1), "");
+        check("BP07 for a different packet does not", !BeehomeCodec.advancesMedia(ok7, 2), "");
+        BeehomeCodec.Frame bad7 = BeehomeCodec.decode("IWBP07,20260828120000,3,1,0#");
+        check("BP07 with ok=0 does not advance", !BeehomeCodec.advancesMedia(bad7, 1), "");
+        BeehomeCodec.Frame bp42 = BeehomeCodec.decode("IWBP42,20260828120000,3,1,1#");
+        check("BP42 never advances an upload", !BeehomeCodec.advancesMedia(bp42, 1), "");
 
         System.out.println(fails == 0 ? "beehome codec: all checks passed"
                 : ("beehome codec: " + fails + " FAILED"));

@@ -80,6 +80,17 @@ public class TrackerService extends Service {
     /** Set by requestFix() so an out-of-band ask does not wait for the next cycle. */
     private volatile boolean fixNow;
 
+    // ---- media upload, driven by the read loop so acks and packets interleave ----
+    /** The whole picture or recording, held until the last packet is acknowledged. */
+    private volatile byte[] mediaData;
+    private volatile String mediaOp = "42";
+    private volatile String mediaTime = "";
+    private volatile int mediaTotal;
+    private volatile int mediaNext;
+    /** True while a packet is out and its BP07 has not come back. The device is expected to
+     *  wait: sending ahead makes the server start the image over. */
+    private volatile boolean mediaWaiting;
+
     /** The running instance, so the SMS plane can poke it. Cleared in onDestroy so a stopped
      *  service is not mistaken for a live one. */
     private static volatile TrackerService live;
@@ -185,6 +196,9 @@ public class TrackerService extends Service {
                         TrackerSources.battery(this), cycleSeconds()));
                 nextBeat = now + HEARTBEAT_MS;
             }
+            if (mediaData != null && !mediaWaiting) {
+                sendMediaPacket(out);
+            }
             if (fixNow) {
                 fixNow = false;
                 send(out, TrackerSources.positionFrame(this, id));
@@ -247,6 +261,22 @@ public class TrackerService extends Service {
             send(out, BeehomeCodec.ack(f.op, f.token()));
             send(out, TrackerSources.positionFrame(this, id));
             return;
+        }
+        if ("46".equals(f.op)) {                    // take a picture now
+            send(out, BeehomeCodec.ack(f.op, f.token()));
+            beginPhoto();
+            return;
+        }
+        if ("07".equals(f.op)) {                    // media packet acknowledgement
+            if (BeehomeCodec.advancesMedia(f, mediaNext)) {
+                mediaNext++;
+                mediaWaiting = false;
+                if (mediaNext > mediaTotal) {
+                    Log.i(TAG, "media upload complete, " + mediaTotal + " packets");
+                    mediaData = null;
+                }
+            }
+            return;                                 // never acked: it is a reply, not a command
         }
         if ("TM".equals(f.op)) {                    // time sync
             send(out, BeehomeCodec.ack(f.op, f.token()));
@@ -401,6 +431,74 @@ public class TrackerService extends Service {
         }
     }
 
+
+
+    // ------------------------------------------------------------------ media upload
+
+    /**
+     * Capture off the loop thread, then hand the bytes over for sending.
+     *
+     * The camera takes seconds and the read loop has to keep answering the server while it
+     * does, or the connection looks dead for the duration of every photo.
+     */
+    private void beginPhoto() {
+        new Thread(new Runnable() {
+            public void run() {
+                java.io.File f = Capture.once();
+                if (f == null) {
+                    Log.w(TAG, "photo requested but capture failed");
+                    return;
+                }
+                try {
+                    byte[] b = new byte[(int) f.length()];
+                    java.io.FileInputStream in = new java.io.FileInputStream(f);
+                    try {
+                        int off = 0, n;
+                        while (off < b.length && (n = in.read(b, off, b.length - off)) > 0) off += n;
+                    } finally {
+                        in.close();
+                    }
+                    offerMedia("42", b);
+                } catch (Throwable t) {
+                    Log.w(TAG, "could not read the photo back", t);
+                }
+            }
+        }, "photo").start();
+    }
+
+    /** Queue a picture or recording for upload. One at a time: the protocol has no way to
+     *  interleave two transfers, and the server keys the whole thing on its start time. */
+    private synchronized void offerMedia(String op, byte[] data) {
+        if (mediaData != null) {
+            Log.w(TAG, "a media upload is already running; dropping the new one");
+            return;
+        }
+        mediaOp = op;
+        mediaData = data;
+        mediaTime = TrackerSources.stamp().replaceAll("[^0-9]", "");
+        mediaTotal = (data.length + BeehomeCodec.MEDIA_CHUNK - 1) / BeehomeCodec.MEDIA_CHUNK;
+        mediaNext = 1;
+        mediaWaiting = false;
+        Log.i(TAG, "media upload queued: " + data.length + " bytes, " + mediaTotal + " packets");
+    }
+
+    private void sendMediaPacket(OutputStream out) throws Exception {
+        byte[] data = mediaData;
+        if (data == null) return;
+        int off = (mediaNext - 1) * BeehomeCodec.MEDIA_CHUNK;
+        if (off >= data.length) {
+            mediaData = null;
+            return;
+        }
+        int len = Math.min(BeehomeCodec.MEDIA_CHUNK, data.length - off);
+        byte[] pkt = BeehomeCodec.mediaPacket(mediaOp, mediaTime, mediaTotal, mediaNext,
+                data, off, len);
+        Log.i(TAG, "-> AP" + mediaOp + " packet " + mediaNext + "/" + mediaTotal
+                + " (" + len + " bytes)");
+        out.write(pkt);
+        out.flush();
+        mediaWaiting = true;
+    }
 
     // ------------------------------------------------------------------ commands
 
