@@ -44,8 +44,19 @@ if [ -f "$TOOLS/patch_ppg_gate.py" ]; then
         exit 1
     }
 
-    install -m 644 "$TOOLS/patch_ppg_gate.py" "$WEB/patch_ppg_gate.py"
+    # .py.txt because the server runs a .py as CGI and answers 500 instead of
+    # serving it. Same bytes, different name.
+    install -m 644 "$TOOLS/patch_ppg_gate.py" "$WEB/patch_ppg_gate.py.txt"
     install -m 644 "$TOOLS/patch-watch-ppg.sh" "$WEB/patch-watch-ppg.sh"
+
+    # The stock odex, so --restore can recover a watch whose own backup is
+    # missing. Pinned in the script for the same reason as the patcher.
+    if [ -f "$WEB/L009_Protocol.odex.stock" ]; then
+        OSUM=$(sha256sum "$WEB/L009_Protocol.odex.stock" | cut -d' ' -f1)
+        sed -i -E "s/^STOCK_SHA256=\"[a-f0-9]*\"$/STOCK_SHA256=\"$OSUM\"/" \
+            "$TOOLS/patch-watch-ppg.sh"
+        install -m 644 "$TOOLS/patch-watch-ppg.sh" "$WEB/patch-watch-ppg.sh"
+    fi
     printf 'published patch-watch-ppg.sh\n  sha256 %s (patcher)\n' "$PSUM"
 fi
 
