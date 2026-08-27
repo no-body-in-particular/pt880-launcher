@@ -45,8 +45,8 @@ import android.util.Log;
  *
  * Forcing a measurement lights an LED against the skin for several seconds, and if the flags
  * really are latched it will keep being needed. {@link #FORCE_COOLDOWN_MS} puts a floor
- * between attempts so a watch that cannot get a pulse at all - off the wrist, on a table -
- * costs a few seconds an hour rather than running the sensor continuously.
+ * between attempts, so a watch that cannot get a pulse at all - off the wrist, on a table -
+ * spends about a minute an hour trying rather than running the sensor continuously.
  */
 public class PpgWatchdog {
 
@@ -56,14 +56,34 @@ public class PpgWatchdog {
     private static final String KEY_LAST_READING = "last_reading";
     private static final String KEY_LAST_FORCED = "last_forced";
 
-    /** The firmware manages a reading every few minutes when it is working. */
-    private static final long SILENT_LIMIT_MS = 35 * 60 * 1000L;
+    /**
+     * How long a silence has to run before this steps in.
+     *
+     * Ten minutes, because the watch's own cycle is three. That is measured rather than
+     * assumed - the gaps between its readings run 137, 43, 137, 43 seconds, two readings per
+     * 180 second cycle - so ten minutes is already three missed cycles and not something a
+     * working sensor does. An earlier draft used thirty five, set before the cadence was
+     * known, which left a wedged sensor unnoticed for half an hour.
+     */
+    private static final long SILENT_LIMIT_MS = 10 * 60 * 1000L;
 
-    /** Floor between forced attempts. */
-    private static final long FORCE_COOLDOWN_MS = 20 * 60 * 1000L;
+    /**
+     * Floor between forced attempts.
+     *
+     * Matched to the limit above: once the flags are latched nothing clears them, so this is
+     * the rate readings arrive at until something does. It is well short of the three minute
+     * cycle it stands in for, deliberately - an optical sensor costs battery every time it
+     * lights up, and a fallback that ran as often as the real thing would be the real thing.
+     */
+    private static final long FORCE_COOLDOWN_MS = 10 * 60 * 1000L;
 
-    /** How often to look. Cheap - it is a clock comparison unless something is wrong. */
-    private static final long CHECK_INTERVAL_MS = 10 * 60 * 1000L;
+    /**
+     * How often to look. Cheap - a clock comparison unless something is wrong.
+     *
+     * Half the silence limit, so a silence is noticed within about five minutes of crossing
+     * it rather than up to a full interval later.
+     */
+    private static final long CHECK_INTERVAL_MS = 5 * 60 * 1000L;
 
     private static final int ALARM_ID = 0x9917;
     static final String ACTION_CHECK = "org.watchlauncher.PPG_CHECK";
