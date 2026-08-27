@@ -195,6 +195,25 @@ public class PpgWatchdog {
     public static void check(final Context context) {
         schedule(context, CHECK_INTERVAL_MS);
 
+        //Everything below this line blocks, and none of it may run where it is called from.
+        //
+        //check() is called straight out of a BroadcastReceiver, which runs on the main thread
+        //and has about ten seconds before the system decides it has hung. What follows opens
+        //a root shell (twenty second timeout), opens a socket (eight to connect, six to
+        //read), shells out four more times for the report, and can wait forty seconds for an
+        //optical reading. Any one of those overruns it; together they are nowhere close.
+        //
+        //An overrun there does not just skip a check. It is an unresponsive main thread in
+        //the launcher process, which is a frozen or blank display on a watch whose home
+        //screen this is.
+        new Thread(new Runnable() {
+            public void run() {
+                work(context);
+            }
+        }).start();
+    }
+
+    private static void work(final Context context) {
         //Every pass, whether or not anything is wrong. The score is lost when the tracker is
         //killed and restarted, which is the case it exists for, so re-applying it is the
         //whole mechanism - and this alarm is already running on a five minute tick, so it

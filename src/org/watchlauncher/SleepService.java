@@ -209,6 +209,14 @@ public class SleepService extends Service implements SensorEventListener {
         // costs the night's vitals.
         long yield = yieldFor();
 
+        //Never yield by less than this. Standing back by three or four seconds means waking
+        //the watch again almost immediately, and the logcat showed exactly that - two bursts
+        //scheduled five seconds apart. A yield that costs more wakeups than the burst it
+        //avoided is worse than not yielding at all.
+        if (yield > 0 && yield < MIN_YIELD_MS) {
+            yield = MIN_YIELD_MS;
+        }
+
         if (yield > 0) {
             //Not finishBurst(): that reschedules from its own reading of the night, and with
             //no samples taken it picks the five minute watching interval - which would
@@ -279,6 +287,9 @@ public class SleepService extends Service implements SensorEventListener {
 
         return 0;
     }
+
+    /** Below this a yield costs more in wakeups than the collision it avoids. */
+    private static final long MIN_YIELD_MS = 15000;
 
     /** Roughly how long a firmware PPG measurement takes from start to result. */
     private static final long MEASURE_MS = 25000;
