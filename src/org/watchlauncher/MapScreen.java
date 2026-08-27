@@ -409,7 +409,9 @@ public class MapScreen extends Screen implements LocationListener {
         // the sky, and this watch has both already.
         Gps.assist(locations);
 
-        if (Gps.off(locations)) {
+        // Only if it has been asked for. Switching it on automatically made
+        // the firmware's health sensor wedge seven times sooner; see Gps.
+        if (Gps.wanted(shell) && Gps.off(locations)) {
             new Thread(new Runnable() {
                 public void run() {
                     try {
@@ -421,7 +423,7 @@ public class MapScreen extends Screen implements LocationListener {
                             ui.post(new Runnable() {
                                 public void run() {
                                     if (note == null || note.length() == 0) {
-                                        note = "gps off: install --root";
+                                        note = "gps needs the root helper";
                                     }
                                     changed();
                                 }

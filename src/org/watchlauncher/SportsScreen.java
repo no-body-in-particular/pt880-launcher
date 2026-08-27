@@ -502,13 +502,28 @@ public class SportsScreen extends Screen implements HeartRate.Listener {
     /** Turn the gps provider on. It is off in secure settings, which needs
      *  either a signature permission or root; the terminal's shell is already
      *  here, so use that. */
+    /**
+     * Turn the watch's own receiver on, or hand it back to the firmware.
+     *
+     * A toggle rather than a one way switch, because it is a trade rather than
+     * an improvement: with it on the map finds itself in seconds instead of
+     * minutes, and the firmware's heart rate sensor wedges far sooner - which
+     * the tracker server answers by restarting the watch.
+     */
     void enableGps() {
         RootShell sh = shell.root();
         if (!sh.isRoot()) { shell.toast("needs the root helper"); return; }
-        Gps.enable(shell, locations);
+        boolean turningOn = gpsOff();
+        if (turningOn) {
+            Gps.enable(shell, locations);
+        } else {
+            Gps.disable(shell, locations);
+        }
+        Gps.setWanted(shell, turningOn);
         stopLocation();
         startLocation();
-        shell.toast(gpsOff() ? "could not enable gps" : "gps enabled");
+        shell.toast(gpsOff() ? "gps off - the firmware keeps the receiver"
+                             : "gps on - faster fixes, fewer heart rates");
     }
 
     static class SportsMenuScreen extends ListScreen {

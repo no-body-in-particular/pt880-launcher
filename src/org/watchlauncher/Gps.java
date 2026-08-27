@@ -73,6 +73,50 @@ public final class Gps {
     }
 
     /**
+     * Whether the watch has been told to use its own receiver.
+     *
+     * Off by default, and that default is not caution for its own sake.
+     * Turning the framework's provider on made the firmware's health sensor
+     * wedge roughly seven times sooner - measured over a day, the stretches
+     * where a pulse was arriving fell from a mean of 147 minutes to 22, and
+     * the change lines up with the hour this was first switched on
+     * automatically. The tracker firmware owns the receiver through its own
+     * gpsd; asking the platform to open the same hardware is a plausible way
+     * to upset the process that is also doing the health polling, and the
+     * watch was then being restarted hourly by the server's recovery.
+     *
+     * So it is a choice rather than something the map does behind your back:
+     * a faster fix, or a heart rate. Sports, hold A, "GPS provider".
+     */
+    private static final String PREF = "gps.wanted";
+
+    public static boolean wanted(ShellActivity shell) {
+        try {
+            return shell.getSharedPreferences("watchlauncher", ShellActivity.MODE_PRIVATE)
+                    .getBoolean(PREF, false);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    public static void setWanted(ShellActivity shell, boolean on) {
+        try {
+            shell.getSharedPreferences("watchlauncher", ShellActivity.MODE_PRIVATE)
+                    .edit().putBoolean(PREF, on).commit();
+        } catch (Exception e) { /* nothing to do */ }
+    }
+
+    /** Hand the receiver back to the firmware. */
+    public static boolean disable(ShellActivity shell, LocationManager lm) {
+        RootShell sh = shell == null ? null : shell.root();
+        if (sh == null || !sh.isRoot()) return false;
+        sh.exec("settings put secure location_providers_allowed -gps");
+        boolean off = off(lm);
+        Log.i("watchmap", off ? "gps provider disabled" : "could not disable the gps provider");
+        return off;
+    }
+
+    /**
      * Switch the provider on if it is off.
      *
      * Costs a root shell, so it is only worth calling where a real position
