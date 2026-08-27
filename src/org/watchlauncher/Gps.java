@@ -84,18 +84,22 @@ public final class Gps {
      * fourteen installs, each of which restarts things, so the two causes
      * cannot be told apart in it. Treat "seven times sooner" as withdrawn.
      *
-     * What is known is the failure it was reaching for. com.ic.work runs one
-     * work queue for both sensors with no timeout on the item at its head, so
-     * any measurement whose callback never arrives stalls heart rate and
-     * temperature together until the process restarts. The tracker firmware
-     * owns the receiver through its own gpsd, and asking the platform to open
-     * the same hardware is a credible way to produce a callback that never
-     * comes - but credible is not demonstrated, and nothing here has
-     * demonstrated it.
+     * And the theory behind it is now disproved rather than merely unproven. A
+     * night with location_providers_allowed reading "network" - the framework
+     * provider off, exactly as this default intends - still wedged the health
+     * sensor thirty one times. Whatever stalls it does not need the platform
+     * to have opened the receiver.
      *
-     * So the default stays off, because the cost of being wrong that way is a
-     * slower first fix and the cost of being wrong the other way is the
-     * night's readings.
+     * What actually stalls it is com.ic.work: one work queue for both sensors,
+     * no timeout on the item at its head, so any measurement whose callback
+     * never arrives stops heart rate and temperature together until the
+     * process restarts. Nothing about that requires GPS.
+     *
+     * So this default is no longer a health measure and should not be argued
+     * for as one. It stays off because the receiver costs battery and the
+     * wearer should choose - not because leaving it on costs readings. It does
+     * not. Anyone who wants a faster first fix can turn it on without paying
+     * for it in heart rate.
      *
      * So it is a choice rather than something the map does behind your back:
      * a faster fix, or a heart rate. Sports, hold A, "GPS provider".
