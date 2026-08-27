@@ -161,8 +161,17 @@ public class WatchdogReport {
             //Who was big enough to be worth killing, and who the killer had already taken.
             //A kill names a victim; the process table names the reason.
             add(lines, "top", "ps", 8, "u0_a|system|app_");
-            add(lines, "log", "logcat -d -v brief", 8,
-                "lowmemory|LowMemory|am_kill|Killing|to free|watchlauncher");
+            //A kill has more than one cause and the first report only looked for one of
+            //them. It found no am_kill and no lowmemory, and the memory figures beside it
+            //said the watch had 151 MB free - so the killer was never the explanation, and
+            //the filter had nothing to offer instead. A process that dies with no Java stack
+            //and no reclaim is a native crash, so the signatures for one go in too.
+            add(lines, "log", "logcat -d -v brief", 10,
+                "lowmemory|LowMemory|am_kill|Killing|to free"
+                + "|Fatal signal|SIGSEGV|SIGABRT|tombstone|backtrace|ANR in|am_anr|am_proc_died");
+
+            //And whether the kernel left a tombstone, which settles it either way.
+            add(lines, "tomb", "ls -l /data/tombstones/ 2>/dev/null | tail -3", 3, "tombstone");
             send(context, lines);
 
         } catch (Throwable t) {

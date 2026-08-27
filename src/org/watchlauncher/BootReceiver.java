@@ -24,6 +24,11 @@ public class BootReceiver extends BroadcastReceiver {
         // the package cancels every alarm it owned.
         PpgWatchdog.start(c);
 
+        // And straight away rather than waiting for the first watchdog tick: a
+        // reboot is exactly when memory is tightest and everything is starting
+        // at once, which is when the tracker is most likely to be taken.
+        Guard.protectTracker(c);
+
         if (!SleepLog.enabled(c)) return;
 
         boolean rebooted = in == null || in.getAction() == null

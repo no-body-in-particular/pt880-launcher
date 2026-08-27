@@ -195,6 +195,12 @@ public class PpgWatchdog {
     public static void check(final Context context) {
         schedule(context, CHECK_INTERVAL_MS);
 
+        //Every pass, whether or not anything is wrong. The score is lost when the tracker is
+        //killed and restarted, which is the case it exists for, so re-applying it is the
+        //whole mechanism - and this alarm is already running on a five minute tick, so it
+        //costs one shell and no new wakeups.
+        Guard.protectTracker(context);
+
         if (!shouldForce(context)) {
             return;
         }
