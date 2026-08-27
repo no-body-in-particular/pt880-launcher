@@ -13,7 +13,21 @@ import android.util.Log;
 /**
  * Force a pulse measurement out of the vendor stack, past the check that refuses one.
  *
- * <h3>Why this exists</h3>
+ * <h3>Not currently used, and why</h3>
+ *
+ * {@link PpgWatchdog} used to call this and does not any more. This route runs through
+ * {@code com.ic.work.SensorDataService}, which is the component that stalls - it keeps one
+ * work queue for both sensors with no timeout on the item at its head - so asking it for a
+ * reading during a stall only queues another item behind the stuck one. The watchdog reads
+ * the platform sensor instead, which reaches the same hardware without touching that queue.
+ *
+ * The reasoning below about the wear gate also did not survive. Heart rate and temperature
+ * stop within a minute of each other and return together, and temperature never goes through
+ * {@code triggerPPGTest} - so the gate cannot be what stops them. It is kept because the
+ * protocol work is correct and hard-won, and because a watch whose queue is healthy can
+ * still be asked for a reading this way.
+ *
+ * <h3>Why it was written</h3>
  *
  * The readings stop. Not rarely - most nights. The watch answers every
  * {@code HEARTRATE#} the server sends with a cheerful {@code IWAPXL} ack and
@@ -137,7 +151,11 @@ public class Ppg {
     private IBinder service;
     private ServiceConnection connection;
     private boolean finished;
-    private final android.os.Handler handler = new android.os.Handler();
+    //Bound to the main looper explicitly. A bare new Handler() takes the looper of whatever
+    //thread constructs the object, and throws outright when that thread has none - which is
+    //every background thread. This is constructed from a watchdog running on one.
+    private final android.os.Handler handler =
+            new android.os.Handler(android.os.Looper.getMainLooper());
 
     public Ppg(Context context, Listener listener) {
         this.context = context.getApplicationContext();

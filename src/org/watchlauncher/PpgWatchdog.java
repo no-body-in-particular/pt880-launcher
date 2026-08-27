@@ -277,24 +277,19 @@ public class PpgWatchdog {
             fillGap(context);
         }
 
-        new Ppg(context, new Ppg.Listener() {
-            @Override
-            public void onReading(int bpm, int systolic, int diastolic, int oxygen) {
-                //the vendor's own callback uploads this to the tracker; the broadcast it
-                //sends on the way will update the timestamp too, but not if it took the
-                //reading without broadcasting, so record it here as well
-                noteReading(context);
-                Log.i(TAG, "forced reading: " + bpm + " bpm, " + systolic + "/" + diastolic
-                        + ", spo2 " + oxygen);
-            }
-
-            @Override
-            public void onFailed(String why) {
-                //nothing to do but wait for the cooldown and try again. A watch that is
-                //genuinely off the wrist lands here every time, which is correct.
-                Log.i(TAG, "forced reading did not happen: " + why);
-            }
-        }).request(Ppg.TEST_ALL);
+        //Ppg used to be asked for a reading here as well. It is gone, for two reasons.
+        //
+        //It could not have worked: Ppg goes through com.ic.work's SensorDataService, which
+        //is the component that stalls, so asking it during a stall only puts another item
+        //behind the one that is stuck. fillGap above uses the platform sensor instead, which
+        //is a different route to the same hardware and does not touch that queue.
+        //
+        //And it crashed the launcher every time this fired. Ppg builds a Handler in a field
+        //initialiser, which needs a Looper, and moving this work off the receiver's main
+        //thread - the fix for the black screen - left it running on a plain thread that has
+        //none. "Can't create handler inside thread that has not called Looper.prepare()",
+        //thrown from the watchdog, in the home app. One fix's blast radius landing in
+        //another's code.
     }
 
     /**
