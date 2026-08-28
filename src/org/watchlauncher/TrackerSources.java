@@ -66,12 +66,40 @@ public final class TrackerSources {
     /** Satellites used in the last fix, for the position frame's own field. */
     private static volatile int lastSats = 0;
 
+    /**
+     * How many satellites a fix was made from.
+     *
+     * Out of the fix's own extras, where the gps provider puts it, rather than out of a
+     * GpsStatus listener. Two reasons. GpsStatus only reports while a listener is registered,
+     * so a fix that arrives any other way -- last known, or a window that has since closed --
+     * gets a count of zero next to real coordinates, which is what the server saw: a valid
+     * position reporting 000 satellites. And the count then belongs to whatever the receiver
+     * was doing at frame time rather than to the fix being sent.
+     *
+     * The extras travel with the Location, so the number always describes the fix beside it.
+     */
+    static int satellitesOf(Location l) {
+        if (l == null) return 0;
+        try {
+            android.os.Bundle x = l.getExtras();
+            if (x == null) return 0;
+            int n = x.getInt("satellites", 0);
+            return (n > 0 && n < 100) ? n : 0;
+        } catch (Throwable t) {
+            return 0;
+        }
+    }
+
     /** Signal as a percentage, kept up to date by the listener {@link #watchSignal} starts. */
     private static volatile int lastSignal = 0;
 
-    public static int satellites() { return lastSats; }
-
     public static int signal() { return lastSignal; }
+
+    private static void postToMain(Runnable r) {
+        try {
+            new android.os.Handler(Looper.getMainLooper()).post(r);
+        } catch (Throwable ignored) { }
+    }
 
     /**
      * Keep the GSM signal strength current.
@@ -205,9 +233,17 @@ public final class TrackerSources {
                 } catch (Throwable ignored) { }
             }
         };
-        try {
-            lm.addGpsStatusListener(sats);
-        } catch (Throwable ignored) { }
+        // On the main looper, not this thread. addGpsStatusListener builds a Handler on the
+        // calling thread, and this one is a bare worker with no Looper, so the call threw
+        // every time and was swallowed by the catch -- which is the other half of why the
+        // satellite count was always zero.
+        postToMain(new Runnable() {
+            public void run() {
+                try {
+                    lm.addGpsStatusListener(sats);
+                } catch (Throwable ignored) { }
+            }
+        });
 
         final Location[] got = new Location[1];
         final LocationListener listener = new LocationListener() {
@@ -237,9 +273,13 @@ public final class TrackerSources {
             try {
                 lm.removeUpdates(listener);
             } catch (Throwable ignored) { }
-            try {
-                lm.removeGpsStatusListener(sats);
-            } catch (Throwable ignored) { }
+            postToMain(new Runnable() {
+                public void run() {
+                    try {
+                        lm.removeGpsStatusListener(sats);
+                    } catch (Throwable ignored) { }
+                }
+            });
         }
 
         if (got[0] == null) {
@@ -247,8 +287,11 @@ public final class TrackerSources {
             return null;
         }
         ourFix = got[0];
+        int n = satellitesOf(got[0]);
+        if (n > 0) lastSats = n;
         Log.i(TAG, "gps fix: " + got[0].getLatitude() + "," + got[0].getLongitude()
-                + " +/-" + got[0].getAccuracy() + "m");
+                + " +/-" + got[0].getAccuracy() + "m from " + (n > 0 ? n : lastSats)
+                + " satellites");
         return got[0];
     }
 
@@ -446,8 +489,14 @@ public final class TrackerSources {
                 (valid && l.hasBearing()) ? l.getBearing() : 0,
                 cal.get(Calendar.YEAR), cal.get(Calendar.MONTH) + 1, cal.get(Calendar.DAY_OF_MONTH),
                 cal.get(Calendar.HOUR_OF_DAY), cal.get(Calendar.MINUTE), cal.get(Calendar.SECOND),
-                signal(), valid ? satellites() : 0, battery(c),
+                signal(), valid ? satsFor(l) : 0, battery(c),
                 cells, aps);
+    }
+
+    /** The fix's own count, falling back to the last one the receiver reported. */
+    private static int satsFor(Location l) {
+        int n = satellitesOf(l);
+        return n > 0 ? n : lastSats;
     }
 
     /**
