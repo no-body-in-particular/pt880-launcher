@@ -322,6 +322,159 @@ public final class VendorVitals {
         }
     }
 
+    // ---------------------------------------------------------------- temperature
+
+    private static final String TEMP_ACTION = "com.ic.sensor.data.action.TEMPERATURE";
+    private static final String TEMP_SERVICE = "com.ic.work.ITempSensorService";
+    private static final String TEMP_CALLBACK = "com.ic.work.ITempSensorCallback";
+
+    /**
+     * Body temperature, from the second binder behind the same service.
+     *
+     * The platform's GXTS02S is a mirror in the same way gh30x is - dumpsys has it sitting at
+     * {@code last=<  0.0,  0.0,  0.0>}, which is what it has always reported - so this is the
+     * only route to a reading, just as it is for the pulse.
+     *
+     * <h3>What is known and what is inferred</h3>
+     *
+     * Known, from the dex: the action, the descriptor {@code com.ic.work.ITempSensorService},
+     * a callback interface {@code ITempSensorCallback}, and a {@code Temperature} parcel whose
+     * own toString names its fields in order - bodyTemp, wristTemp, envTemp.
+     *
+     * Inferred: the transaction numbers, taken to match the heart rate service beside it
+     * (1 register, 2 unregister, 3 ask). onTransact carries no strings to read them from. A
+     * wrong number fails the call and is logged; it cannot produce a wrong reading.
+     *
+     * The parcel's field type is not settled either, so both are tried: ints first, since the
+     * protocol carries hundredths elsewhere, then floats, and whichever yields a plausible body
+     * temperature wins. Anything outside 20-45 is not one.
+     */
+    public static float temperature(Context ctx, long timeoutMs) {
+        final float[] got = new float[]{0f};
+        final IBinder[] service = new IBinder[1];
+
+        final Binder callback = new Binder() {
+            protected boolean onTransact(int code, Parcel data, Parcel reply, int flags)
+                    throws RemoteException {
+                if (code == INTERFACE_TRANSACTION) {
+                    if (reply != null) reply.writeString(TEMP_CALLBACK);
+                    return true;
+                }
+                if (code >= 1 && code <= 4) {
+                    data.enforceInterface(TEMP_CALLBACK);
+                    float v = parseTemp(data);
+                    if (v > 0 && got[0] == 0f) got[0] = v;
+                    if (reply != null) reply.writeNoException();
+                    return true;
+                }
+                return super.onTransact(code, data, reply, flags);
+            }
+        };
+
+        ServiceConnection conn = new ServiceConnection() {
+            public void onServiceConnected(ComponentName n, IBinder b) { service[0] = b; }
+
+            public void onServiceDisconnected(ComponentName n) { service[0] = null; }
+        };
+
+        boolean bound = false;
+        try {
+            Intent i = new Intent();
+            i.setClassName(PKG, CLS);
+            i.setAction(TEMP_ACTION);
+            bound = ctx.bindService(i, conn, Context.BIND_AUTO_CREATE);
+            if (!bound) return 0f;
+
+            long deadline = System.currentTimeMillis() + timeoutMs;
+            while (service[0] == null && System.currentTimeMillis() < deadline) {
+                Thread.sleep(100);
+            }
+            if (service[0] == null) {
+                Log.w(TAG, "the temperature binder never connected");
+                return 0f;
+            }
+            Log.i(TAG, "bound interface: " + service[0].getInterfaceDescriptor());
+
+            if (!call(service[0], TEMP_SERVICE, TX_REGISTER, callback, ctx.getPackageName())) {
+                return 0f;
+            }
+            try {
+                Parcel d = Parcel.obtain();
+                try {
+                    d.writeInterfaceToken(TEMP_SERVICE);
+                    d.writeInt(TYPE_ALL);
+                    d.writeString(ctx.getPackageName());
+                    service[0].transact(TX_GET, d, null, IBinder.FLAG_ONEWAY);
+                } finally {
+                    d.recycle();
+                }
+                while (got[0] == 0f && System.currentTimeMillis() < deadline) {
+                    Thread.sleep(200);
+                }
+            } finally {
+                call(service[0], TEMP_SERVICE, TX_UNREGISTER, callback, null);
+            }
+
+            if (got[0] == 0f) {
+                Log.w(TAG, "no temperature in " + (timeoutMs / 1000) + "s");
+                return 0f;
+            }
+            Log.i(TAG, "body temperature " + got[0]);
+            return got[0];
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return 0f;
+        } catch (Throwable t) {
+            Log.w(TAG, "temperature reading failed", t);
+            return 0f;
+        } finally {
+            if (bound) {
+                try { ctx.unbindService(conn); } catch (Throwable ignored) { }
+            }
+        }
+    }
+
+    /** register or unregister, which differ only in whether the package goes with it. */
+    private static boolean call(IBinder b, String descriptor, int code, IBinder cb, String pkg) {
+        Parcel data = Parcel.obtain();
+        Parcel reply = Parcel.obtain();
+        try {
+            data.writeInterfaceToken(descriptor);
+            data.writeStrongBinder(cb);
+            if (pkg != null) data.writeString(pkg);
+            b.transact(code, data, reply, 0);
+            reply.readException();
+            return true;
+        } catch (Throwable t) {
+            Log.w(TAG, "transaction " + code + " on " + descriptor + " failed", t);
+            return false;
+        } finally {
+            reply.recycle();
+            data.recycle();
+        }
+    }
+
+    /** Temperature{bodyTemp, wristTemp, envTemp}, in whichever of the two encodings it uses. */
+    static float parseTemp(Parcel p) {
+        try {
+            if (p.readInt() == 0) return 0f;
+            int at = p.dataPosition();
+
+            int body = p.readInt();
+            float asInt = (body > 100) ? body / 100f : body;
+            if (asInt > 20f && asInt < 45f) return asInt;
+
+            p.setDataPosition(at);
+            float asFloat = p.readFloat();
+            if (asFloat > 100f) asFloat = asFloat / 100f;
+            if (asFloat > 20f && asFloat < 45f) return asFloat;
+
+            return 0f;
+        } catch (Throwable t) {
+            return 0f;
+        }
+    }
+
     /** The HeartRate parcel: a null flag, then oxygen, from, heartRate, bloodHeight, bloodLow. */
     static Reading parse(Parcel p) {
         try {

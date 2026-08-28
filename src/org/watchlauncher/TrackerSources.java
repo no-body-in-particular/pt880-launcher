@@ -586,18 +586,11 @@ public final class TrackerSources {
     }
 
     public static float temperature(Context c) {
-        float[] v = oneShot(c, "temperature", 0, 10000);
-        if (v == null) {
-            Log.i(TAG, "no temperature reading; the sensor did not answer");
-            return lastTemp;
-        }
-        float x = v[0];
-        // Accept either scale: some builds report degrees directly. A body reading is never
-        // 2771 degrees and never 0.3, so the magnitude disambiguates it without having to know
-        // which firmware is underneath.
-        if (x > 100f) x = x / 100f;
-        if (x > 20f && x < 45f) lastTemp = x;
-        else Log.i(TAG, "temperature " + v[0] + " is not a body reading; keeping the last");
+        // The vendor's binder, for the same reason the pulse uses it: GXTS02S in the platform
+        // sensor list is a mirror sitting at last=<0.0,0.0,0.0>, and registerListener on it
+        // returns that for ever. VendorVitals has the account.
+        float v = VendorVitals.temperature(c, 20000);
+        if (v > 20f && v < 45f) lastTemp = v;
         return lastTemp;
     }
 
