@@ -76,7 +76,7 @@ public class SmsControl extends BroadcastReceiver {
     private static final String ACTION_SMS = "android.provider.Telephony.SMS_RECEIVED";
 
     /** Commands that could give the watch away, and so need the allowlist, not just a password. */
-    private static final String[] PRIVILEGED = {"host", "ip"};
+    private static final String[] PRIVILEGED = {"host", "ip", "imei"};
 
     @Override
     public void onReceive(Context context, Intent intent) {
@@ -244,6 +244,23 @@ public class SmsControl extends BroadcastReceiver {
             if (cmd.arg == null || cmd.arg.length() == 0) return "host: no address";
             TrackerService.setEndpoint(c, cmd.arg);
             return "server set to " + cmd.arg;
+        }
+
+        // The id everything is filed under. The vendor kept this in
+        // persist.sys.protocol_IMEI and it is ours now, so it is settable here rather than
+        // only by editing a system property with root. Privileged for the same reason host is:
+        // an id is half of deciding whose readings these are.
+        if ("imei".equals(cmd.name)) {
+            if (cmd.arg == null || cmd.arg.length() == 0) {
+                TrackerConfig.setImei(c, null);
+                return "imei back to the modem's";
+            }
+            // Checked before writing, not after: setImei treats anything too short as
+            // "clear the override", so writing first and asking afterwards would report
+            // success while silently having reverted to the modem's id.
+            if (cmd.arg.trim().length() < 8) return "imei: too short, unchanged";
+            TrackerConfig.setImei(c, cmd.arg);
+            return "imei set to " + cmd.arg.trim();
         }
 
         if ("capture".equals(cmd.name)) {

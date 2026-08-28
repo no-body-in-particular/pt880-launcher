@@ -63,6 +63,28 @@ public class BeehomeCodecTest {
         eq("APJK health", BeehomeCodec.health("2026-08-26 21:46:08", 3, 36.35),
                 "IWAPJK,2026-08-26 21:46:08,3,36.35#");
 
+        eq("APJK sleep", BeehomeCodec.sleep("2026-08-24 08:00:00", 5, 675),
+                "IWAPJK,2026-08-24 08:00:00,5,675#");
+
+        // The bug this guard exists for: a vitals path reaching the frame with a sleep type.
+        // Type 5 is deep sleep in minutes, so a heart rate sent as one is recorded as most of a
+        // night and nothing downstream can tell it apart from a real reading.
+        boolean refused = false;
+        try {
+            BeehomeCodec.health("2026-08-26 21:46:08", 5, 59);
+        } catch (IllegalArgumentException e) {
+            refused = true;
+        }
+        check("health() refuses a sleep type", refused, "accepted type 5");
+
+        boolean refusedVitals = false;
+        try {
+            BeehomeCodec.sleep("2026-08-26 21:46:08", 2, 59);
+        } catch (IllegalArgumentException e) {
+            refusedVitals = true;
+        }
+        check("sleep() refuses a vitals type", refusedVitals, "accepted type 2");
+
         // --- downlink -------------------------------------------------------------
         BeehomeCodec.Frame f = BeehomeCodec.decode("IWBP18," + id + ",080835#");
         check("BP18 opcode", f != null && "18".equals(f.op), f == null ? "null" : f.op);

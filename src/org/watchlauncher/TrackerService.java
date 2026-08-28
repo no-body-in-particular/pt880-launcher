@@ -52,8 +52,8 @@ public class TrackerService extends Service {
 
     private static final String PREFS = "tracker";
     private static final String KEY_ENABLED = "client_enabled";
-    private static final String KEY_HOST = "client_host";
-    private static final String KEY_PORT = "client_port";
+    static final String KEY_HOST = "client_host";
+    static final String KEY_PORT = "client_port";
     private static final String KEY_CYCLE = "client_cycle_s";
     private static final String KEY_VITALS = "client_vitals_s";
     private static final String KEY_TEMP = "client_temp_s";
@@ -611,6 +611,7 @@ public class TrackerService extends Service {
             int bpm = hr.bpm();
             if (bpm > 0) {
                 send(out, BeehomeCodec.health(TrackerSources.stamp(), JK_PULSE, bpm));
+                TrackerLog.recordPulse(this, bpm, System.currentTimeMillis());
             }
         } catch (Throwable t) {
             Log.w(TAG, "no vitals reading", t);
@@ -652,15 +653,11 @@ public class TrackerService extends Service {
     // ------------------------------------------------------------------ inputs
 
     private TrackerConfig config() {
-        RootShell sh = new RootShell();
-        try {
-            sh.open();
-            TrackerConfig c = new TrackerConfig(this, sh);
-            c.load();
-            return c;
-        } finally {
-            try { sh.close(); } catch (Throwable ignored) { }
-        }
+        // No root shell any more: the settings are this client's own, in its own
+        // preferences. The vendor file this used to read is not on the watch.
+        TrackerConfig c = new TrackerConfig(this);
+        c.load();
+        return c;
     }
 
     private int battery() {
@@ -766,6 +763,8 @@ public class TrackerService extends Service {
                     int bpm = hr.bpm();
                     if (bpm > 0) {
                         sendAsync(BeehomeCodec.health(TrackerSources.stamp(), JK_PULSE, bpm));
+                        TrackerLog.recordPulse(TrackerService.this, bpm,
+                                System.currentTimeMillis());
                     } else {
                         Log.w(TAG, "no reading after 20s; the wrist is probably not there");
                     }

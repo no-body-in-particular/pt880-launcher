@@ -248,8 +248,18 @@ public final class TrackerSources {
         boolean valid = l != null && isFresh(l);
         if (valid) cal.setTimeInMillis(l.getTime());
 
+        double lat = valid ? l.getLatitude() : 0;
+        double lon = valid ? l.getLongitude() : 0;
+
+        // Keep our own record of it. This client is the tracker now, so the sports screen reads
+        // what we sent rather than the vendor database it used to copy out with root - that app
+        // is not on the watch any more. hasPosition is the server's own test, coordinates rather
+        // than the A/V flag: a frame of zeroes carries no position however it is flagged.
+        TrackerLog.recordFix(c, valid && (lat != 0 || lon != 0), lat, lon,
+                System.currentTimeMillis());
+
         return BeehomeCodec.location(id, valid,
-                valid ? l.getLatitude() : 0, valid ? l.getLongitude() : 0,
+                lat, lon,
                 valid ? l.getSpeed() * 3.6 : 0,          // m/s on the API, km/h on the wire
                 (valid && l.hasBearing()) ? l.getBearing() : 0,
                 cal.get(Calendar.YEAR), cal.get(Calendar.MONTH) + 1, cal.get(Calendar.DAY_OF_MONTH),

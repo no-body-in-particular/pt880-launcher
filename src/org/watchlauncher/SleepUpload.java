@@ -364,7 +364,7 @@ public class SleepUpload {
         public boolean one(String when, int type, int value) throws Exception {
             int before = TrackerService.jkAckCount();
             if (before < 0) return false;
-            if (!TrackerService.offer("IWAPJK," + when + "," + type + "," + value + "#")) {
+            if (!TrackerService.offer(BeehomeCodec.sleep(when, type, value))) {
                 return false;
             }
             // The reply lands in the tracker's read loop, not here, so wait for its count of
@@ -403,7 +403,7 @@ public class SleepUpload {
         }
 
         public boolean one(String when, int type, int value) throws Exception {
-            write(out, "IWAPJK," + when + "," + type + "," + value + "#");
+            write(out, BeehomeCodec.sleep(when, type, value));
             // The server replies IWBPJK,<type># to each. Reading it keeps the exchange in step
             // and proves the frame arrived; an unrecognised type is acked too, which is what
             // makes sending ahead of the server-side patch safe.

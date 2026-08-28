@@ -227,12 +227,68 @@ public final class BeehomeCodec {
     }
 
     /**
+     * Everything the JK frame carries, by type number.
+     *
+     * One table because the numbers are shared across two senders that know nothing about each
+     * other: the vitals path here, and SleepUpload. 1-4 are the vendor's. 5-7 are what the
+     * firmware measured, 8-20 what this launcher measures.
+     *
+     * Index 0 is unused so a type number indexes its own name.
+     */
+    static final String[] JK_TYPES = {
+        null,
+        "blood pressure", "heart rate", "temperature", "blood oxygen",
+        "deep sleep", "light sleep", "sleep score",
+        "total sleep time", "sleep period", "wake after onset", "sleep efficiency",
+        "wakeups", "sleeping now", "day total",
+        "relative amplitude", "intradaily variability", "interdaily stability",
+        "L5 start", "M10 start", "sleep regularity",
+    };
+
+    static String jkName(int type) {
+        return (type > 0 && type < JK_TYPES.length) ? JK_TYPES[type] : "type " + type;
+    }
+
+    /** The two the vitals path is allowed to send. */
+    private static final int JK_HEART_RATE = 2;
+    private static final int JK_TEMPERATURE = 3;
+
+    /**
      * A vitals reading. Type 3 is temperature in the capture this was built from; the value is
      * sent as the vendor formats it, one decimal.
+     *
+     * <h3>Why the type is checked</h3>
+     *
+     * These numbers are one flat namespace shared with sleep, and they are not interchangeable:
+     * 5 is deep sleep in minutes. A vitals path that reached this with a 5 - which is exactly
+     * what an earlier blood oxygen bug did - files a heart rate as most of a night's sleep, and
+     * nothing downstream can tell. So this refuses anything it does not own rather than
+     * formatting it faithfully. Sleep readings go through {@link #sleep}.
      */
     public static String health(String isoLocalTime, int type, double value) {
+        if (type != JK_HEART_RATE && type != JK_TEMPERATURE) {
+            throw new IllegalArgumentException(
+                    "health() sends heart rate and temperature; " + type + " is "
+                    + jkName(type) + " -- use sleep() for those");
+        }
         return frame("JK", isoLocalTime, Integer.toString(type),
                 String.format(Locale.US, "%.2f", value));
+    }
+
+    /**
+     * A sleep reading, types 5 to 20.
+     *
+     * Separate from {@link #health} so that neither path can reach the other's numbers by
+     * passing the wrong constant. Integers, because every one of these is a count, a minute or
+     * a percentage - a ratio is multiplied by a hundred before it gets here.
+     */
+    public static String sleep(String isoUtcTime, int type, int value) {
+        if (type < 5 || type >= JK_TYPES.length) {
+            throw new IllegalArgumentException(
+                    "sleep() sends types 5-" + (JK_TYPES.length - 1) + "; " + type + " is "
+                    + jkName(type));
+        }
+        return frame("JK", isoUtcTime, Integer.toString(type), Integer.toString(value));
     }
 
     /**

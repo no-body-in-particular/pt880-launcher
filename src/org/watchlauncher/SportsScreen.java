@@ -452,45 +452,16 @@ public class SportsScreen extends Screen implements HeartRate.Listener {
      * tracker's own protocol. Off the UI thread: it copies a database through
      * a root shell and then opens a socket.
      */
-    void sendSleep() {
-        if (sleepState.equals("sending")) return;
-        sleepState = "sending";
-        shell.toast("sending sleep data");
-        new Thread(new Runnable() {
-            public void run() {
-                final String result = doSendSleep();
-                ui.post(new Runnable() {
-                    public void run() {
-                        sleepState = result;
-                        shell.toast(result);
-                    }
-                });
-            }
-        }).start();
-    }
+    /*
+     * "Send sleep" is gone from the menu.
+     *
+     * It uploaded the nights the *firmware* recorded, read out of the vendor tracker's database
+     * by TrackerLog. That app is not on this watch any more, so the list was empty every time
+     * and the item could never do anything but answer "nothing new". The sleep this launcher
+     * measures itself still goes up - continuously from SleepService, and as a scored night
+     * from "Score last night" below.
+     */
 
-    private String doSendSleep() {
-        try {
-            String last = SleepUpload.lastSent(shell.prefs());
-            java.util.List<SleepUpload.Night> nights = log.sleepNights(last);
-            if (nights.isEmpty()) return "nothing new";
-
-            TrackerConfig cfg = new TrackerConfig(shell, shell.root());
-            cfg.load();
-            if (!cfg.usable()) return "no imei";
-
-            SleepUpload up = new SleepUpload();
-            int n = up.send(cfg, nights);
-            if (up.problem() != null) return up.problem();
-            if (n == 0) return "no reply";
-            // Only once the server has acknowledged them; a failed run has to
-            // be repeatable or a night would be lost silently.
-            SleepUpload.markSent(shell.prefs(), nights);
-            return nights.size() + " night" + (nights.size() == 1 ? "" : "s") + " sent";
-        } catch (Exception e) {
-            return "failed";
-        }
-    }
 
     /** For the menu: whether the server source is set up and answering. */
     String serverState() {
@@ -544,7 +515,6 @@ public class SportsScreen extends Screen implements HeartRate.Listener {
                     sports.heartRate().available() ? "found" : "none",
                     AppIcons.HEART));
             l.add(new Item("Server", sports.serverState(), AppIcons.DEVICE));
-            l.add(new Item("Send sleep", sports.sleepState(), AppIcons.HEART));
             l.add(new Item("Sleep", sports.sleepTracking(), AppIcons.GEAR));
             l.add(new Item("Score last night", null, AppIcons.HEART));
             addBack(l);
@@ -559,10 +529,9 @@ public class SportsScreen extends Screen implements HeartRate.Listener {
                 case 1: sports.enableGps(); render(); break;
                 case 2: break;                       // a readout, not an action
                 case 3: break;                       // likewise
-                case 4: sports.sendSleep(); render(); break;
-                case 5: break;                       // a readout, not an action
-                case 6: sports.scoreLastNight(); render(); break;
-                case 7: shell.pop(); break;
+                case 4: break;                       // likewise
+                case 5: sports.scoreLastNight(); render(); break;
+                case 6: shell.pop(); break;
                 default: shell.popToRoot(); break;
             }
         }
