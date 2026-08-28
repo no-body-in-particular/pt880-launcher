@@ -64,6 +64,7 @@ public class TrackerService extends Service {
     static final String KEY_PORT = "client_port";
     private static final String KEY_CYCLE = "client_cycle_s";
     private static final String KEY_VITALS = "client_vitals_s";
+    private static final String KEY_SPO2 = "client_spo2_s";
     private static final String KEY_TEMP = "client_temp_s";
     private static final String KEY_HOURS = "client_hours_format";
     private static final String KEY_PHONE = "client_phone_setting";
@@ -107,6 +108,7 @@ public class TrackerService extends Service {
      */
     private static final int JK_PULSE = 2;
     private static final int JK_TEMPERATURE = 3;
+    private static final int JK_OXYGEN = 4;
 
     /**
      * What to measure, for {@link #measureAsync}.
@@ -167,6 +169,37 @@ public class TrackerService extends Service {
      * loop for a minute and delay the heartbeat with it, and on a ten minute cycle a fix taken
      * now is well inside the half hour a frame will still call fresh.
      */
+    /**
+     * Blood oxygen, over the vendor's own binder, because nothing else on this watch has it.
+     *
+     * Off the loop thread and never retried on failure: that service has one work queue with no
+     * timeout, so a reading that never comes back holds it for ever, and asking again during a
+     * stall only queues more behind the stuck item. Spo2 has the full account. The pulse and
+     * the pressures do not come from there, so a wedge costs this reading and nothing else.
+     */
+    private void measureOxygenAsync() {
+        new Thread(new Runnable() {
+            public void run() {
+                try {
+                    Spo2.Reading r = Spo2.measure(TrackerService.this, SPO2_TIMEOUT_MS);
+                    if (r == null) return;
+                    sendAsync(BeehomeCodec.health(TrackerSources.stamp(), JK_OXYGEN, r.oxygen));
+                } catch (Throwable t) {
+                    Log.w(TAG, "oxygen reading failed", t);
+                }
+            }
+        }, "spo2").start();
+    }
+
+    /** A pulse oximeter needs a good few seconds of signal; past this it is not coming. */
+    private static final int SPO2_TIMEOUT_MS = 45 * 1000;
+
+    /** How often oxygen is measured unasked. Slower than the pulse deliberately -- every
+     *  reading is a turn on a queue that cannot be recovered if it jams. */
+    private int oxygenSeconds() {
+        return prefs(this).getInt(KEY_SPO2, 900);
+    }
+
     private void acquireFixAsync() {
         new Thread(new Runnable() {
             public void run() {
@@ -328,6 +361,7 @@ public class TrackerService extends Service {
         long nextBeat = SystemClock.elapsedRealtime() + HEARTBEAT_MS;
         long nextFix = SystemClock.elapsedRealtime() + cycleSeconds() * 1000L;
         long nextVitals = SystemClock.elapsedRealtime() + vitalsSeconds() * 1000L;
+        long nextOxygen = SystemClock.elapsedRealtime() + oxygenSeconds() * 1000L;
         long nextTemp = SystemClock.elapsedRealtime() + tempSeconds() * 1000L;
         long nextWear = SystemClock.elapsedRealtime() + WEAR_CHECK_MS;
         StringBuilder buf = new StringBuilder();
@@ -372,6 +406,10 @@ public class TrackerService extends Service {
             if (now >= nextVitals) {
                 measureAsync(MEASURE_PULSE);
                 nextVitals = now + vitalsSeconds() * 1000L;
+            }
+            if (now >= nextOxygen) {
+                measureOxygenAsync();
+                nextOxygen = now + oxygenSeconds() * 1000L;
             }
             if (now >= nextTemp) {
                 sendTemperatureAsync();
@@ -447,7 +485,7 @@ public class TrackerService extends Service {
         }
         if ("OX".equals(f.op) || "XZ".equals(f.op)) {   // SPO2# / OXYGEN#
             ackIfCommand(out, f);
-            measureAsync(MEASURE_SPO2);
+            measureOxygenAsync();
             return;
         }
         if ("00".equals(f.op)) {
@@ -910,7 +948,7 @@ public class TrackerService extends Service {
                         sendPressureAsync(hr);
                         return;
                     }
-                    if (type == MEASURE_SPO2) {
+                    if (type == MEASURE_SPO2) {      // never reached; kept for the compiler
                         // There is nothing here to read. gh30x_sensor reports three values and
                         // they are pulse, systolic and diastolic - dumpsys shows
                         // "last=<59.0,120.0,79.0>" and there is no fourth. The vendor gets

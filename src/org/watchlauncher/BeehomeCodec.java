@@ -270,9 +270,10 @@ public final class BeehomeCodec {
         return (type > 0 && type < JK_TYPES.length) ? JK_TYPES[type] : "type " + type;
     }
 
-    /** The two the vitals path is allowed to send. */
+    /** The three the vitals path is allowed to send. */
     private static final int JK_HEART_RATE = 2;
     private static final int JK_TEMPERATURE = 3;
+    private static final int JK_OXYGEN = 4;
 
     /**
      * A vitals reading. Type 3 is temperature in the capture this was built from; the value is
@@ -287,10 +288,10 @@ public final class BeehomeCodec {
      * formatting it faithfully. Sleep readings go through {@link #sleep}.
      */
     public static String health(String isoUtcTime, int type, double value) {
-        if (type != JK_HEART_RATE && type != JK_TEMPERATURE) {
+        if (type != JK_HEART_RATE && type != JK_TEMPERATURE && type != JK_OXYGEN) {
             throw new IllegalArgumentException(
-                    "health() sends heart rate and temperature; " + type + " is "
-                    + jkName(type) + " -- use sleep() for those");
+                    "health() sends heart rate, temperature and blood oxygen; " + type + " is "
+                    + jkName(type) + " -- use sleep() or bloodPressure() for the rest");
         }
         return frame("JK", isoUtcTime, Integer.toString(type),
                 String.format(Locale.US, "%.2f", value));
