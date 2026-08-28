@@ -229,6 +229,20 @@ if javac -nowarn -d "$TD_ALARM" "$HERE/src/org/watchlauncher/AlarmParse.java" 2>
 fi
 rm -rf "$TD_ALARM"
 
+# BP28 arrives a packet at a time and its payload is hex, so the failure that
+# matters is a gap or a truncation being written out as an audio file anyway.
+TD_VOICE=$(mktemp -d)
+if javac -nowarn -d "$TD_VOICE" "$HERE/src/org/watchlauncher/VoiceAssembler.java" 2>/dev/null && javac -nowarn -cp "$TD_VOICE" -d "$TD_VOICE" "$HERE/test/VoiceAssemblerTest.java" 2>/dev/null; then
+    if ! java -cp "$TD_VOICE" VoiceAssemblerTest > "$TD_VOICE/out"; then
+        echo "voice assembler test FAILED:" >&2
+        cat "$TD_VOICE/out" >&2
+        rm -rf "$TD_VOICE"
+        exit 1
+    fi
+    tail -1 "$TD_VOICE/out"
+fi
+rm -rf "$TD_VOICE"
+
 # Where you are on a route and how much of it is left. The fast version is not
 # obviously the same as the slow one - the search starts where it finished
 # last time and looks at a window around that - so it is checked against a

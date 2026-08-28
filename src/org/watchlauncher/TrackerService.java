@@ -8,6 +8,8 @@ import android.os.IBinder;
 import android.os.SystemClock;
 import android.util.Log;
 
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
@@ -82,6 +84,7 @@ public class TrackerService extends Service {
     private static final String KEY_THRESHOLDS = "client_health_thresholds";
     private static final String KEY_BOUND = "client_bound";
     private static final String KEY_QR = "client_qr_url";
+    private static final String KEY_VOICE = "client_voice_file";
     private static final String KEY_CAL_BPH = "client_cal_bph";
     private static final String KEY_CAL_BPL = "client_cal_bpl";
     private static final String KEY_CAL_PPG = "client_cal_ppg";
@@ -170,6 +173,9 @@ public class TrackerService extends Service {
      *  move instead, which says the same thing: the server answered. */
     private final java.util.concurrent.atomic.AtomicInteger jkAcks =
             new java.util.concurrent.atomic.AtomicInteger();
+
+    /** Voice messages arrive a packet at a time, so the assembly outlives one frame. */
+    private final VoiceAssembler voice = new VoiceAssembler();
 
     // ------------------------------------------------------------------ lifecycle
 
@@ -543,19 +549,10 @@ public class TrackerService extends Service {
             return;
         }
         if ("28".equals(f.op)) {
-            // A voice message pushed from the server: handleBP28 saves AMR into
-            // /Android/VoiceCache and broadcasts NewVoice.
-            //
-            // Acknowledged and logged, not assembled. The payload is length-delimited and full
-            // of bytes that are '#' and ',', exactly like the AP42 and AP07 uploads going the
-            // other way, so receiving it needs the read loop to switch out of frame splitting
-            // for a counted number of bytes. Writing that against a guess at the header, with
-            // no captured frame to check against, would produce a file this cannot verify --
-            // and a half-written parser that silently drops audio is worse than one that says
-            // it is not implemented.
+            // A voice message pushed from the server, a packet at a time. VoiceAssembler has
+            // the frame layout and why this needs no change to the read loop.
             ackIfCommand(out, f);
-            Log.w(TAG, "BP28 voice message: not assembled (needs length-delimited receive), "
-                    + f.fields);
+            receiveVoice(f);
             return;
         }
         if ("TF".equals(f.op) || "PH".equals(f.op)) {   // HOURS= / PHONE=
@@ -919,6 +916,58 @@ public class TrackerService extends Service {
             Log.i(TAG, key + " = " + v);
             return;
         }
+    }
+
+    /**
+     * One packet of a pushed voice message, and the file when the last one lands.
+     *
+     * Saved where the vendor saved them, {@code /Android/VoiceCache}, so anything already
+     * looking there still finds them. Stored and announced rather than played: audio from an
+     * unauthenticated link should not start playing on a wrist by itself, for the same reason
+     * pushed text is kept rather than thrown on screen.
+     */
+    private void receiveVoice(BeehomeCodec.Frame f) {
+        VoiceAssembler.Status s = voice.accept(f.fields);
+        if (s.problem != null) Log.w(TAG, s.problem);
+        if (s.accepted && !s.complete) {
+            Log.i(TAG, "BP28 " + s.name + ": packet " + s.packet + " of " + s.packets);
+            return;
+        }
+        if (!s.complete || s.data == null) return;
+
+        try {
+            File dir = new File(android.os.Environment.getExternalStorageDirectory(),
+                    "Android/VoiceCache");
+            if (!dir.isDirectory() && !dir.mkdirs()) {
+                Log.w(TAG, "BP28: cannot make " + dir);
+                return;
+            }
+            File outFile = new File(dir, "receive_" + safeName(s.name) + ".amr");
+            FileOutputStream os = new FileOutputStream(outFile);
+            try {
+                os.write(s.data);
+            } finally {
+                os.close();
+            }
+            prefs(this).edit().putString(KEY_VOICE, outFile.getAbsolutePath()).commit();
+            Log.i(TAG, "BP28 voice message saved: " + outFile + " (" + s.data.length + " bytes)");
+            sendBroadcast(new Intent("org.watchlauncher.NEW_VOICE"));
+        } catch (Throwable t) {
+            Log.w(TAG, "BP28: could not save the voice message", t);
+        }
+    }
+
+    /** The name comes off the wire, so it does not get to choose a path. */
+    private static String safeName(String s) {
+        if (s == null || s.length() == 0) return "voice";
+        StringBuilder b = new StringBuilder();
+        for (int i = 0; i < s.length() && b.length() < 40; i++) {
+            char c = s.charAt(i);
+            boolean ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                    || (c >= '0' && c <= '9') || c == '-' || c == '_';
+            b.append(ok ? c : '_');
+        }
+        return b.length() == 0 ? "voice" : b.toString();
     }
 
     /** Every field that is not addressing, joined and kept verbatim. */
