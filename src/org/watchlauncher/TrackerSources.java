@@ -7,6 +7,8 @@ import android.hardware.Sensor;
 import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
+import android.hardware.TriggerEvent;
+import android.hardware.TriggerEventListener;
 import android.location.Location;
 import android.location.LocationManager;
 import android.net.wifi.ScanResult;
@@ -200,33 +202,16 @@ public final class TrackerSources {
     private static volatile int lastSteps = 0;
 
     public static int steps(Context c) {
-        try {
-            SensorManager sm = (SensorManager) c.getSystemService(Context.SENSOR_SERVICE);
-            if (sm == null) return lastSteps;
-            Sensor s = sm.getDefaultSensor(Sensor.TYPE_STEP_COUNTER);
-            if (s == null) return lastSteps;
-
-            final SensorEventListener l = new SensorEventListener() {
-                public void onSensorChanged(SensorEvent e) {
-                    if (e.values != null && e.values.length > 0) lastSteps = (int) e.values[0];
-                }
-
-                public void onAccuracyChanged(Sensor sensor, int accuracy) {
-                }
-            };
-            sm.registerListener(l, s, SensorManager.SENSOR_DELAY_NORMAL);
-            // Give it a moment to deliver the initial value, then let go: holding the
-            // registration open for a counter that changes on every footstep would wake the
-            // process all day for a number we only send every ten minutes.
-            try {
-                Thread.sleep(600);
-            } catch (InterruptedException ignored) {
-                Thread.currentThread().interrupt();
-            }
-            sm.unregisterListener(l);
-        } catch (Throwable t) {
-            Log.w(TAG, "no step count", t);
+        // TYPE_STEP_COUNTER first, then by name: this watch's counter is a DA217 with a vendor
+        // type number, so getDefaultSensor(TYPE_STEP_COUNTER) returns null on it and the step
+        // field in every heartbeat has been a hardcoded-looking zero ever since.
+        float[] v = oneShot(c, "step", Sensor.TYPE_STEP_COUNTER, 5000);
+        if (v == null) {
+            Log.i(TAG, "no step count; the counter did not answer");
+            return lastSteps;
         }
+        int n = (int) v[0];
+        if (n >= 0) lastSteps = n;
         return lastSteps;
     }
 
@@ -310,44 +295,111 @@ public final class TrackerSources {
      * On-demand like the step counter, so this registers, waits briefly for the first value and
      * lets go again rather than holding a subscription open between the ten-minute reports.
      */
-    public static float temperature(Context c) {
-        try {
-            SensorManager sm = (SensorManager) c.getSystemService(Context.SENSOR_SERVICE);
-            if (sm == null) return lastTemp;
-            Sensor found = null;
-            for (Sensor s : sm.getSensorList(Sensor.TYPE_ALL)) {
-                String n = s.getName();
-                if (n != null && n.toLowerCase(Locale.US).indexOf("temperature") >= 0) {
-                    found = s;
+    /**
+     * One reading from an on-demand sensor.
+     *
+     * <h3>Why registerListener alone is not enough</h3>
+     *
+     * {@code dumpsys sensorservice} on this watch lists five sensors and marks three of them
+     * "on-demand":
+     *
+     * <pre>
+     * gh30x_sensor          | Goodix | 0x08 | on-demand | last=&lt; 59.0,120.0, 79.0&gt;
+     * DA217 Step Counter    | Mira   | 0x0a | on-demand | last=&lt;0&gt;
+     * GXTS02S Temperature   | GXCAS  | 0x09 | on-demand | last=&lt;  0.0,  0.0,  0.0&gt;
+     * </pre>
+     *
+     * On-demand is Android's word for a one-shot trigger sensor. Those deliver through
+     * {@link TriggerEventListener} and rearm after each event; {@code registerListener} on one
+     * produces nothing, ever, and reports no error while doing it. HeartRate has always wired
+     * both, which is why the pulse worked - and why its {@code last=} column has real numbers
+     * in it while the step counter and the thermometer sit at zero.
+     *
+     * So both are wired here too. Whichever the driver honours delivers; the other is inert.
+     *
+     * <h3>And why it polls rather than sleeping once</h3>
+     *
+     * These take seconds, not milliseconds - a thermometer against skin has to settle. A fixed
+     * sleep either gives up too early or wastes the difference on every reading.
+     *
+     * @return the values, or null if nothing arrived inside {@code waitMs}
+     */
+    private static float[] oneShot(Context c, String nameContains, int type, long waitMs) {
+        SensorManager sm = (SensorManager) c.getSystemService(Context.SENSOR_SERVICE);
+        if (sm == null) return null;
+
+        Sensor found = null;
+        if (type > 0) found = sm.getDefaultSensor(type);
+        if (found == null) {
+            // By name, because a vendor that gives its sensor a private type number makes
+            // getDefaultSensor useless -- and both of these do.
+            List<Sensor> all = sm.getSensorList(Sensor.TYPE_ALL);
+            for (int i = 0; all != null && i < all.size(); i++) {
+                String n = all.get(i).getName();
+                if (n != null && n.toLowerCase(Locale.US).indexOf(nameContains) >= 0) {
+                    found = all.get(i);
                     break;
                 }
             }
-            if (found == null) return lastTemp;
-
-            final SensorEventListener l = new SensorEventListener() {
-                public void onSensorChanged(SensorEvent e) {
-                    if (e.values == null || e.values.length == 0) return;
-                    float v = e.values[0];
-                    // Accept either scale: some builds report degrees directly. A body reading
-                    // is never 2771 degrees and never 0.3, so the magnitude disambiguates it
-                    // without having to know which firmware is underneath.
-                    if (v > 100f) v = v / 100f;
-                    if (v > 20f && v < 45f) lastTemp = v;
-                }
-
-                public void onAccuracyChanged(Sensor s, int a) {
-                }
-            };
-            sm.registerListener(l, found, SensorManager.SENSOR_DELAY_NORMAL);
-            try {
-                Thread.sleep(800);
-            } catch (InterruptedException ignored) {
-                Thread.currentThread().interrupt();
-            }
-            sm.unregisterListener(l);
-        } catch (Throwable t) {
-            Log.w(TAG, "no temperature reading", t);
         }
+        if (found == null) return null;
+
+        final float[][] got = new float[1][];
+
+        SensorEventListener listener = new SensorEventListener() {
+            public void onSensorChanged(SensorEvent e) {
+                if (e.values != null && e.values.length > 0 && got[0] == null) {
+                    got[0] = e.values.clone();
+                }
+            }
+
+            public void onAccuracyChanged(Sensor s, int a) {
+            }
+        };
+        TriggerEventListener oneshot = new TriggerEventListener() {
+            public void onTrigger(TriggerEvent e) {
+                if (e.values != null && e.values.length > 0 && got[0] == null) {
+                    got[0] = e.values.clone();
+                }
+            }
+        };
+
+        try {
+            try {
+                sm.registerListener(listener, found, SensorManager.SENSOR_DELAY_NORMAL);
+            } catch (Throwable ignored) { /* the trigger path may still work */ }
+            try {
+                sm.requestTriggerSensor(oneshot, found);
+            } catch (Throwable ignored) { /* not a trigger sensor */ }
+
+            long deadline = System.currentTimeMillis() + waitMs;
+            while (got[0] == null && System.currentTimeMillis() < deadline) {
+                Thread.sleep(100);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (Throwable t) {
+            Log.w(TAG, "sensor " + nameContains + " failed", t);
+        } finally {
+            try { sm.unregisterListener(listener); } catch (Throwable ignored) { }
+            try { sm.cancelTriggerSensor(oneshot, found); } catch (Throwable ignored) { }
+        }
+        return got[0];
+    }
+
+    public static float temperature(Context c) {
+        float[] v = oneShot(c, "temperature", 0, 10000);
+        if (v == null) {
+            Log.i(TAG, "no temperature reading; the sensor did not answer");
+            return lastTemp;
+        }
+        float x = v[0];
+        // Accept either scale: some builds report degrees directly. A body reading is never
+        // 2771 degrees and never 0.3, so the magnitude disambiguates it without having to know
+        // which firmware is underneath.
+        if (x > 100f) x = x / 100f;
+        if (x > 20f && x < 45f) lastTemp = x;
+        else Log.i(TAG, "temperature " + v[0] + " is not a body reading; keeping the last");
         return lastTemp;
     }
 
