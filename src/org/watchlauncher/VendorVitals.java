@@ -311,8 +311,23 @@ public final class VendorVitals {
             // What the driver saw, which on this watch is the only place a pulse or an SpO2
             // actually comes from. Taken whether or not the service answered: its zeros are
             // not a reading, they are the HAL's silence written down.
-            SensorInput.Sample raw = driver == null ? null : driver.finish();
+            boolean driverRan = driver != null;
+            SensorInput.Sample raw = driverRan ? driver.finish() : null;
             driver = null;
+
+            // If the driver watched this window and its reading was refused, that is the answer.
+            //
+            // Falling through to the service here put back exactly the numbers the refusal
+            // exists to remove. On a wrist that sat at 51 to 55 bpm all night, every spike sent
+            // to the server - 77, 73, 70, 66 - came from a window the driver had already thrown
+            // out, and the service supplied a figure of its own because it was asked. Those
+            // figures come from the HAL, which is the component that does not work; a value
+            // from it is not a second opinion, it is the thing being worked around.
+            if (driverRan && raw == null) {
+                Log.w(TAG, "the driver refused this window; sending nothing rather than the "
+                        + "service's own number for it");
+                return null;
+            }
 
             if (acc[0] == null && raw == null) {
                 Log.w(TAG, "no reading in " + (timeoutMs / 1000) + "s, from the service or the "

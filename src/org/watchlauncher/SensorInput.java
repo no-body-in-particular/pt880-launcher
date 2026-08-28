@@ -405,11 +405,38 @@ final class SensorInput {
             // The chip has only just stopped, so this is the last moment it has a pressure to
             // give - and the pressures are the one thing not on the input device at all.
             int[] bp = pressure();
-            if (hr.isEmpty() && spo2.isEmpty() && bp == null) {
+
+            // No SpO2 in range at all means the sensor never got a lock, and the heart rate
+            // from such a window is not a measurement either. Two of them reported 107 and 86
+            // bpm on a sleeping wrist, both with SpO2 0, while every window that did lock sat
+            // at 51 to 53. So the whole reading goes, rather than the good-looking half of it.
+            if (spo2.isEmpty()) {
+                Log.w(TAG, "no lock: " + seen + " samples, no SpO2 in range; discarding the "
+                        + "heart rate from this window too");
+                return null;
+            }
+            if (hr.isEmpty() && bp == null) {
                 Log.w(TAG, "the driver produced no usable sample (" + seen + " raw)");
                 return null;
             }
-            Sample s = new Sample(medianOfTail(hr), medianOfTail(spo2),
+
+            // SpO2 only if it stopped climbing.
+            //
+            // It converges in two stages, and the first one looks exactly like an answer:
+            //
+            //     22, 24, 80, 81, 81, 81, 82, 82, 96, 97, 97
+            //
+            // Five or six samples sitting at 81-82, then a jump to the high nineties. When the
+            // measurement ends inside that false plateau - and the vendor's window is not
+            // always long enough to leave it - the tail median faithfully reports 81, which is
+            // a reading nobody took. A window that is still rising when it ends has not
+            // finished, so the pulse is kept and the percentage is not.
+            int ox = settled(spo2) ? medianOfTail(spo2) : 0;
+            if (ox == 0) {
+                Log.i(TAG, "SpO2 still climbing when the window ended (" + tail(spo2)
+                        + "); reporting the pulse only");
+            }
+            Sample s = new Sample(medianOfTail(hr), ox,
                     bp == null ? 0 : bp[0], bp == null ? 0 : bp[1]);
             Log.i(TAG, "from the driver: " + s + " (" + seen + " samples, "
                     + hr.size() + " usable)");
@@ -423,6 +450,47 @@ final class SensorInput {
      * At least three where there are that many, so the median is over a real spread rather than
      * one packet wearing a median for a hat.
      */
+    /**
+     * Has this series arrived somewhere, or is it still on its way?
+     *
+     * Two conditions, because either alone gets it wrong on this sensor.
+     *
+     * The last two samples must agree. A first attempt compared the third-from-last against the
+     * last, and threw away good readings: the tail 82, 82, 100, 100 has settled at 100, but the
+     * jump falls inside the last three, so it looked like a climb. Comparing the final pair
+     * says settled, and says not-settled for 81, 81, 81, 82.
+     *
+     * And the value has to be one this sensor produces when it has actually converged. Stability
+     * alone is not enough, because the false plateau is stable too - it sits at 81 or 82 for
+     * five or six samples before jumping to the high nineties, so "the last two agree" is as
+     * true there as at the end. Every converged reading observed on this watch landed at 96 to
+     * 100 and every ramp passed through 80 to 82, so a settled-looking value below the floor is
+     * the ramp pretending.
+     *
+     * The cost is real and worth stating: a genuine desaturation into the eighties would be
+     * refused rather than reported. On a watch whose every measurement passes through that same
+     * band on its way up, an 82 cannot be told from the artefact, and reporting it as a reading
+     * would be wrong far more often than right.
+     */
+    private static final int SPO2_SETTLED_MIN = 90;
+
+    private static boolean settled(List<Integer> v) {
+        int n = v.size();
+        if (n < 2) return false;
+        int last = v.get(n - 1).intValue();
+        return last == v.get(n - 2).intValue() && last >= SPO2_SETTLED_MIN;
+    }
+
+    /** The last few values, for saying in a log line why a reading was refused. */
+    private static String tail(List<Integer> v) {
+        StringBuilder b = new StringBuilder();
+        for (int i = Math.max(0, v.size() - 4); i < v.size(); i++) {
+            if (b.length() > 0) b.append(", ");
+            b.append(v.get(i));
+        }
+        return b.toString();
+    }
+
     private static int medianOfTail(List<Integer> v) {
         if (v.isEmpty()) return 0;
         int take = Math.max(3, v.size() / 3);
