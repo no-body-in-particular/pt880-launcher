@@ -154,9 +154,30 @@ public final class BeehomeCodec {
     }
 
     /**
-     * Heartbeat, and in practice also the login: it is the first thing the watch sends on a new
-     * connection and the id in it is how the server decides which device the socket belongs to.
-     * There is no separate {@code AP00} on the wire despite the opcode existing.
+     * The login, and the only frame that tells the server whose socket this is.
+     *
+     * <h3>No comma after the opcode</h3>
+     *
+     * The server splits on {@code ,} starting six characters in and reads the device id from
+     * field 0. {@code IWAP00355932600098953#} puts the id there. {@code IWAP00,355932...} puts
+     * an empty string there, {@code pad_imei} turns that into {@code 0000000000000000}, and the
+     * whole session is filed against a device that does not exist - while the connection works
+     * perfectly and every frame is answered, which is what makes it so hard to see from here.
+     *
+     * SleepUpload has always sent it this way, which is why sleep readings arrived when nothing
+     * else did.
+     */
+    public static String login(String id) {
+        return UP + "00" + id + "#";
+    }
+
+    /**
+     * Heartbeat.
+     *
+     * This was the login too, on the reasoning that it is the first frame out and carries the
+     * id. It is not: {@link #frame} puts a comma straight after the opcode, so the id lands in
+     * field 1 and field 0 - where the server looks - is empty. Sending {@link #login} first is
+     * what identifies the socket; this then keeps it alive.
      */
     public static String heartbeat(String id, int steps, int batteryPercent, int cycleSeconds) {
         return frame("03", id, Integer.toString(steps), "00",

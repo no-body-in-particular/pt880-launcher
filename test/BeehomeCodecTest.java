@@ -54,6 +54,17 @@ public class BeehomeCodecTest {
                         + ",204,08,3270,1561888,#");
 
         // --- heartbeat, which is also the login -----------------------------------
+        // The login puts the id in field 0 -- the text between character six and the first
+        // comma, which is where the server reads it. A comma straight after the opcode leaves
+        // field 0 empty, pad_imei turns that into 0000000000000000, and every frame on the
+        // session is filed against a device that does not exist while the socket works
+        // perfectly. That is the bug this line exists to hold shut.
+        eq("AP00 login has no comma after the opcode", BeehomeCodec.login(id),
+                "IWAP00" + id + "#");
+        check("and the id really is field 0",
+                BeehomeCodec.login(id).substring(6).split(",")[0].replace("#", "").equals(id),
+                BeehomeCodec.login(id).substring(6).split(",")[0]);
+
         eq("AP03 heartbeat", BeehomeCodec.heartbeat(id, 0, 8, 600),
                 "IWAP03," + id + ",0,00,8,600#");
 

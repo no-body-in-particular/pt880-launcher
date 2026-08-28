@@ -31,8 +31,14 @@ import java.net.Socket;
  * The server binds a device to whichever connection last identified as it -- its own log says
  * "command ownership taken by connection &lt;id&gt;". If this ran while the vendor app was still
  * connected the two would take ownership from each other in a loop, and commands would land on
- * whichever happened to hold it. So this is off unless {@link #setEnabled} has been called, and
- * turning it on is the same decision as disabling the vendor app. It is not a default.
+ * whichever happened to hold it. That is why this used to be off until {@link #setEnabled} was
+ * called.
+ *
+ * The vendor app is not on this watch any more -- no package, no apk in
+ * {@code /system/priv-app}, no data directory -- so there is no second client to fight, and
+ * nothing else reports at all. Off by default now means a watch that silently tracks nothing,
+ * which is the worse of the two failures by a long way. So it is on unless it has been turned
+ * off, and there is no longer a switch on the watch to turn it off with.
  *
  * <h3>Protocol</h3>
  *
@@ -256,7 +262,11 @@ public class TrackerService extends Service {
         outStream = out;
         InputStream in = s.getInputStream();
 
-        // The heartbeat is the login: nothing else identifies this socket to the server.
+        // Identify first, and in the one shape the server reads an id out of: no comma after
+        // the opcode, so the id is field 0. Without this the session is filed against
+        // 0000000000000000 and nothing the watch says appears under its own device, though the
+        // socket works and every frame is answered.
+        send(out, BeehomeCodec.login(id));
         send(out, BeehomeCodec.heartbeat(id, TrackerSources.steps(this),
                 TrackerSources.battery(this), cycleSeconds()));
         send(out, BeehomeCodec.version(id, android.os.Build.DISPLAY));
@@ -1396,7 +1406,7 @@ public class TrackerService extends Service {
     }
 
     public static boolean enabled(Context c) {
-        return prefs(c).getBoolean(KEY_ENABLED, false);
+        return prefs(c).getBoolean(KEY_ENABLED, true);
     }
 
     /**
