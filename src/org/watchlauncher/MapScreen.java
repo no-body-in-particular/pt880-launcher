@@ -245,7 +245,11 @@ public class MapScreen extends Screen implements LocationListener {
     public void onHide() {
         ui.removeCallbacks(saySoon);
         soon = null;
-        if (navigating() && backgroundNav()) {
+        // The screen going dark never ends a drive, whatever the switch says. Being covered by
+        // something else is the case the switch is about, and shell.showing() tells them apart:
+        // the shell clears it before hiding anything, so false is the watch asleep and true is
+        // another screen in front of this one.
+        if (navigating() && (!shell.showing() || backgroundNav())) {
             holdForNavigation();
             return;
         }
@@ -272,15 +276,18 @@ public class MapScreen extends Screen implements LocationListener {
     private static final String PREF_BACKGROUND_NAV = "map.backgroundNav";
 
     /**
-     * Whether a route keeps being followed once the map is no longer in front.
+     * Whether a route keeps being followed while another screen or the menu is in front.
      *
-     * On by default, because it is what makes the feature usable on a wrist: the screen goes
-     * off thirty seconds after you last touched it, and guidance that stops there is guidance
-     * you have to hold the screen lit for.
+     * Not whether it survives the screen going off - that it always does, and this switch has
+     * no say in it. The screen goes dark thirty seconds after you last touched it, so guidance
+     * that ends there is guidance you have to hold the screen lit for, which is the most
+     * expensive thing this watch can do and not a setting anybody wants.
      *
-     * Off is a real choice though. It holds a partial wake lock and keeps the receiver running
-     * for as long as the route lasts, and someone who set a destination to look at it rather
-     * than to drive it should not pay for that until they next open the map.
+     * What is a real choice is whether a route goes on running while you are reading a menu or
+     * using something else: that costs a wake lock and the receiver for as long as the route
+     * lasts, and someone who set a destination to look at rather than to drive should not pay
+     * for it. On by default all the same, because leaving the map to check something mid-drive
+     * is the ordinary case.
      */
     boolean backgroundNav() {
         try {
@@ -731,7 +738,7 @@ public class MapScreen extends Screen implements LocationListener {
         // Taking it here instead makes the lock a property of navigating rather than of a
         // lifecycle callback that may not come. Still timed, still renewed per fix, so a bug
         // cannot hold the processor up all night.
-        if (navigating() && backgroundNav()) holdForNavigation();
+        if (navigating() && (!shell.showing() || backgroundNav())) holdForNavigation();
         // The watch's own fixes often arrive without a speed, so take the one
         // worked out from the ground covered instead of showing nothing.
         if (speedMs < 0) speedMs = drive.speedMs();
@@ -1611,7 +1618,10 @@ public class MapScreen extends Screen implements LocationListener {
         // if the processor suspends inside that gap there is no fix to renew on and nothing
         // wakes it. Taking it here means the drive begins with the lock already held, whatever
         // the screen is doing and whichever screen happens to be in front.
-        if (r != null && backgroundNav()) holdForNavigation();
+        // No switch to consult here: a route always survives the screen going off, and that is
+        // the case this guards against - the processor suspending before the first fix has
+        // arrived to take the lock.
+        if (r != null) holdForNavigation();
         updateTurnLine();
         checkRouteCached(r);
         // Last drive's average is not evidence about this one - a route asked

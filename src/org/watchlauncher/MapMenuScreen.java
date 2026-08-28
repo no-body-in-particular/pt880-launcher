@@ -30,6 +30,12 @@ public class MapMenuScreen extends ListScreen {
 
     @Override
     public void onShow() {
+        // super first, and it has to be here: ListScreen.onShow is render(), the one thing that
+        // builds the rows. Overriding it to set the flag without calling up left the list empty
+        // and the screen black until something else happened to redraw it - which on a menu
+        // whose whole job is to be read is the same as not opening at all, and it is where the
+        // background navigation switch lives.
+        super.onShow();
         map.setMenuOpen(true);
     }
 

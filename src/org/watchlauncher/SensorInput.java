@@ -474,11 +474,33 @@ final class SensorInput {
      */
     private static final int SPO2_SETTLED_MIN = 90;
 
+    /** How much the last few samples may disagree and still count as one value. */
+    private static final int SPO2_SPREAD = 3;
+
+    /**
+     * Either of two ways of having arrived, because a wrist at rest and a wrist driving do not
+     * look alike.
+     *
+     * At rest the signal plateaus exactly - 97, 97 or 100, 100 - and requiring the final pair to
+     * match is the cleanest test there is. In a moving car it never matches: the same watch on
+     * the same person gave 82, 93, 90, 91 and 93, 93, 96, 94, jittering by a few points from
+     * one second to the next. Demanding equality refused all of it, and with the service wedged
+     * at the time that left no SpO2 at all.
+     *
+     * So: the final pair agreeing, or the last three sitting within a few points of each other.
+     * The floor applies to both, which is what keeps the false plateau out - 81, 81, 81 is as
+     * steady as any real reading and is still the sensor on its way up.
+     */
     private static boolean settled(List<Integer> v) {
         int n = v.size();
         if (n < 2) return false;
         int last = v.get(n - 1).intValue();
-        return last == v.get(n - 2).intValue() && last >= SPO2_SETTLED_MIN;
+        if (last == v.get(n - 2).intValue() && last >= SPO2_SETTLED_MIN) return true;
+        if (n < 3) return false;
+        int a = v.get(n - 3).intValue(), b = v.get(n - 2).intValue();
+        int hi = Math.max(last, Math.max(a, b));
+        int lo = Math.min(last, Math.min(a, b));
+        return hi - lo <= SPO2_SPREAD && medianOfTail(v) >= SPO2_SETTLED_MIN;
     }
 
     /** The last few values, for saying in a log line why a reading was refused. */
