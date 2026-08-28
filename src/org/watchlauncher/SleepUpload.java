@@ -193,23 +193,9 @@ public class SleepUpload {
         if (nights == null || nights.isEmpty()) return 0;
         if (!cfg.usable()) { problem = "no imei"; return 0; }
 
-        Socket s = null;
+        Link link = null;
         try {
-            s = new Socket();
-            s.connect(new InetSocketAddress(cfg.host(), cfg.port()), CONNECT_MS);
-            s.setSoTimeout(READ_MS);
-
-            OutputStream out = s.getOutputStream();
-            BufferedReader in = new BufferedReader(new InputStreamReader(s.getInputStream()));
-
-            // Identify first. Everything after this is filed against this imei.
-            //
-            // No comma after the opcode. The server splits on ',' starting six
-            // characters in and reads the imei from field 0, so a comma there
-            // makes field 0 empty, pad_imei() turns that into
-            // 0000000000000000, and every reading is filed against a device
-            // that does not exist. The position frames have no comma either.
-            write(out, "IWAP00" + cfg.imei() + "#");
+            link = open(cfg);
 
             for (int i = 0; i < nights.size(); i++) {
                 Night n = nights.get(i);
@@ -217,28 +203,22 @@ public class SleepUpload {
                 if (at == 0) continue;
                 String when = FRAME.format(new Date(at));
 
-                sent += one(out, in, when, TYPE_DEEP, n.deep);
-                sent += one(out, in, when, TYPE_LIGHT, n.light);
-                sent += one(out, in, when, TYPE_SCORE, n.score);
+                sent += one(link, when, TYPE_DEEP, n.deep);
+                sent += one(link, when, TYPE_LIGHT, n.light);
+                sent += one(link, when, TYPE_SCORE, n.score);
             }
             return sent;
         } catch (Exception e) {
             problem = "cannot reach " + cfg.host() + ":" + cfg.port();
             return sent;
         } finally {
-            try { if (s != null) s.close(); } catch (Exception e) { /* ignore */ }
+            if (link != null) link.close();
         }
     }
 
     /** One reading, and its ack. Returns 1 if the server answered. */
-    private int one(OutputStream out, BufferedReader in,
-                    String when, int type, int value) throws Exception {
-        write(out, "IWAPJK," + when + "," + type + "," + value + "#");
-        // The server replies IWBPJK,<type># to each. Reading it keeps the
-        // exchange in step and proves the frame arrived; an unrecognised type
-        // is acked too, which is what makes sending ahead of the patch safe.
-        String reply = read(in);
-        return (reply != null && reply.indexOf("IWBPJK") >= 0) ? 1 : 0;
+    private int one(Link link, String when, int type, int value) throws Exception {
+        return link.one(when, type, value) ? 1 : 0;
     }
 
     private static void write(OutputStream out, String frame) throws Exception {
@@ -275,28 +255,22 @@ public class SleepUpload {
         if (r == null || !r.valid) { problem = "nothing scored"; return 0; }
         if (!cfg.usable()) { problem = "no imei"; return 0; }
 
-        Socket s = null;
+        Link link = null;
         try {
-            s = new Socket();
-            s.connect(new InetSocketAddress(cfg.host(), cfg.port()), CONNECT_MS);
-            s.setSoTimeout(READ_MS);
-            OutputStream out = s.getOutputStream();
-            BufferedReader in = new BufferedReader(new InputStreamReader(s.getInputStream()));
-
-            write(out, "IWAP00" + cfg.imei() + "#");   // no comma; see send()
+            link = open(cfg);
 
             String when = FRAME.format(new Date(r.wakeAt));
-            sent += one(out, in, when, TYPE_TST, r.tstMin);
-            sent += one(out, in, when, TYPE_SPT, r.sptMin);
-            sent += one(out, in, when, TYPE_WASO, r.wasoMin);
-            sent += one(out, in, when, TYPE_EFFICIENCY, r.efficiencyPct);
-            sent += one(out, in, when, TYPE_WAKEUPS, r.wakeups);
+            sent += one(link, when, TYPE_TST, r.tstMin);
+            sent += one(link, when, TYPE_SPT, r.sptMin);
+            sent += one(link, when, TYPE_WASO, r.wasoMin);
+            sent += one(link, when, TYPE_EFFICIENCY, r.efficiencyPct);
+            sent += one(link, when, TYPE_WAKEUPS, r.wakeups);
             return sent;
         } catch (Exception e) {
             problem = "cannot reach " + cfg.host() + ":" + cfg.port();
             return sent;
         } finally {
-            try { if (s != null) s.close(); } catch (Exception e) { /* ignore */ }
+            if (link != null) link.close();
         }
     }
 
@@ -320,65 +294,130 @@ public class SleepUpload {
         if (r == null || !r.valid) { problem = "no rhythm"; return 0; }
         if (!cfg.usable()) { problem = "no imei"; return 0; }
 
-        Socket s = null;
+        Link link = null;
         try {
-            s = new Socket();
-            s.connect(new InetSocketAddress(cfg.host(), cfg.port()), CONNECT_MS);
-            s.setSoTimeout(READ_MS);
-            OutputStream out = s.getOutputStream();
-            BufferedReader in = new BufferedReader(new InputStreamReader(s.getInputStream()));
-
-            write(out, "IWAP00" + cfg.imei() + "#");   // no comma; see send()
+            link = open(cfg);
 
             String when = FRAME.format(new Date(at));
-            sent += one(out, in, when, TYPE_RA, (int) Math.round(r.relativeAmplitude * 100));
-            sent += one(out, in, when, TYPE_L5_START, r.l5StartMin);
-            sent += one(out, in, when, TYPE_M10_START, r.m10StartMin);
+            sent += one(link, when, TYPE_RA, (int) Math.round(r.relativeAmplitude * 100));
+            sent += one(link, when, TYPE_L5_START, r.l5StartMin);
+            sent += one(link, when, TYPE_M10_START, r.m10StartMin);
             if (!Double.isNaN(r.intradailyVariability)) {
-                sent += one(out, in, when, TYPE_IV,
+                sent += one(link, when, TYPE_IV,
                         (int) Math.round(r.intradailyVariability * 100));
             }
             if (!Double.isNaN(r.interdailyStability)) {
-                sent += one(out, in, when, TYPE_IS,
+                sent += one(link, when, TYPE_IS,
                         (int) Math.round(r.interdailyStability * 100));
             }
-            if (sri >= 0) sent += one(out, in, when, TYPE_SRI, sri);
+            if (sri >= 0) sent += one(link, when, TYPE_SRI, sri);
             return sent;
         } catch (Exception e) {
             problem = "cannot reach " + cfg.host() + ":" + cfg.port();
             return sent;
         } finally {
-            try { if (s != null) s.close(); } catch (Exception e) { /* ignore */ }
+            if (link != null) link.close();
         }
     }
 
     /**
-     * One reading, on its own connection. Used for the live sleeping flag and
-     * the running day total, which are single numbers sent as they change
-     * rather than a batch at the end of a night.
+     * One reading. Used for the live sleeping flag and the running day total, which are
+     * single numbers sent as they change rather than a batch at the end of a night.
      */
     public boolean sendOne(TrackerConfig cfg, int type, int value, long at) {
         problem = null;
         sent = 0;
         if (!cfg.usable()) { problem = "no imei"; return false; }
 
-        Socket s = null;
+        Link link = null;
         try {
-            s = new Socket();
-            s.connect(new InetSocketAddress(cfg.host(), cfg.port()), CONNECT_MS);
-            s.setSoTimeout(READ_MS);
-            OutputStream out = s.getOutputStream();
-            BufferedReader in = new BufferedReader(new InputStreamReader(s.getInputStream()));
-
-            write(out, "IWAP00" + cfg.imei() + "#");   // no comma; see send()
-            sent = one(out, in, FRAME.format(new Date(at)), type, value);
+            link = open(cfg);
+            sent = one(link, FRAME.format(new Date(at)), type, value);
             return sent > 0;
         } catch (Exception e) {
             problem = "cannot reach " + cfg.host() + ":" + cfg.port();
             return false;
         } finally {
-            try { if (s != null) s.close(); } catch (Exception e) { /* ignore */ }
+            if (link != null) link.close();
         }
+    }
+
+    /**
+     * Where the readings go.
+     *
+     * Sleep is uploaded on a schedule of its own, so the tracker client may or may not be
+     * connected when it fires. When it is, its socket is the one to use: the server takes
+     * command ownership per connection, and opening a second session with the same imei while
+     * the first is still up leaves it holding two connections for one watch and splits that
+     * watch's log across both. When it is not - the client disabled, or between reconnects -
+     * this opens its own, exactly as it always did.
+     */
+    private interface Link {
+        /** One reading. True if the server acknowledged it. */
+        boolean one(String when, int type, int value) throws Exception;
+
+        void close();
+    }
+
+    /** The tracker's own connection, already open and already identified. */
+    private static final class LiveLink implements Link {
+        public boolean one(String when, int type, int value) throws Exception {
+            int before = TrackerService.jkAckCount();
+            if (before < 0) return false;
+            if (!TrackerService.offer("IWAPJK," + when + "," + type + "," + value + "#")) {
+                return false;
+            }
+            // The reply lands in the tracker's read loop, not here, so wait for its count of
+            // BPJK to move rather than reading a socket this does not own.
+            long deadline = System.currentTimeMillis() + READ_MS;
+            while (System.currentTimeMillis() < deadline) {
+                if (TrackerService.jkAckCount() != before) return true;
+                Thread.sleep(50);
+            }
+            return false;
+        }
+
+        public void close() { }
+    }
+
+    /** A session of our own, for when the tracker client is not connected. */
+    private static final class SocketLink implements Link {
+        private final Socket s;
+        private final OutputStream out;
+        private final BufferedReader in;
+
+        SocketLink(TrackerConfig cfg) throws Exception {
+            s = new Socket();
+            s.connect(new InetSocketAddress(cfg.host(), cfg.port()), CONNECT_MS);
+            s.setSoTimeout(READ_MS);
+            out = s.getOutputStream();
+            in = new BufferedReader(new InputStreamReader(s.getInputStream()));
+
+            // Identify first. Everything after this is filed against this imei.
+            //
+            // No comma after the opcode. The server splits on ',' starting six characters in
+            // and reads the imei from field 0, so a comma there makes field 0 empty, pad_imei()
+            // turns that into 0000000000000000, and every reading is filed against a device
+            // that does not exist. The position frames have no comma either.
+            write(out, "IWAP00" + cfg.imei() + "#");
+        }
+
+        public boolean one(String when, int type, int value) throws Exception {
+            write(out, "IWAPJK," + when + "," + type + "," + value + "#");
+            // The server replies IWBPJK,<type># to each. Reading it keeps the exchange in step
+            // and proves the frame arrived; an unrecognised type is acked too, which is what
+            // makes sending ahead of the server-side patch safe.
+            String reply = read(in);
+            return reply != null && reply.indexOf("IWBPJK") >= 0;
+        }
+
+        public void close() {
+            try { s.close(); } catch (Exception e) { /* ignore */ }
+        }
+    }
+
+    private Link open(TrackerConfig cfg) throws Exception {
+        return TrackerService.connected() ? (Link) new LiveLink() : (Link) new SocketLink(cfg);
     }
 
     /** Remember the newest night sent, so a refresh does not resend it. */

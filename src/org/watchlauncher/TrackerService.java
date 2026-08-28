@@ -155,6 +155,14 @@ public class TrackerService extends Service {
      *  service is not mistaken for a live one. */
     private static volatile TrackerService live;
 
+    /** BPJK replies seen on the live connection.
+     *
+     *  The socket's reader belongs to this loop, so anything else that sends a JK reading on it
+     *  cannot read its own acknowledgement. Counting them here lets that caller watch the count
+     *  move instead, which says the same thing: the server answered. */
+    private final java.util.concurrent.atomic.AtomicInteger jkAcks =
+            new java.util.concurrent.atomic.AtomicInteger();
+
     // ------------------------------------------------------------------ lifecycle
 
     @Override
@@ -327,6 +335,7 @@ public class TrackerService extends Service {
     private void handle(OutputStream out, String id, BeehomeCodec.Frame f) throws Exception {
         if (f == null) return;
         Log.i(TAG, "<- " + f);
+        if ("JK".equals(f.op)) jkAcks.incrementAndGet();
 
         if ("18".equals(f.op)) {                    // reboot
             ackIfCommand(out, f);
@@ -1181,6 +1190,50 @@ public class TrackerService extends Service {
         prefs(c).edit().putBoolean(KEY_ENABLED, on).commit();
         Intent i = new Intent(c, TrackerService.class);
         if (on) c.startService(i); else c.stopService(i);
+    }
+
+    /**
+     * Is there a live connection to the server right now?
+     *
+     * For callers that have readings of their own to send and a transport of their own to fall
+     * back on. Racy by nature - the socket can drop between this and {@link #offer} - which is
+     * why offer reports its own failure rather than trusting an earlier answer to this.
+     */
+    public static boolean connected() {
+        TrackerService t = live;
+        return t != null && t.outStream != null;
+    }
+
+    /**
+     * Send one frame on the tracker's own connection, if it has one.
+     *
+     * The alternative is a second TCP session to the same host and port, and the server takes
+     * command ownership per connection: two sessions open at once with the same device id
+     * leaves it holding two of them for one watch, and splits that watch's log across both.
+     * When the client is already connected and identified, its socket is the right one to use,
+     * and no IWAP00 is needed on top - the heartbeat that opened it is what identified it.
+     *
+     * @return false if there is no live connection, or the write failed. The caller still has
+     *         its own transport and should use it rather than dropping the reading.
+     */
+    public static boolean offer(String frame) {
+        TrackerService t = live;
+        if (t == null) return false;
+        OutputStream o = t.outStream;
+        if (o == null) return false;
+        try {
+            t.send(o, frame);
+            return true;
+        } catch (Throwable e) {
+            Log.w(TAG, "could not send " + frame + " on the live connection", e);
+            return false;
+        }
+    }
+
+    /** How many BPJK replies the live connection has seen, or -1 if there is none. */
+    public static int jkAckCount() {
+        TrackerService t = live;
+        return t == null ? -1 : t.jkAcks.get();
     }
 
     static String host(Context c, TrackerConfig cfg) {
