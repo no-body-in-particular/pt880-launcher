@@ -91,7 +91,11 @@ public class RouteGeomTest {
         double[][] pts = new double[N * 2][];
         for (int i = 0; i < N; i++) pts[i] = new double[]{ 52.0 + i * 0.0005, 5.0 };
         for (int i = 0; i < N; i++) {
-            pts[N + i] = new double[]{ 52.0 + (N - 1 - i) * 0.0005, 4.5000000 };
+            // 0.000874 degrees of longitude is 60 metres at this latitude, which is what the
+            // comment above promises and what makes this test worth running: near enough that
+            // a whole-line nearest-point search picks the wrong leg, far enough that a window
+            // anchored on the last position does not.
+            pts[N + i] = new double[]{ 52.0 + (N - 1 - i) * 0.0005, 5.000874 };
         }
         Route r = build(pts);
 

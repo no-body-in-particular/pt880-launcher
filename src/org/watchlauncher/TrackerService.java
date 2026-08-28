@@ -180,6 +180,15 @@ public class TrackerService extends Service {
     /** Consecutive measurements that came back with nothing. */
     private volatile int vitalsMisses;
 
+    /** When a measurement last produced something, which is also proof of a wrist. */
+    private volatile long lastVitalsOkAt;
+
+    /** A reading this recent means a wrist, for the wear check. */
+    private static final long WORN_BY_PULSE_MS = 10 * 60 * 1000;
+
+    /** Misses in a row before the sensor service is assumed wedged rather than unlucky. */
+    private static final int WEDGE_MISSES = 2;
+
     /** Set while a measurement is in flight, so two cannot queue behind each other. */
     private volatile boolean measuring;
 
@@ -263,9 +272,11 @@ public class TrackerService extends Service {
                         Log.w(TAG, "no vitals measurement (" + vitalsMisses + " in a row); "
                                 + "sending nothing rather than the cached value gh30x would "
                                 + "hand back, and sitting out " + skipCycles() + " cycles");
+                        if (vitalsMisses >= WEDGE_MISSES) recoverSensorService();
                         return;
                     }
                     vitalsMisses = 0;
+                    lastVitalsOkAt = System.currentTimeMillis();
                     String when = TrackerSources.stamp();
                     if (r.heartRate > 0) {
                         int bpm = calibratedPulse(r.heartRate);
@@ -299,6 +310,33 @@ public class TrackerService extends Service {
      *  reading is a turn on a queue that cannot be recovered if it jams. */
     private int oxygenSeconds() {
         return prefs(this).getInt(KEY_SPO2, 900);
+    }
+
+    /**
+     * Restart com.ic.work, which is the only way its work queue is ever cleared.
+     *
+     * It keeps one queue for both sensors with no timeout anywhere, so a measurement whose
+     * callback never arrives holds it for ever: every later request hangs, the optical sensor
+     * stays powered, and nothing comes back. protocol/README.md section 10 has the derivation,
+     * and its own conclusion is that it stays stuck "until the process restarts".
+     *
+     * So restart it. Done by hand once to confirm - force-stop, and the next measurement came
+     * back immediately - and there is no reason a watch should need a person for that. It is a
+     * system app other things bind on demand, so it returns when it is next wanted.
+     *
+     * Only after two misses in a row, so one wrist that would not give up a reading does not
+     * cost a process restart.
+     */
+    private void recoverSensorService() {
+        Log.w(TAG, "the sensor service looks wedged; restarting com.ic.work");
+        if (shell("am force-stop com.ic.work")) {
+            vitalsMisses = 0;
+            vitalsSkipped = 0;
+            lastMeasureAt = 0;
+            Log.i(TAG, "com.ic.work restarted; the next cycle will measure");
+        } else {
+            Log.w(TAG, "could not restart com.ic.work; needs the root helper");
+        }
     }
 
     private void acquireFixAsync() {
@@ -1383,28 +1421,20 @@ public class TrackerService extends Service {
                         // plausible. Running the optical sensor every five minutes to confirm
                         // something the accelerometer already settled would cost battery for
                         // nothing.
-                        HeartRate hr = new HeartRate(TrackerService.this, null);
-                        if (hr.available()) {
-                            try {
-                                hr.start();
-                                for (int i = 0; i < 30 && hr.bpm() <= 0; i++) Thread.sleep(500);
-                                pulse = hr.bpm() > 0;
-                            } finally {
-                                // Always, and this is the whole bug: HeartRate.stop() used to
-                                // be reached only from take(), when a reading arrived. The
-                                // cached value arrived instantly, so it always was. Rejecting
-                                // that cache as stale - correctly - removed the only path that
-                                // ever unregistered the sensor, so every wear check left a
-                                // listener holding the LED on for good. dumpsys showed the
-                                // connections still there with com.ic.work force-stopped,
-                                // which is what pinned it on us rather than the firmware.
-                                hr.stop();
-                            }
-                        } else {
-                            // No sensor to disagree with the accelerometer, so do not let a
-                            // missing one manufacture a removal.
-                            pulse = true;
-                        }
+                        // From the measurement this client already takes, rather than a
+                        // second grab at the optical sensor.
+                        //
+                        // The probe that was here read gh30x directly, and gh30x is a mirror of
+                        // the vendor service's last result - so with its cached value correctly
+                        // rejected as stale it always came back empty, and a still wrist was
+                        // reported as a removal. Worse, registering on that sensor every five
+                        // minutes collides with the measurement the vendor service is running,
+                        // which is a good way to wedge a queue that has no timeout.
+                        //
+                        // A reading that arrived recently is proof of a wrist, and costs
+                        // nothing to consult.
+                        long sincePulse = System.currentTimeMillis() - lastVitalsOkAt;
+                        pulse = lastVitalsOkAt > 0 && sincePulse < WORN_BY_PULSE_MS;
                     }
 
                     boolean worn = moving || pulse;
