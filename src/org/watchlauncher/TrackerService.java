@@ -189,7 +189,25 @@ public class TrackerService extends Service {
     /** Misses in a row before the sensor service is assumed wedged rather than unlucky. */
     private static final int WEDGE_MISSES = 2;
 
-    /** Set while a measurement is in flight, so two cannot queue behind each other. */
+    /**
+     * Set while any vendor measurement is in flight, so two cannot overlap.
+     *
+     * Heart rate and temperature are separate binder calls on this side but the same
+     * single-worker queue inside com.ic.work, and the three timers that drive them - vitals,
+     * oxygen and temperature - are all seeded from the same instant, so they come around
+     * together and fire in one pass of the loop. The log caught them 7 ms apart: temperature
+     * admitted, heart rate arriving to find "is running == true".
+     *
+     * A stock watch survived that because the service's own mutex refused the second request.
+     * tools/patch_ic_work.py removes that mutex, because with no timeout behind it one stuck
+     * measurement deadlocked the queue for ever - so the second request now overlaps the first
+     * rather than being refused, and the completion path ends in "disable ppg", which means
+     * whichever finishes first powers the sensor down underneath the other. Taking the
+     * vendor's lock away is only defensible if this side holds one, so this side holds one.
+     *
+     * Claimed from the loop thread, which is the only thread that starts a measurement, so a
+     * plain check-and-set is enough; it is cleared from the worker that finishes.
+     */
     private volatile boolean measuring;
 
     /**
@@ -1014,13 +1032,29 @@ public class TrackerService extends Service {
         return prefs(this).getInt(KEY_TEMP, 600);
     }
 
-    /** Read the temperature off the loop thread and report it. */
+    /**
+     * Read the temperature off the loop thread and report it.
+     *
+     * Behind the same gate as the vitals, for the reason {@link #measuring} gives: one vendor
+     * work queue, and no lock left inside it. Dropped rather than deferred when the sensor is
+     * busy - the period is ten minutes and the next round is close enough that carrying a
+     * pending flag around would be more machinery than the problem deserves.
+     */
     private void sendTemperatureAsync() {
+        if (measuring) {
+            Log.i(TAG, "a measurement is running; the temperature waits for the next round");
+            return;
+        }
+        measuring = true;
         new Thread(new Runnable() {
             public void run() {
-                float t = TrackerSources.temperature(TrackerService.this);
-                if (t > 0) {
-                    sendAsync(BeehomeCodec.health(TrackerSources.stamp(), JK_TEMPERATURE, t));
+                try {
+                    float t = TrackerSources.temperature(TrackerService.this);
+                    if (t > 0) {
+                        sendAsync(BeehomeCodec.health(TrackerSources.stamp(), JK_TEMPERATURE, t));
+                    }
+                } finally {
+                    measuring = false;
                 }
             }
         }, "temp").start();
