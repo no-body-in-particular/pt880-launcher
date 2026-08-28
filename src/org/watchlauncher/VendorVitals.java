@@ -509,23 +509,55 @@ public final class VendorVitals {
     }
 
     /** The HeartRate parcel: a null flag, then oxygen, from, heartRate, bloodHeight, bloodLow. */
+    /**
+     * The HeartRate parcel, as the service actually fills it.
+     *
+     * A null flag, then five ints. Four consecutive live ones, from a wrist:
+     *
+     * <pre>
+     * 1 0 115 76 71 98
+     * 1 0 114 75 75 97
+     * 1 0 118 78 74 98
+     * 1 0 111 73 81 99
+     *   |  |  |  |  `- 97-99, a blood oxygen saturation
+     *   |  |  |  `---- 71-81, a resting pulse
+     *   |  |  `------- 73-78, a diastolic
+     *   |  `---------- 111-118, a systolic
+     *   `------------- 0 every time: the argument passed to getHeartRateInfo, echoed
+     * </pre>
+     *
+     * So the order is {@code from, systolic, diastolic, heartRate, oxygen} - not the
+     * "oxygen, from, heartRate, bloodHeight, bloodLow" the interface was written up as.
+     *
+     * The echo is what settles it. Every other reading of these five is defensible on one
+     * sample; only this one has field 0 matching what was sent on all of them, and only this
+     * one makes each remaining field a plausible value for what it would then be. Read the
+     * documented way, the pulse comes out of the diastolic slot - which is why the server's
+     * heart rate chart has been tracking a diastolic, and why the pressures, read from the
+     * pulse and oxygen slots, came out inverted and were thrown away by the sanity check.
+     *
+     * Ranges are still checked per field. A wrist that gives up half a measurement is normal
+     * and the zeroes are "not measured", not zero.
+     */
     static Reading parse(Parcel p) {
         try {
             if (p.readInt() == 0) return null;          // the object was null
-            Reading r = new Reading();
-            r.oxygen = p.readInt();
+
             p.readInt();                                // from, echoed back
-            r.heartRate = p.readInt();
-            r.systolic = p.readInt();
-            r.diastolic = p.readInt();
-            // Each field stands on its own: a wrist can give a good pulse and no oxygen, and
-            // throwing the reading away because one number is out of range loses the rest.
-            if (r.oxygen < 50 || r.oxygen > 100) r.oxygen = 0;
-            if (r.heartRate < 25 || r.heartRate > 250) r.heartRate = 0;
-            if (r.systolic < 60 || r.systolic > 260) r.systolic = 0;
-            if (r.diastolic < 30 || r.diastolic > 200) r.diastolic = 0;
-            if (r.diastolic >= r.systolic) { r.systolic = 0; r.diastolic = 0; }
-            return (r.oxygen > 0 || r.heartRate > 0) ? r : null;
+            int sys = p.readInt();
+            int dia = p.readInt();
+            int hr = p.readInt();
+            int spo2 = p.readInt();
+
+            Reading r = new Reading();
+            if (hr >= 25 && hr <= 250) r.heartRate = hr;
+            if (spo2 >= 50 && spo2 <= 100) r.oxygen = spo2;
+            if (sys >= 60 && sys <= 260 && dia >= 30 && dia <= 200 && dia < sys) {
+                r.systolic = sys;
+                r.diastolic = dia;
+            }
+
+            return (r.oxygen > 0 || r.heartRate > 0 || r.systolic > 0) ? r : null;
         } catch (Throwable t) {
             Log.w(TAG, "could not read the reading", t);
             return null;
