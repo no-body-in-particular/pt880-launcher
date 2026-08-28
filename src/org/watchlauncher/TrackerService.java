@@ -201,12 +201,25 @@ public class TrackerService extends Service {
 
     private volatile int vitalsSkipped;
 
+    /** The cycle's own measurement, which the backoff is allowed to skip. */
     private void measureVitalsAsync() {
+        measureVitalsAsync(false);
+    }
+
+    /**
+     * @param asked true when the server sent XL, XY, OX or XZ.
+     *
+     * A request is answered whatever the backoff has wound itself out to. The backoff is there
+     * to stop this taking a turn on the sensor queue every three minutes for a watch on a
+     * table; it is not there to ignore somebody pressing a button on the other end, and a
+     * command that silently does nothing is worse than one that tries and reports nothing.
+     */
+    private void measureVitalsAsync(boolean asked) {
         if (measuring) {
             Log.i(TAG, "a measurement is already running; not starting another");
             return;
         }
-        if (vitalsSkipped < skipCycles()) {
+        if (!asked && vitalsSkipped < skipCycles()) {
             vitalsSkipped++;
             return;
         }
@@ -538,17 +551,17 @@ public class TrackerService extends Service {
             // nothing else, which is why it is the most frequent downlink in the logs and never
             // produced a reading: the server kept asking.
             ackIfCommand(out, f);
-            measureVitalsAsync();
+            measureVitalsAsync(true);
             return;
         }
         if ("XY".equals(f.op)) {                    // BLOODPRESSURE#
             ackIfCommand(out, f);
-            measureVitalsAsync();
+            measureVitalsAsync(true);
             return;
         }
         if ("OX".equals(f.op) || "XZ".equals(f.op)) {   // SPO2# / OXYGEN#
             ackIfCommand(out, f);
-            measureVitalsAsync();
+            measureVitalsAsync(true);
             return;
         }
         if ("00".equals(f.op)) {
@@ -1398,6 +1411,7 @@ public class TrackerService extends Service {
      * far more often than a watch is taken off, and an in-memory flag would report "put on"
      * every time the process came back.
      */
+    /** Wear is checked this often, which is also how soon a measurement follows putting it on. */
     private void checkWornAsync(final String id) {
         new Thread(new Runnable() {
             public void run() {
@@ -1425,6 +1439,22 @@ public class TrackerService extends Service {
 
                     boolean worn = moving || pulse;
                     boolean was = prefs(TrackerService.this).getBoolean(KEY_WORN, true);
+
+                    // Put back on: measure now, and forget the backoff.
+                    //
+                    // The backoff exists because a measurement off the wrist finds nothing,
+                    // holds the sensor for the full timeout and takes a turn on a queue this
+                    // firmware cannot recover if it jams - so misses double the wait, up to
+                    // eight cycles. That is right while it sits on a table and wrong the
+                    // moment it goes on a wrist: twenty-four minutes of no readings after
+                    // putting a watch on is exactly when somebody is looking for one.
+                    if (worn && !was) {
+                        vitalsMisses = 0;
+                        vitalsSkipped = 0;
+                        Log.i(TAG, "worn again; measuring now rather than sitting out the "
+                                + "backoff");
+                        measureVitalsAsync();
+                    }
                     Log.i(TAG, "wear check: motion=" + motion + " moving=" + moving
                             + " pulse=" + pulse + " -> " + (worn ? "worn" : "removed"));
                     if (worn == was) return;
