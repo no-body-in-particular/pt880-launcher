@@ -162,6 +162,10 @@
             </intent-filter>
         </receiver>
 
+        <!-- The alarm clocks the server sets, one action per slot so a single
+             one can be replaced or cancelled without touching the others. -->
+        <receiver android:name=".AlarmRing" android:exported="false" />
+
         <!-- Priority above the stock music app, so the headphones' own
              buttons reach this player rather than com.android.music. -->
         <receiver android:name=".MediaButtonReceiver">

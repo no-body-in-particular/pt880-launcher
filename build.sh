@@ -214,6 +214,21 @@ if javac -nowarn -d "$TD4" "$HERE/src/org/watchlauncher/BeehomeCodec.java" 2>/de
 fi
 rm -rf "$TD4"
 
+# The alarm parser reads a format nobody has captured, so what is actually being
+# checked is that it refuses what it does not understand rather than inventing a
+# time -- a watch that rings at the wrong hour is worse than one that does not.
+TD_ALARM=$(mktemp -d)
+if javac -nowarn -d "$TD_ALARM" "$HERE/src/org/watchlauncher/AlarmParse.java" 2>/dev/null && javac -nowarn -cp "$TD_ALARM" -d "$TD_ALARM" "$HERE/test/AlarmParseTest.java" 2>/dev/null; then
+    if ! java -cp "$TD_ALARM" AlarmParseTest > "$TD_ALARM/out"; then
+        echo "alarm parse test FAILED:" >&2
+        cat "$TD_ALARM/out" >&2
+        rm -rf "$TD_ALARM"
+        exit 1
+    fi
+    tail -1 "$TD_ALARM/out"
+fi
+rm -rf "$TD_ALARM"
+
 # Where you are on a route and how much of it is left. The fast version is not
 # obviously the same as the slow one - the search starts where it finished
 # last time and looks at a window around that - so it is checked against a

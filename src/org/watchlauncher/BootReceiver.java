@@ -23,6 +23,10 @@ public class BootReceiver extends BroadcastReceiver {
         // if it is missing here the watch simply never reports again after a reboot.
         TrackerService.start(c);
 
+        // AlarmManager forgets everything across a reboot, and replacing the package cancels
+        // every alarm it owned, so the server's alarm clocks need putting back either way.
+        AlarmClock.rearm(c);
+
         if (!SleepLog.enabled(c)) return;
 
         boolean rebooted = in == null || in.getAction() == null

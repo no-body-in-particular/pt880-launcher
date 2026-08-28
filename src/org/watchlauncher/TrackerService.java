@@ -78,6 +78,14 @@ public class TrackerService extends Service {
     private static final float STILL_THRESHOLD = 0.12f;
     private static final String KEY_SOS = "client_sos_numbers";
     private static final String KEY_WHITELIST = "client_whitelist";
+    private static final String KEY_WEATHER = "client_weather";
+    private static final String KEY_THRESHOLDS = "client_health_thresholds";
+    private static final String KEY_BOUND = "client_bound";
+    private static final String KEY_QR = "client_qr_url";
+    private static final String KEY_CAL_BPH = "client_cal_bph";
+    private static final String KEY_CAL_BPL = "client_cal_bpl";
+    private static final String KEY_CAL_PPG = "client_cal_ppg";
+    private static final String KEY_CAL_SPO2 = "client_cal_spo2";
     private static final String KEY_ALLOW_WIPE = "client_allow_factory_reset";
 
     /**
@@ -453,6 +461,98 @@ public class TrackerService extends Service {
             ackIfCommand(out, f);
             return;
         }
+        if ("U8".equals(f.op)) {
+            // The text tunnel, and the other way the server asks for a picture. handleBPU8
+            // carries the literal ">*photo@1*<" alongside "received Txt Msg111", so one frame
+            // does both jobs depending on its payload -- the same shape as BPSM and @monitor@.
+            ackIfCommand(out, f);
+            for (int i = 0; i < f.fields.size(); i++) {
+                if (f.fields.get(i).indexOf("photo") >= 0) {
+                    beginPhoto();
+                    return;
+                }
+            }
+            storeMessage(f);
+            return;
+        }
+        if ("TQ".equals(f.op)) {
+            // Weather. handleBPTQ formats it as text, id, current, maximum and minimum
+            // temperature and broadcasts com.ic.action_weather_recveived.
+            //
+            // Stored whole rather than split into named fields: the vendor's handler logs the
+            // labels but not which comma each sits behind, and no real frame has been captured.
+            // A screen can show the line; inventing a field order would make it wrong in a way
+            // that reads as right.
+            storeJoined(KEY_WEATHER, f);
+            ackIfCommand(out, f);
+            return;
+        }
+        if ("89".equals(f.op)) {
+            // Heart-rate and blood-pressure alarm thresholds. Kept, not acted on: this client
+            // has nowhere to send an alarm - there is no threshold-breach opcode in the set it
+            // speaks - so the server, which has the readings anyway, is the right place to
+            // decide one was crossed.
+            storeJoined(KEY_THRESHOLDS, f);
+            ackIfCommand(out, f);
+            return;
+        }
+        if ("X1".equals(f.op) || "JZ".equals(f.op)) {
+            // Sensor calibration. handleBPX1 reads BPH, BPL, PPG and Sp02; handleBPJZ reads
+            // BPH, BPL, Age and Sex, which is the blood-pressure calibration command.
+            //
+            // Taken as offsets, which is what the vendor does with them (setBPHAdjust and the
+            // rest). Applied when a reading is sent rather than stored into it, so the raw
+            // number stays raw and a bad calibration can be undone by sending another.
+            storeCalibration(f);
+            ackIfCommand(out, f);
+            return;
+        }
+        if ("68".equals(f.op)) {
+            // Binding state: "bound successfully" or "not activated or unbound".
+            storeJoined(KEY_BOUND, f);
+            ackIfCommand(out, f);
+            return;
+        }
+        if ("87".equals(f.op)) {
+            // The QR code URL the vendor wrote to persist.sys.qrUriFile -- the pairing link an
+            // app scans. Kept as a string; nothing here needs a system property for it.
+            storeJoined(KEY_QR, f);
+            ackIfCommand(out, f);
+            return;
+        }
+        if ("75".equals(f.op) || "85".equals(f.op) || "S4".equals(f.op)) {
+            // The three ways the server sets alarm clocks. AlarmClock reads what it can
+            // recognise out of the frame and schedules only what parsed cleanly; see the note
+            // there about why it does not assume a field order.
+            ackIfCommand(out, f);
+            AlarmParse.Result r = AlarmParse.parse(f.fields, f.token());
+            for (int i = 0; i < r.unparsed.size(); i++) {
+                Log.w(TAG, "BP" + f.op + ": no time understood in \"" + r.unparsed.get(i)
+                        + "\"; that alarm is not set");
+            }
+            if (r.alarms.isEmpty()) {
+                Log.w(TAG, "BP" + f.op + ": nothing to set from " + f.fields);
+                return;
+            }
+            AlarmClock.apply(this, r.alarms);
+            return;
+        }
+        if ("28".equals(f.op)) {
+            // A voice message pushed from the server: handleBP28 saves AMR into
+            // /Android/VoiceCache and broadcasts NewVoice.
+            //
+            // Acknowledged and logged, not assembled. The payload is length-delimited and full
+            // of bytes that are '#' and ',', exactly like the AP42 and AP07 uploads going the
+            // other way, so receiving it needs the read loop to switch out of frame splitting
+            // for a counted number of bytes. Writing that against a guess at the header, with
+            // no captured frame to check against, would produce a file this cannot verify --
+            // and a half-written parser that silently drops audio is worse than one that says
+            // it is not implemented.
+            ackIfCommand(out, f);
+            Log.w(TAG, "BP28 voice message: not assembled (needs length-delimited receive), "
+                    + f.fields);
+            return;
+        }
         if ("TF".equals(f.op) || "PH".equals(f.op)) {   // HOURS= / PHONE=
             storeSetting("TF".equals(f.op) ? KEY_HOURS : KEY_PHONE, f);
             ackIfCommand(out, f);
@@ -608,7 +708,7 @@ public class TrackerService extends Service {
             // An optical reading needs several seconds of clean signal; past that it is not
             // coming, and holding the LED against the skin for longer only costs battery.
             for (int i = 0; i < 40 && hr.bpm() <= 0; i++) Thread.sleep(500);
-            int bpm = hr.bpm();
+            int bpm = calibratedPulse(hr.bpm());
             if (bpm > 0) {
                 send(out, BeehomeCodec.health(TrackerSources.stamp(), JK_PULSE, bpm));
                 TrackerLog.recordPulse(this, bpm, System.currentTimeMillis());
@@ -736,7 +836,8 @@ public class TrackerService extends Service {
                     for (int i = 0; i < 40 && hr.bpm() <= 0; i++) Thread.sleep(500);
 
                     if (type == MEASURE_BP) {
-                        int sys = hr.systolic(), dia = hr.diastolic();
+                        int sys = hr.systolic() + prefs(TrackerService.this).getInt(KEY_CAL_BPH, 0);
+                        int dia = hr.diastolic() + prefs(TrackerService.this).getInt(KEY_CAL_BPL, 0);
                         if (sys > 0 && dia > 0) {
                             sendAsync(BeehomeCodec.frame("JZ", TrackerSources.stamp(),
                                     Integer.toString(sys), Integer.toString(dia)));
@@ -760,7 +861,7 @@ public class TrackerService extends Service {
                                 + "so nothing is sent");
                         return;
                     }
-                    int bpm = hr.bpm();
+                    int bpm = calibratedPulse(hr.bpm());
                     if (bpm > 0) {
                         sendAsync(BeehomeCodec.health(TrackerSources.stamp(), JK_PULSE, bpm));
                         TrackerLog.recordPulse(TrackerService.this, bpm,
@@ -813,6 +914,74 @@ public class TrackerService extends Service {
             Log.i(TAG, key + " = " + v);
             return;
         }
+    }
+
+    /** Every field that is not addressing, joined and kept verbatim. */
+    private void storeJoined(String key, BeehomeCodec.Frame f) {
+        StringBuilder b = new StringBuilder();
+        String tok = f.token();
+        for (int i = 0; i < f.fields.size(); i++) {
+            String v = f.fields.get(i).trim();
+            if (v.length() == 0 || v.equals(tok)) continue;
+            if (b.length() > 0) b.append(',');
+            b.append(v);
+        }
+        if (b.length() == 0) return;
+        prefs(this).edit().putString(key, b.toString()).commit();
+        Log.i(TAG, key + " = " + b);
+    }
+
+    /**
+     * Calibration offsets from BPX1 or BPJZ.
+     *
+     * The numeric fields after the addressing, in the order the vendor's handlers read them:
+     * BPH, BPL, then PPG and SpO2 for X1, Age and Sex for JZ. Only the first two are shared,
+     * so only the ones present are written.
+     *
+     * Clamped. These arrive unauthenticated, they are added to a number a person may read as a
+     * medical one, and an offset larger than the reading it adjusts is not a calibration.
+     */
+    private void storeCalibration(BeehomeCodec.Frame f) {
+        java.util.List<Integer> n = new java.util.ArrayList<Integer>();
+        String tok = f.token();
+        for (int i = 0; i < f.fields.size(); i++) {
+            String v = f.fields.get(i).trim();
+            if (v.equals(tok) || v.length() == 0 || v.length() > 6) continue;
+            try {
+                n.add(Integer.valueOf(Integer.parseInt(v)));
+            } catch (NumberFormatException e) { /* not a number, not an offset */ }
+        }
+        if (n.isEmpty()) {
+            Log.w(TAG, "BP" + f.op + ": no calibration numbers in " + f.fields);
+            return;
+        }
+
+        SharedPreferences.Editor e = prefs(this).edit();
+        String[] keys = "X1".equals(f.op)
+                ? new String[]{KEY_CAL_BPH, KEY_CAL_BPL, KEY_CAL_PPG, KEY_CAL_SPO2}
+                : new String[]{KEY_CAL_BPH, KEY_CAL_BPL};
+        StringBuilder said = new StringBuilder();
+        for (int i = 0; i < keys.length && i < n.size(); i++) {
+            int v = clamp(n.get(i).intValue(), -CAL_LIMIT, CAL_LIMIT);
+            e.putInt(keys[i], v);
+            said.append(' ').append(keys[i]).append('=').append(v);
+        }
+        e.commit();
+        Log.i(TAG, "BP" + f.op + " calibration:" + said);
+    }
+
+    /** No offset may move a reading further than this. */
+    private static final int CAL_LIMIT = 30;
+
+    private static int clamp(int v, int lo, int hi) {
+        return v < lo ? lo : (v > hi ? hi : v);
+    }
+
+    /** A pulse with the server's PPG offset applied, still inside a believable range. */
+    private int calibratedPulse(int bpm) {
+        int adj = prefs(this).getInt(KEY_CAL_PPG, 0);
+        if (adj == 0) return bpm;
+        return clamp(bpm + adj, 25, 250);
     }
 
     /** Text pushed by the server, kept with the time it arrived. */
@@ -905,7 +1074,12 @@ public class TrackerService extends Service {
      */
     private static final java.util.Set<String> NEVER_ACK =
             new java.util.HashSet<String>(java.util.Arrays.asList(
-                    "00", "01", "02", "03", "07", "10", "42", "JK", "T6", "BL", "VR", "WR"));
+                    "00", "01", "02", "03", "07", "10", "42", "JK", "T6", "BL", "VR", "WR",
+                    // The server's own log strings give these away: handleBPHP is "server
+                    // received APHP heart rate blood pressure blood oxygen" and handleBPTP is
+                    // "BPTP server received body temperature data". Both are it confirming an
+                    // upload, so echoing one back sends a malformed health frame.
+                    "HP", "TP"));
 
 
     /** Seconds of audio per remote capture. Each second is 16 kB, and every kilobyte is a
