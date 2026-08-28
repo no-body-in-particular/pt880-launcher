@@ -125,6 +125,26 @@ public final class TrackerSources {
             WifiManager wm = (WifiManager) c.getSystemService(Context.WIFI_SERVICE);
             if (wm == null) return "";
             List<ScanResult> results = wm.getScanResults();
+
+            // Ask for the next one. getScanResults() hands back whatever the framework last
+            // collected, and on this watch nothing else ever asks: wifi_scan_always_enabled is
+            // unset, and the framework only scans of its own accord while it is disconnected
+            // and looking for a network. Associated - which is the normal state, and stays the
+            // normal state out of the house when the network is a phone's hotspot travelling
+            // with the wearer - nothing scans, the cache ages out, and this returned nothing.
+            // Every position frame went up with a cell and no access points, which is the one
+            // case the server most needs them: indoors, where there is no GPS either.
+            //
+            // Results are asynchronous, so this scan pays for the next frame rather than this
+            // one. On a ten-minute cycle that is the right trade - no waiting on a listener
+            // that would have to be unregistered, and one scan per position is what having a
+            // position at all is worth.
+            try {
+                wm.startScan();
+            } catch (Throwable t) {
+                Log.w(TAG, "could not start a wifi scan", t);
+            }
+
             if (results == null || results.isEmpty()) return "";
 
             // Strongest first: if the list has to be cut, the useful ones should survive.

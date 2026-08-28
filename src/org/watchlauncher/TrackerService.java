@@ -80,14 +80,29 @@ public class TrackerService extends Service {
     private static final String KEY_WHITELIST = "client_whitelist";
     private static final String KEY_ALLOW_WIPE = "client_allow_factory_reset";
 
-    /** The vendor's own pulse type on the JK frame. */
-    private static final int TYPE_PULSE = 2;
-    /** Temperature is 3 on the wire, as seen in the capture. The other two are the vendor's
-     *  own JK types; only pulse is confirmed against a live frame. */
-    private static final int TYPE_BP = 4;
-    private static final int TYPE_SPO2 = 5;
-    /** Temperature, confirmed against a live APJK frame. */
-    private static final int TYPE_TEMP = 3;
+    /**
+     * Reading types on the JK frame, as the vendor's own frames number them.
+     *
+     * 1 is blood pressure as {@code <diastolic>|<systolic>}, 2 heart rate, 3 temperature,
+     * 4 blood oxygen. TrackerLog reads these same numbers back out of the frames the firmware
+     * itself recorded, and docs/protocol-commands.md in the root repository has them from the
+     * server's side. Only the two this client sends are named here.
+     */
+    private static final int JK_PULSE = 2;
+    private static final int JK_TEMPERATURE = 3;
+
+    /**
+     * What to measure, for {@link #measureAsync}.
+     *
+     * Not JK types, and deliberately not numbered like them. Blood pressure does not travel on
+     * a JK frame at all - it goes as APJZ - so there is no wire type to share, and an earlier
+     * version that used 4 and 5 here as though there were let 5 reach the wire: an SPO2#
+     * request was answered with a heart rate, labelled as a reading type the vendor's own
+     * numbering does not define.
+     */
+    private static final int MEASURE_PULSE = 1;
+    private static final int MEASURE_BP = 2;
+    private static final int MEASURE_SPO2 = 3;
 
     /** Matches the cadence the vendor used, and what the server expects to see. */
     private static final int HEARTBEAT_MS = 10 * 60 * 1000;
@@ -273,8 +288,16 @@ public class TrackerService extends Service {
                 nextFix = now + cycleSeconds() * 1000L;
             }
             if (now >= nextVitals) {
-                measureAsync(TYPE_PULSE);
+                measureAsync(MEASURE_PULSE);
                 nextVitals = now + vitalsSeconds() * 1000L;
+            }
+            if (now >= nextTemp) {
+                sendTemperatureAsync();
+                nextTemp = now + tempSeconds() * 1000L;
+            }
+            if (now >= nextWear) {
+                checkWornAsync(id);
+                nextWear = now + WEAR_CHECK_MS;
             }
             int n;
             try {
@@ -331,17 +354,17 @@ public class TrackerService extends Service {
             // nothing else, which is why it is the most frequent downlink in the logs and never
             // produced a reading: the server kept asking.
             ackIfCommand(out, f);
-            measureAsync(TYPE_PULSE);
+            measureAsync(MEASURE_PULSE);
             return;
         }
         if ("XY".equals(f.op)) {                    // BLOODPRESSURE#
             ackIfCommand(out, f);
-            measureAsync(TYPE_BP);
+            measureAsync(MEASURE_BP);
             return;
         }
         if ("OX".equals(f.op) || "XZ".equals(f.op)) {   // SPO2# / OXYGEN#
             ackIfCommand(out, f);
-            measureAsync(TYPE_SPO2);
+            measureAsync(MEASURE_SPO2);
             return;
         }
         if ("00".equals(f.op)) {
@@ -578,7 +601,7 @@ public class TrackerService extends Service {
             for (int i = 0; i < 40 && hr.bpm() <= 0; i++) Thread.sleep(500);
             int bpm = hr.bpm();
             if (bpm > 0) {
-                send(out, BeehomeCodec.health(TrackerSources.stamp(), TYPE_PULSE, bpm));
+                send(out, BeehomeCodec.health(TrackerSources.stamp(), JK_PULSE, bpm));
             }
         } catch (Throwable t) {
             Log.w(TAG, "no vitals reading", t);
@@ -661,7 +684,7 @@ public class TrackerService extends Service {
             public void run() {
                 float t = TrackerSources.temperature(TrackerService.this);
                 if (t > 0) {
-                    sendAsync(BeehomeCodec.health(TrackerSources.stamp(), TYPE_TEMP, t));
+                    sendAsync(BeehomeCodec.health(TrackerSources.stamp(), JK_TEMPERATURE, t));
                 }
             }
         }, "temp").start();
@@ -706,7 +729,7 @@ public class TrackerService extends Service {
                     hr.start();
                     for (int i = 0; i < 40 && hr.bpm() <= 0; i++) Thread.sleep(500);
 
-                    if (type == TYPE_BP) {
+                    if (type == MEASURE_BP) {
                         int sys = hr.systolic(), dia = hr.diastolic();
                         if (sys > 0 && dia > 0) {
                             sendAsync(BeehomeCodec.frame("JZ", TrackerSources.stamp(),
@@ -714,9 +737,26 @@ public class TrackerService extends Service {
                         }
                         return;
                     }
+                    if (type == MEASURE_SPO2) {
+                        // There is nothing here to read. gh30x_sensor reports three values and
+                        // they are pulse, systolic and diastolic - dumpsys shows
+                        // "last=<59.0,120.0,79.0>" and there is no fourth. The vendor gets
+                        // oxygen from its own binder, com.ic.work.IHeartRateSensorService,
+                        // whose single work queue holds forever on a measurement whose callback
+                        // never arrives; protocol/README.md section 10 has the write-up, and it
+                        // is why the code that used it was taken out. Reaching for it again to
+                        // answer this would risk the pulse stream that does work.
+                        //
+                        // Sending nothing is the honest answer. What was here before - the
+                        // heart rate, under type 5 - was worse than silence, because a number
+                        // the server files as blood oxygen is a claim, and this one was false.
+                        Log.w(TAG, "blood oxygen asked for; no sensor on this watch reports it, "
+                                + "so nothing is sent");
+                        return;
+                    }
                     int bpm = hr.bpm();
                     if (bpm > 0) {
-                        sendAsync(BeehomeCodec.health(TrackerSources.stamp(), type, bpm));
+                        sendAsync(BeehomeCodec.health(TrackerSources.stamp(), JK_PULSE, bpm));
                     } else {
                         Log.w(TAG, "no reading after 20s; the wrist is probably not there");
                     }
