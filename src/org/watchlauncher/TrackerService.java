@@ -95,6 +95,13 @@ public class TrackerService extends Service {
     /** Backoff between reconnects: quick at first, then out of the way. */
     private static final int[] BACKOFF_MS = {5000, 15000, 60000, 300000};
 
+    /** How long to wait for a media packet's BP07 before sending that packet again. Longer than
+     *  a tick, so a slow ack is not mistaken for a lost one. */
+    private static final long MEDIA_ACK_MS = 45000;
+
+    /** Sends of one packet before the upload is abandoned. */
+    private static final int MEDIA_TRIES = 4;
+
     /** How often the loop wakes to check its timers when the socket is quiet. */
     private static final int TICK_MS = 20000;
 
@@ -124,6 +131,10 @@ public class TrackerService extends Service {
     /** True while a packet is out and its BP07 has not come back. The device is expected to
      *  wait: sending ahead makes the server start the image over. */
     private volatile boolean mediaWaiting;
+    /** When the outstanding packet went out, for the retransmit below. */
+    private volatile long mediaSentAt;
+    /** Sends of the current packet, the first included. */
+    private volatile int mediaTries;
 
     /** The running instance, so the SMS plane can poke it. Cleared in onDestroy so a stopped
      *  service is not mistaken for a live one. */
@@ -233,8 +244,24 @@ public class TrackerService extends Service {
                         TrackerSources.battery(this), cycleSeconds()));
                 nextBeat = now + HEARTBEAT_MS;
             }
-            if (mediaData != null && !mediaWaiting) {
-                sendMediaPacket(out);
+            if (mediaData != null) {
+                if (!mediaWaiting) {
+                    sendMediaPacket(out);
+                } else if (SystemClock.elapsedRealtime() - mediaSentAt > MEDIA_ACK_MS) {
+                    // The ack never came. Waiting on it forever is the worst outcome available:
+                    // mediaData stays set, so every later photo and recording is dropped as
+                    // "already running" too, and one lost packet quietly disables the camera and
+                    // the microphone until the process restarts.
+                    if (mediaTries >= MEDIA_TRIES) {
+                        Log.w(TAG, "packet " + mediaNext + " unacknowledged after " + mediaTries
+                                + " sends; abandoning the upload");
+                        mediaData = null;
+                        mediaWaiting = false;
+                    } else {
+                        Log.i(TAG, "no ack for packet " + mediaNext + "; sending it again");
+                        sendMediaPacket(out);
+                    }
+                }
             }
             if (fixNow) {
                 fixNow = false;
@@ -437,6 +464,7 @@ public class TrackerService extends Service {
             if (BeehomeCodec.advancesMedia(f, mediaNext)) {
                 mediaNext++;
                 mediaWaiting = false;
+                mediaTries = 0;                     // a fresh budget for the next packet
                 if (mediaNext > mediaTotal) {
                     Log.i(TAG, "media upload complete, " + mediaTotal + " packets");
                     mediaData = null;
@@ -972,6 +1000,7 @@ public class TrackerService extends Service {
         mediaTotal = (data.length + BeehomeCodec.MEDIA_CHUNK - 1) / BeehomeCodec.MEDIA_CHUNK;
         mediaNext = 1;
         mediaWaiting = false;
+        mediaTries = 0;
         Log.i(TAG, "media upload queued: " + data.length + " bytes, " + mediaTotal + " packets");
     }
 
@@ -991,6 +1020,8 @@ public class TrackerService extends Service {
         out.write(pkt);
         out.flush();
         mediaWaiting = true;
+        mediaSentAt = SystemClock.elapsedRealtime();
+        mediaTries++;
     }
 
     // ------------------------------------------------------------------ commands
