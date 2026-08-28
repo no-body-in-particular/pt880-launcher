@@ -33,9 +33,22 @@ public class MapMenuScreen extends ListScreen {
         map.setMenuOpen(true);
     }
 
+    /**
+     * Hand the screen going off down to the map, which is the one that has to react to it.
+     *
+     * The shell hides only its top screen, so with this list up the map underneath never heard
+     * that the watch had gone to sleep - and it is MapScreen.onHide that takes the wake lock
+     * keeping the fixes coming. Leave the map menu open, put the watch down, and navigation
+     * quietly stopped: no lock, no fixes, no turn spoken.
+     *
+     * Told apart by shell.showing(), which the shell clears before hiding anything: false is
+     * the watch going to sleep, true is the wearer stepping back to the map, and the map should
+     * only be hidden for the first.
+     */
     @Override
     public void onHide() {
         map.setMenuOpen(false);
+        if (!shell.showing()) map.onHide();
     }
 
     @Override

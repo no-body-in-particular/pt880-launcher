@@ -197,11 +197,6 @@ public class MapScreen extends Screen implements LocationListener {
     @Override
     public void onShow() {
         releaseNavigation();      // the screen is on; it holds itself up
-        // Both lines and the tiles around us went unmaintained while the
-        // screen was off, on purpose. Catch them up before anything is drawn.
-        updateDriveLine();
-        updateTurnLine();
-        if (!Double.isNaN(lat)) prefetchAround();
         // Opening the map is a reason to ask now, whatever the backoff had
         // wound itself out to while it sat in the background.
         reseedEvery = RESEED_MS;
@@ -213,6 +208,17 @@ public class MapScreen extends Screen implements LocationListener {
         seedFromLastFix();
         catchUpFromLastFix();
         seedFromServer();
+
+        // Both lines and the tiles around us went unmaintained while the screen was off, on
+        // purpose. Catch them up here, and here rather than at the top of this method, which
+        // is where they used to be: the position and the route are only brought up to date by
+        // the calls above, so a line built before them was built from where the watch was when
+        // the screen went off. The map redrew from the new position and the text beside it
+        // still described the old one, which is the half of this that reads as "the line does
+        // not update" - the distance and the next turn stayed put while the map moved.
+        updateDriveLine();
+        updateTurnLine();
+        if (!Double.isNaN(lat)) prefetchAround();
         view.invalidate();
     }
 
@@ -710,9 +716,22 @@ public class MapScreen extends Screen implements LocationListener {
         fixTakenEt = etOf(l);
         if (fixTakenEt == 0) fixTakenEt = android.os.SystemClock.elapsedRealtime();
         drive.fix(fixAt, lat, lon, speedMs);
-        // Renewed while the screen is off, so the timeout never runs out
-        // mid-drive; harmless while it is on, because onShow released it.
-        if (navLock != null && navigating() && !shell.showing()) holdForNavigation();
+        // Held for the whole of a background drive, and renewed here so the timeout never runs
+        // out mid-route.
+        //
+        // This used to require navLock != null, which made the renewal depend on onHide having
+        // run first - that being the only place the lock was ever created. Every way of
+        // reaching a screen-off state without MapScreen.onHide firing therefore navigated with
+        // no wake lock at all: the map menu left open (the shell hides only its top screen),
+        // another screen pushed on top, or the process restarted mid-drive with the screen
+        // already off. Caught in the act during a real drive - screen off, a route running, and
+        // "Wake Locks: size=0" - so the processor was free to suspend, the fixes stopped, and
+        // with them the map and the voice.
+        //
+        // Taking it here instead makes the lock a property of navigating rather than of a
+        // lifecycle callback that may not come. Still timed, still renewed per fix, so a bug
+        // cannot hold the processor up all night.
+        if (navigating() && backgroundNav()) holdForNavigation();
         // The watch's own fixes often arrive without a speed, so take the one
         // worked out from the ground covered instead of showing nothing.
         if (speedMs < 0) speedMs = drive.speedMs();
@@ -1586,6 +1605,13 @@ public class MapScreen extends Screen implements LocationListener {
         route = r;
         if (r != null) r.signs(signs);
         arrived = false;
+        // The moment there is a route, not at the next fix and not at the next hide.
+        //
+        // Renewing on each fix is not enough on its own: the first renewal is a fix away, and
+        // if the processor suspends inside that gap there is no fix to renew on and nothing
+        // wakes it. Taking it here means the drive begins with the lock already held, whatever
+        // the screen is doing and whichever screen happens to be in front.
+        if (r != null && backgroundNav()) holdForNavigation();
         updateTurnLine();
         checkRouteCached(r);
         // Last drive's average is not evidence about this one - a route asked
