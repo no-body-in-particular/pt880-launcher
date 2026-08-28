@@ -145,6 +145,17 @@ public final class VendorVitals {
     /** 0 ALL, 1 JUST_OXYGEN, 2 JUST_HEART_RATE -- ALL, so one measurement answers everything. */
     private static final int TYPE_ALL = 0;
 
+    /**
+     * How far apart two pulses can be and still be the same measurement.
+     *
+     * Both sources watch the same window through the same chip, so when both are live they
+     * have agreed exactly - 60 and 60, 61 and 61, 58 and 58 across every measurement checked.
+     * The tolerance is for a boundary sample landing in one and not the other, not for genuine
+     * disagreement: a stale triple repeating an old pulse will sit far outside it, which is the
+     * whole point of the comparison.
+     */
+    private static final int HR_AGREE_BPM = 6;
+
     private VendorVitals() { }
 
     /** One measurement: whatever of the four the sensor managed. */
@@ -315,38 +326,70 @@ public final class VendorVitals {
             SensorInput.Sample raw = driverRan ? driver.finish() : null;
             driver = null;
 
-            // If the driver watched this window and its reading was refused, that is the answer.
-            //
-            // Falling through to the service here put back exactly the numbers the refusal
-            // exists to remove. On a wrist that sat at 51 to 55 bpm all night, every spike sent
-            // to the server - 77, 73, 70, 66 - came from a window the driver had already thrown
-            // out, and the service supplied a figure of its own because it was asked. Those
-            // figures come from the HAL, which is the component that does not work; a value
-            // from it is not a second opinion, it is the thing being worked around.
-            if (driverRan && raw == null) {
-                Log.w(TAG, "the driver refused this window; sending nothing rather than the "
-                        + "service's own number for it");
-                return null;
-            }
-
-            if (acc[0] == null && raw == null) {
+            Reading svc = acc[0];
+            if (svc == null && raw == null) {
                 Log.w(TAG, "no reading in " + (timeoutMs / 1000) + "s, from the service or the "
                         + "driver");
                 return null;
             }
-            Reading out = acc[0] != null ? acc[0] : new Reading();
+
+            /*
+             * Which source to believe, decided per measurement rather than once in the design.
+             *
+             * The service was written off too early. When the HAL wedges it reports zeros, or
+             * worse the same stale triple for hours, and that is what the driver path exists
+             * for. But a reboot un-wedges it, and once it is working it is the better source:
+             * it sees the whole measurement, while the driver only sees what arrives inside a
+             * window that often ends before SpO2 has converged.
+             *
+             *              driver            service
+             *   14:23:38   60 bpm, SpO2 0    60 bpm, SpO2 98, 119/79
+             *   14:35:38   61 bpm, SpO2 0    61 bpm, SpO2 99, 119/79
+             *   14:41:38   58 bpm, SpO2 0    58 bpm, SpO2 98, 123/81
+             *
+             * The pulses agree exactly, and the percentages the service gives are the ones a
+             * person actually has. Treating the driver as the winner threw those away and sent
+             * nothing at all for three measurements running.
+             *
+             * So the service leads and the driver checks it. Agreeing pulses are what says the
+             * service is live rather than repeating a stale triple - which is the failure that
+             * started all of this, and the one thing a plausible-looking value cannot rule out
+             * on its own.
+             */
+            boolean crossChecked = svc != null && raw != null
+                    && svc.heartRate > 0 && raw.heartRate > 0
+                    && Math.abs(svc.heartRate - raw.heartRate) <= HR_AGREE_BPM;
+
+            Reading out = new Reading();
+            if (svc != null && (crossChecked || raw == null)) {
+                // Verified, or the only account of this window there is.
+                out.heartRate = svc.heartRate;
+                out.oxygen = svc.oxygen;
+                out.systolic = svc.systolic;
+                out.diastolic = svc.diastolic;
+            } else if (svc != null && svc.heartRate <= 0) {
+                // The HAL gave it nothing to report, which is the wedge. Its pressures still
+                // come from the vendor's own library rather than the HAL, so they stay.
+                out.systolic = svc.systolic;
+                out.diastolic = svc.diastolic;
+            } else if (svc != null) {
+                // Both spoke and they disagree, so one of them is wrong and there is no way to
+                // tell which. The pulse the driver measured is the one with a raw stream behind
+                // it; the rest of the service's reading is not worth guessing about.
+                Log.w(TAG, "service says " + svc.heartRate + " bpm, driver says "
+                        + raw.heartRate + "; taking the driver and dropping the rest");
+            }
             if (raw != null) {
-                // The driver wins on both. The service reports these as zero because the HAL
-                // hands it nothing; a zero here is an absence, never a measurement.
-                if (raw.heartRate > 0) out.heartRate = raw.heartRate;
-                if (raw.oxygen > 0) out.oxygen = raw.oxygen;
-                // Only if the service did not supply one: the pressures are the one thing it
-                // has actually delivered correctly on this watch, and REL_RY has never fired,
-                // so this is the fallback of the two rather than the winner.
-                if (raw.systolic > 0 && out.systolic <= 0) {
+                if (out.heartRate <= 0 && raw.heartRate > 0) out.heartRate = raw.heartRate;
+                if (out.oxygen <= 0 && raw.oxygen > 0) out.oxygen = raw.oxygen;
+                if (out.systolic <= 0 && raw.systolic > 0) {
                     out.systolic = raw.systolic;
                     out.diastolic = raw.diastolic;
                 }
+            }
+            if (out.heartRate <= 0 && out.oxygen <= 0 && out.systolic <= 0) {
+                Log.w(TAG, "nothing usable from either source this window");
+                return null;
             }
             if (finishedAt[0] == 0 && acc[0] != null) {
                 Log.i(TAG, "measurement did not finish; reporting what arrived: " + out);
