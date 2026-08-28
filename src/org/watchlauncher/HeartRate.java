@@ -112,10 +112,34 @@ public class HeartRate {
         return readingAt == 0 ? -1 : (System.currentTimeMillis() - readingAt);
     }
 
+    /**
+     * When this measurement was asked for, so a cached value cannot answer it.
+     *
+     * <h3>Why this is needed</h3>
+     *
+     * registerListener on this sensor delivers its last value straight away, before the LED
+     * has even come on. The wait loop upstream is "spin until bpm() is non-zero", so that
+     * cached number satisfied it in milliseconds, the reading was sent, and stop() unregistered
+     * everything before the measurement the trigger asked for could happen.
+     *
+     * The symptom is unmistakable once you know: the same 59 bpm and 120/79 on every cycle for
+     * hours, and no green LED. dumpsys agrees -- gh30x_sensor's "last=< 59.0,120.0, 79.0>" is
+     * exactly what was being reported as a fresh reading each time.
+     *
+     * SensorEvent timestamps are nanoseconds on the elapsed-realtime clock, so a replayed value
+     * carries the time it was actually measured and is older than this. Some drivers stamp
+     * zero; for those the dwell below is the fallback.
+     */
+    private long startedAt;
+
+    /** A value arriving sooner than this after start() is the cache, not a measurement. */
+    private static final long MIN_DWELL_MS = 1500;
+
     /** Take one reading. Returns to idle by itself once it has one. */
     public void start() {
         if (sensor == null || running) return;
         running = true;
+        startedAt = android.os.SystemClock.elapsedRealtimeNanos();
         try {
             sensors.registerListener(events, sensor, SensorManager.SENSOR_DELAY_NORMAL);
         } catch (Exception e) { /* the trigger path may still work */ }
@@ -136,8 +160,9 @@ public class HeartRate {
         try { sensors.cancelTriggerSensor(trigger, sensor); } catch (Exception e) { /* ignore */ }
     }
 
-    private void take(float[] values) {
+    private void take(float[] values, long eventNanos) {
         if (values == null || values.length == 0) return;
+        if (!fresh(eventNanos)) return;
         int v = Math.round(values[0]);
         // A PPG part reports 0 while it is still working out the rate, and
         // nonsense if the watch is not being worn. Neither is a heart rate.
@@ -154,12 +179,26 @@ public class HeartRate {
         if (listener != null) listener.onHeartRate(bpm);
     }
 
+    /**
+     * Was this measured for us, or is it the value the sensor already had?
+     *
+     * The timestamp settles it when the driver provides one. When it does not -- zero, or
+     * something not on the elapsed-realtime clock -- fall back to how long the LED has been on:
+     * a PPG part needs seconds of clean signal, so anything inside the first moment cannot be a
+     * real measurement whatever its timestamp says.
+     */
+    private boolean fresh(long eventNanos) {
+        if (eventNanos > 0 && eventNanos > startedAt) return true;
+        long onFor = (android.os.SystemClock.elapsedRealtimeNanos() - startedAt) / 1000000L;
+        return onFor >= MIN_DWELL_MS;
+    }
+
     private final SensorEventListener events = new SensorEventListener() {
-        public void onSensorChanged(SensorEvent e) { take(e.values); }
+        public void onSensorChanged(SensorEvent e) { take(e.values, e.timestamp); }
         public void onAccuracyChanged(Sensor s, int accuracy) { }
     };
 
     private final TriggerEventListener trigger = new TriggerEventListener() {
-        public void onTrigger(TriggerEvent e) { take(e.values); }
+        public void onTrigger(TriggerEvent e) { take(e.values, e.timestamp); }
     };
 }

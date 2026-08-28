@@ -83,7 +83,17 @@ public final class TrackerSources {
      * The vendor's frames carry 065 and 073 in this field, so it is a percentage rather than
      * asu or dBm; getGsmSignalStrength gives 0-31 with 99 for "unknown", which scales.
      */
-    public static void watchSignal(final Context c) {
+    /** Held for the life of the process: PhoneStateListener is not kept alive by listen(). */
+    private static android.telephony.PhoneStateListener signalListener;
+
+    public static synchronized void watchSignal(final Context c) {
+        if (signalListener != null) return;
+        signalListener = new android.telephony.PhoneStateListener() {
+            public void onSignalStrengthsChanged(android.telephony.SignalStrength s) {
+                int pct = percent(s);
+                if (pct >= 0) lastSignal = pct;
+            }
+        };
         try {
             new android.os.Handler(Looper.getMainLooper()).post(new Runnable() {
                 public void run() {
@@ -91,15 +101,8 @@ public final class TrackerSources {
                         TelephonyManager tm = (TelephonyManager)
                                 c.getSystemService(Context.TELEPHONY_SERVICE);
                         if (tm == null) return;
-                        tm.listen(new android.telephony.PhoneStateListener() {
-                            public void onSignalStrengthsChanged(
-                                    android.telephony.SignalStrength s) {
-                                if (s == null) return;
-                                int asu = s.getGsmSignalStrength();
-                                if (asu < 0 || asu > 31) return;      // 99 means unknown
-                                lastSignal = (int) Math.round(asu * 100.0 / 31.0);
-                            }
-                        }, android.telephony.PhoneStateListener.LISTEN_SIGNAL_STRENGTHS);
+                        tm.listen(signalListener,
+                                android.telephony.PhoneStateListener.LISTEN_SIGNAL_STRENGTHS);
                     } catch (Throwable t) {
                         Log.w(TAG, "no signal strength", t);
                     }
@@ -108,6 +111,39 @@ public final class TrackerSources {
         } catch (Throwable t) {
             Log.w(TAG, "could not watch the signal", t);
         }
+    }
+
+    /**
+     * Signal as a percentage, from whichever of the radio's numbers exist.
+     *
+     * getGsmSignalStrength is the documented one and it is useless here: this watch is on LTE,
+     * where it returns 99 for "unknown", which is why the field went out as 000. The LTE
+     * numbers are there but hidden at this API level, so they are reached by reflection, newest
+     * first, and the GSM asu is the last resort rather than the first choice.
+     *
+     * RSRP runs about -140 dBm at the edge of usable to -44 at the mast.
+     */
+    private static int percent(android.telephony.SignalStrength s) {
+        if (s == null) return -1;
+        try {
+            int rsrp = (Integer) s.getClass().getMethod("getLteRsrp").invoke(s);
+            if (rsrp < 0 && rsrp > -160) {
+                return (int) clampi((rsrp + 140) * 100 / 96, 0, 100);
+            }
+        } catch (Throwable ignored) { /* not LTE, or not exposed */ }
+        try {
+            int level = (Integer) s.getClass().getMethod("getLevel").invoke(s);
+            if (level >= 0 && level <= 4) return level * 25;
+        } catch (Throwable ignored) { /* hidden on this build */ }
+        try {
+            int asu = s.getGsmSignalStrength();
+            if (asu >= 0 && asu <= 31) return (int) Math.round(asu * 100.0 / 31.0);
+        } catch (Throwable ignored) { }
+        return -1;
+    }
+
+    private static long clampi(long v, long lo, long hi) {
+        return v < lo ? lo : (v > hi ? hi : v);
     }
 
     /**
