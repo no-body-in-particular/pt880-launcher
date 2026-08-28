@@ -220,6 +220,10 @@ public final class VendorVitals {
         };
 
         boolean bound = false;
+        // Declared out here so the finally can release it: it owns a thread and an open file
+        // descriptor on the sensor node, and an exception on the way through must not leak
+        // either. The measurement path below clears it once it has taken the samples.
+        SensorInput.Reader driver = null;
         try {
             long deadline = System.currentTimeMillis() + timeoutMs;
 
@@ -259,6 +263,10 @@ public final class VendorVitals {
             } catch (Throwable ignored) { }
 
             if (!register(service[0], callback, ctx.getPackageName())) return null;
+            // Start listening to the driver before asking for the measurement, so nothing is
+            // missed between the request going in and the sensor powering up. See SensorInput:
+            // the HAL loses every sample, so this is where the heart rate and SpO2 come from.
+            driver = SensorInput.start();
             try {
                 ask(service[0], ctx.getPackageName());
                 while (System.currentTimeMillis() < deadline) {
@@ -278,16 +286,36 @@ public final class VendorVitals {
                 unregister(service[0], callback);
             }
 
-            if (acc[0] == null) {
-                Log.w(TAG, "no reading in " + (timeoutMs / 1000) + "s; the work queue is "
-                        + "probably wedged, which is its known failure and not worth retrying");
+            // What the driver saw, which on this watch is the only place a pulse or an SpO2
+            // actually comes from. Taken whether or not the service answered: its zeros are
+            // not a reading, they are the HAL's silence written down.
+            SensorInput.Sample raw = driver == null ? null : driver.finish();
+            driver = null;
+
+            if (acc[0] == null && raw == null) {
+                Log.w(TAG, "no reading in " + (timeoutMs / 1000) + "s, from the service or the "
+                        + "driver");
                 return null;
             }
-            if (finishedAt[0] == 0) {
-                Log.i(TAG, "measurement did not finish; reporting what arrived: " + acc[0]);
+            Reading out = acc[0] != null ? acc[0] : new Reading();
+            if (raw != null) {
+                // The driver wins on both. The service reports these as zero because the HAL
+                // hands it nothing; a zero here is an absence, never a measurement.
+                if (raw.heartRate > 0) out.heartRate = raw.heartRate;
+                if (raw.oxygen > 0) out.oxygen = raw.oxygen;
+                // Only if the service did not supply one: the pressures are the one thing it
+                // has actually delivered correctly on this watch, and REL_RY has never fired,
+                // so this is the fallback of the two rather than the winner.
+                if (raw.systolic > 0 && out.systolic <= 0) {
+                    out.systolic = raw.systolic;
+                    out.diastolic = raw.diastolic;
+                }
             }
-            Log.i(TAG, "" + acc[0]);
-            return acc[0];
+            if (finishedAt[0] == 0 && acc[0] != null) {
+                Log.i(TAG, "measurement did not finish; reporting what arrived: " + out);
+            }
+            Log.i(TAG, "" + out);
+            return out;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return null;
@@ -295,6 +323,10 @@ public final class VendorVitals {
             Log.w(TAG, "oxygen reading failed", t);
             return null;
         } finally {
+            // Normally already null - the measurement path takes its samples and clears it.
+            // This is the exception route, where the sensor node would otherwise stay open
+            // with a thread blocked on it until the process died.
+            if (driver != null) driver.finish();
             if (bound) {
                 try { ctx.unbindService(conn); } catch (Throwable ignored) { }
             }
