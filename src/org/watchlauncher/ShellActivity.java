@@ -142,14 +142,6 @@ public class ShellActivity extends Activity {
                 String why = Crash.summary();
                 if (why != null && Crash.freshlyCrashed()) toast(why);
 
-                // And the full stack out over the report, when Diagnostics is
-                // on. Off the main thread: it shells out and opens a socket.
-                new Thread(new Runnable() {
-                    public void run() {
-                        WatchdogReport.sendCrash(ShellActivity.this);
-                    }
-                }).start();
-
             }
         }, 1200);
         prefs = getSharedPreferences("watchlauncher", MODE_PRIVATE);
@@ -194,12 +186,9 @@ public class ShellActivity extends Activity {
         // cheapest way to recover from anything that stopped it.
         if (SleepLog.enabled(this)) SleepService.schedule(this, 10000);
 
-        // Same idempotent re-arm for the pulse watchdog, and for the same
-        // reason: whatever stopped it, the next launch puts it back. It is
-        // cheap when nothing is wrong -- a clock comparison every ten minutes
-        // -- and it does not ask the sensor for anything unless the watch has
-        // gone quiet for more than half an hour.
-        PpgWatchdog.start(this);
+        // Same idempotent re-arm for reporting: whatever stopped it, the next launch puts it
+        // back. Cheap when it is already running, because the service checks and stops itself.
+        TrackerService.start(this);
 
         // BouncyCastle registers a few hundred algorithms when it is first
         // touched, which is a visible stall if it happens inside a screen

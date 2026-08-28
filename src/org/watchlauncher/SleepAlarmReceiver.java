@@ -17,21 +17,11 @@ import android.content.Intent;
  * is too close to that line to be worth risking every thirty seconds all
  * night.
  *
- * <p>It carries the pulse watchdog's alarm too, which is why the action is
- * checked first. That check is not decoration: the sleep burst bails out when
- * sleep logging is switched off, and without the branch it would swallow the
- * watchdog's alarm along with it - leaving the pulse fallback silently dead for
- * anyone who does not log their sleep.
  */
 public class SleepAlarmReceiver extends BroadcastReceiver {
 
     @Override
     public void onReceive(Context c, Intent in) {
-        if (in != null && PpgWatchdog.ACTION_CHECK.equals(in.getAction())) {
-            PpgWatchdog.check(c);
-            return;
-        }
-
         if (!SleepLog.enabled(c)) {
             SleepService.cancel(c);
             return;

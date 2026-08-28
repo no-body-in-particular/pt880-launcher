@@ -19,10 +19,10 @@ import java.util.Locale;
  *
  * Disabling {@code com.enqualcomm.support} takes its {@code ICSmsManager} with it, and that is
  * the only path that reaches this watch when the data connection is the thing that is broken.
- * {@link Guard} already documents what that costs: the server's remote reboot is how a stalled
- * sensor gets cleared, and one stall ran 4225 seconds against a 1800 second timeout because
- * nothing was listening. Losing TCP and SMS at the same time would mean a watch that can only
- * be recovered by taking it off and plugging it in.
+ * That matters because the server's remote reboot is how a stalled sensor gets cleared, and
+ * one stall ran 4225 seconds against a 1800 second timeout because nothing was listening.
+ * Losing TCP and SMS at the same time would mean a watch that can only be recovered by
+ * taking it off and plugging it in.
  *
  * <h3>Receiving without becoming the SMS app</h3>
  *

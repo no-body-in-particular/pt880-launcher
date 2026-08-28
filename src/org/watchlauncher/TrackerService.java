@@ -19,7 +19,7 @@ import java.net.Socket;
  * <h3>Why the launcher should own it</h3>
  *
  * The vendor's {@code com.enqualcomm.support} is an ordinary app as far as Android is concerned,
- * so anything reclaiming processes takes it like any other, and {@link Guard} exists only to
+ * so anything reclaiming processes takes it like any other, and it is restarted only by
  * make that less likely. The launcher is the home activity and survives. Moving the socket here
  * means the thing that holds the server link is the thing the system is least willing to kill,
  * and the recovery path stops depending on a process that can be taken at any moment.
@@ -279,23 +279,23 @@ public class TrackerService extends Service {
         Log.i(TAG, "<- " + f);
 
         if ("18".equals(f.op)) {                    // reboot
-            send(out, BeehomeCodec.ack(f.op, f.token()));
+            ackIfCommand(out, f);
             reboot();
             return;
         }
         if ("15".equals(f.op)) {                    // set location interval
             // IWBP15,<id>,<token>,60#  -- the interval is the field after the token.
             applyInterval(KEY_CYCLE, f, 30, 24 * 3600);
-            send(out, BeehomeCodec.ack(f.op, f.token()));
+            ackIfCommand(out, f);
             return;
         }
         if ("SQ".equals(f.op)) {                    // vitals measurement period
             applyInterval(KEY_VITALS, f, 60, 24 * 3600);
-            send(out, BeehomeCodec.ack(f.op, f.token()));
+            ackIfCommand(out, f);
             return;
         }
         if ("50".equals(f.op)) {                    // a poll: answer with where we are
-            send(out, BeehomeCodec.ack(f.op, f.token()));
+            ackIfCommand(out, f);
             send(out, TrackerSources.positionFrame(this, id));
             return;
         }
@@ -303,39 +303,39 @@ public class TrackerService extends Service {
             // HEARTRATE# on the server sends this. It was being answered with a bare ack and
             // nothing else, which is why it is the most frequent downlink in the logs and never
             // produced a reading: the server kept asking.
-            send(out, BeehomeCodec.ack(f.op, f.token()));
+            ackIfCommand(out, f);
             measureAsync(TYPE_PULSE);
             return;
         }
         if ("XY".equals(f.op)) {                    // BLOODPRESSURE#
-            send(out, BeehomeCodec.ack(f.op, f.token()));
+            ackIfCommand(out, f);
             measureAsync(TYPE_BP);
             return;
         }
         if ("OX".equals(f.op) || "XZ".equals(f.op)) {   // SPO2# / OXYGEN#
-            send(out, BeehomeCodec.ack(f.op, f.token()));
+            ackIfCommand(out, f);
             measureAsync(TYPE_SPO2);
             return;
         }
         if ("00".equals(f.op)) {
             // SYNCTIME#. IWBP00,<YYYYMMDDHHMMSS>,<tz># -- not BPTM, which the server never
             // sends. The watch clock runs about ten minutes fast, so this is worth honouring.
-            send(out, BeehomeCodec.ack(f.op, f.token()));
+            ackIfCommand(out, f);
             applyTime(f);
             return;
         }
         if ("16".equals(f.op)) {                    // LOCATE# -- report position now
-            send(out, BeehomeCodec.ack(f.op, f.token()));
+            ackIfCommand(out, f);
             send(out, TrackerSources.positionFrame(this, id));
             return;
         }
         if ("88".equals(f.op)) {                    // FIND# -- make the watch findable
-            send(out, BeehomeCodec.ack(f.op, f.token()));
+            ackIfCommand(out, f);
             findMe();
             return;
         }
         if ("46".equals(f.op)) {                    // take a picture now
-            send(out, BeehomeCodec.ack(f.op, f.token()));
+            ackIfCommand(out, f);
             beginPhoto();
             return;
         }
@@ -348,12 +348,12 @@ public class TrackerService extends Service {
         if ("20".equals(f.op)) {
             // LANG=. "<language>,<time zone>", 1 English and 0 Chinese.
             storeSetting(KEY_LANG, f);
-            send(out, BeehomeCodec.ack(f.op, f.token()));
+            ackIfCommand(out, f);
             return;
         }
         if ("51".equals(f.op) || "52".equals(f.op)) {   // CONTACT= / DELCONTACT=
             storeList(KEY_CONTACTS, f);
-            send(out, BeehomeCodec.ack(f.op, f.token()));
+            ackIfCommand(out, f);
             return;
         }
         if ("19".equals(f.op)) {
@@ -361,13 +361,28 @@ public class TrackerService extends Service {
             // another server, arriving over an unauthenticated plaintext link with no sender to
             // check. The SMS path gates the same thing behind an allowlist; there is no
             // equivalent here, so it is logged and left for a human.
-            send(out, BeehomeCodec.ack(f.op, f.token()));
+            ackIfCommand(out, f);
             Log.w(TAG, "refusing an over-the-wire server change: " + f.fields);
+            return;
+        }
+        if ("SM".equals(f.op)) {
+            // A text tunnel. The server writes '#' as '@' inside it, because a real '#' would
+            // terminate the packet, so its payload arrives as "@monitor@" rather than
+            // "#monitor#". Anything else in this frame is an ordinary pushed message.
+            ackIfCommand(out, f);
+            for (int i = 0; i < f.fields.size(); i++) {
+                String v = f.fields.get(i);
+                if (v.indexOf("monitor") >= 0) {
+                    captureAudioAsync();
+                    return;
+                }
+            }
+            storeMessage(f);
             return;
         }
         if ("84".equals(f.op)) {                    // WHITELIST=
             storeList(KEY_WHITELIST, f);
-            send(out, BeehomeCodec.ack(f.op, f.token()));
+            ackIfCommand(out, f);
             return;
         }
         if ("86".equals(f.op)) {
@@ -376,22 +391,22 @@ public class TrackerService extends Service {
             // by parking the cycle at a day rather than by adding a separate on/off flag that
             // could disagree with the interval.
             applyHealthInterval(f);
-            send(out, BeehomeCodec.ack(f.op, f.token()));
+            ackIfCommand(out, f);
             return;
         }
         if ("TF".equals(f.op) || "PH".equals(f.op)) {   // HOURS= / PHONE=
             storeSetting("TF".equals(f.op) ? KEY_HOURS : KEY_PHONE, f);
-            send(out, BeehomeCodec.ack(f.op, f.token()));
+            ackIfCommand(out, f);
             return;
         }
         if ("MC".equals(f.op)) {                    // MOTION=
             storeSetting(KEY_MOTION, f);
-            send(out, BeehomeCodec.ack(f.op, f.token()));
+            ackIfCommand(out, f);
             return;
         }
         if ("33".equals(f.op) || "34".equals(f.op)) {   // MODE= / LOCMODE=
             storeSetting("33".equals(f.op) ? KEY_WORKMODE : KEY_LOCMODE, f);
-            send(out, BeehomeCodec.ack(f.op, f.token()));
+            ackIfCommand(out, f);
             return;
         }
         if ("01".equals(f.op) || "05".equals(f.op) || "40".equals(f.op)) {
@@ -399,7 +414,7 @@ public class TrackerService extends Service {
             // whatever screen is open, from an unauthenticated link, is the kind of thing that
             // interrupts navigation at a junction. The launcher can surface it when asked.
             storeMessage(f);
-            send(out, BeehomeCodec.ack(f.op, f.token()));
+            ackIfCommand(out, f);
             return;
         }
         if ("TE".equals(f.op)) {
@@ -408,7 +423,7 @@ public class TrackerService extends Service {
             // readings in a day. Stored in seconds; clamped like every other server-set
             // interval, because it arrives unauthenticated and a 1 is expensive.
             applyMinutes(KEY_TEMP, f, 1, 24 * 60);
-            send(out, BeehomeCodec.ack(f.op, f.token()));
+            ackIfCommand(out, f);
             return;
         }
         if ("42".equals(f.op)) {
@@ -430,17 +445,17 @@ public class TrackerService extends Service {
             return;                                 // never acked: it is a reply, not a command
         }
         if ("TM".equals(f.op)) {                    // time sync
-            send(out, BeehomeCodec.ack(f.op, f.token()));
+            ackIfCommand(out, f);
             applyTime(f);
             return;
         }
         if ("31".equals(f.op)) {                    // power off
-            send(out, BeehomeCodec.ack(f.op, f.token()));
+            ackIfCommand(out, f);
             shell("reboot -p");
             return;
         }
         if ("32".equals(f.op)) {                    // server-initiated dial
-            send(out, BeehomeCodec.ack(f.op, f.token()));
+            ackIfCommand(out, f);
             dial(numberIn(f));
             return;
         }
@@ -448,7 +463,7 @@ public class TrackerService extends Service {
             // Stored, not acted on: the command only says what the list is. Whatever consults
             // it later reads the preference.
             storeList("12".equals(f.op) ? KEY_SOS : KEY_WHITELIST, f);
-            send(out, BeehomeCodec.ack(f.op, f.token()));
+            ackIfCommand(out, f);
             return;
         }
         if ("17".equals(f.op)) {                    // factory reset
@@ -456,7 +471,7 @@ public class TrackerService extends Service {
             // plaintext link with no sender to check, and it is the one command whose cost
             // cannot be undone. The vendor obeyed it unconditionally; that is a decision worth
             // taking again deliberately rather than inheriting.
-            send(out, BeehomeCodec.ack(f.op, f.token()));
+            ackIfCommand(out, f);
             if (prefs(this).getBoolean(KEY_ALLOW_WIPE, false)) {
                 shell("am broadcast -a android.intent.action.MASTER_CLEAR");
             } else {
@@ -465,7 +480,7 @@ public class TrackerService extends Service {
             return;
         }
         // XL, TE and anything else: echo the token so the server can close it out.
-        send(out, BeehomeCodec.ack(f.op, f.token()));
+        ackIfCommand(out, f);
     }
 
     /** Same as {@link #applyInterval} but the wire value is in minutes, not seconds. */
@@ -521,7 +536,7 @@ public class TrackerService extends Service {
     /**
      * A vitals reading, taken here rather than listened for.
      *
-     * While the vendor app was running these arrived as broadcasts and {@link PpgWatchdog} only
+     * While the vendor app was running these arrived as broadcasts and the watchdog only
      * had to notice them. Once it is gone nothing else takes a measurement, so the client has to
      * ask the sensor itself.
      */
@@ -776,6 +791,72 @@ public class TrackerService extends Service {
     }
 
 
+
+    /**
+     * Acknowledge a frame, but only if it was a command.
+     *
+     * A command carries the server's correlation token; a reply to something this client sent
+     * does not. Answering a reply is not merely redundant, it is a loop: the acknowledgement
+     * goes out as "IWAP00,#" or "IWAP01,#", which are not acknowledgements at all but malformed
+     * login and position frames, so the server answers them, and the exchange runs several
+     * times a second until something stops it. That was observed against the live server before
+     * this check existed.
+     *
+     * The token is therefore the test for "is this addressed to me as an order". It is also why
+     * BeehomeCodec.Frame.token() returns null rather than guessing: an invented token here
+     * would put the loop straight back.
+     */
+    private void ackIfCommand(OutputStream out, BeehomeCodec.Frame f) throws Exception {
+        if (f == null) return;
+        String tok = f.token();
+        if (tok == null) {
+            Log.i(TAG, "no token on BP" + f.op + "; treating it as a reply, not acknowledging");
+            return;
+        }
+        if (NEVER_ACK.contains(f.op)) {
+            Log.i(TAG, "BP" + f.op + " is a reply by definition; not acknowledging");
+            return;
+        }
+        send(out, BeehomeCodec.ack(f.op, tok));
+    }
+
+    /**
+     * Opcodes whose uplink form is a data frame rather than an acknowledgement.
+     *
+     * Echoing one of these back sends a malformed login, position, heartbeat, health reading or
+     * image packet. The token check above catches them in practice; this catches them even if a
+     * future server starts putting a token on one.
+     */
+    private static final java.util.Set<String> NEVER_ACK =
+            new java.util.HashSet<String>(java.util.Arrays.asList(
+                    "00", "01", "02", "03", "07", "10", "42", "JK", "T6", "BL", "VR", "WR"));
+
+
+    /** Seconds of audio per remote capture. Each second is 16 kB, and every kilobyte is a
+     *  packet that has to be acknowledged before the next one goes, so this is kept short. */
+    private static final int AUDIO_SECONDS = 15;
+
+    /**
+     * Capture audio and upload it, off the connection thread.
+     *
+     * Recording blocks for its whole duration, so doing it inline would stop the client
+     * answering the server for fifteen seconds. The result goes up the same packet path a
+     * picture uses, under AP07 rather than AP42 -- the server tells the two apart by the
+     * payload's leading bytes, which for this is "RIFF".
+     */
+    private void captureAudioAsync() {
+        new Thread(new Runnable() {
+            public void run() {
+                byte[] wav = Recorder.record(AUDIO_SECONDS, Recorder.DEFAULT_GAIN);
+                if (wav == null) {
+                    Log.w(TAG, "audio requested but the microphone gave nothing");
+                    return;
+                }
+                offerMedia("07", wav);
+            }
+        }, "audio").start();
+    }
+
     // ------------------------------------------------------------------ wear detection
 
     /**
@@ -1009,6 +1090,19 @@ public class TrackerService extends Service {
 
     public static boolean enabled(Context c) {
         return prefs(c).getBoolean(KEY_ENABLED, false);
+    }
+
+    /**
+     * Start the client if it is switched on, and do nothing if it is not.
+     *
+     * Every automatic entry point goes through here rather than calling startService directly,
+     * so "should this be running" is answered in exactly one place. {@link #onStartCommand}
+     * checks the flag again and stops itself, which makes an unguarded start harmless rather
+     * than merely untidy.
+     */
+    public static void start(Context c) {
+        if (!enabled(c)) return;
+        c.startService(new Intent(c, TrackerService.class));
     }
 
     /** Turning this on is the same decision as disabling the vendor app. See the class note. */

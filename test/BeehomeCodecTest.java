@@ -105,6 +105,19 @@ public class BeehomeCodecTest {
         BeehomeCodec.Frame bp42 = BeehomeCodec.decode("IWBP42,20260828120000,3,1,1#");
         check("BP42 never advances an upload", !BeehomeCodec.advancesMedia(bp42, 1), "");
 
+        // --- replies must be distinguishable from commands -------------------------
+        // Acking a reply sends "IWAP00,#" or "IWAP01,#", which are malformed login and
+        // position frames rather than acknowledgements. The server answers them and the
+        // exchange loops several times a second. Observed live before the token check existed.
+        check("a reply carries no token: BP00 time sync",
+                BeehomeCodec.decode("IWBP00,20260827232918,2#").token() == null, "");
+        check("a reply carries no token: bare BP01",
+                BeehomeCodec.decode("IWBP01#").token() == null, "");
+        check("a reply carries no token: bare BP03",
+                BeehomeCodec.decode("IWBP03#").token() == null, "");
+        check("but a command still has one",
+                "080835".equals(BeehomeCodec.decode("IWBP18," + id + ",080835#").token()), "");
+
         System.out.println(fails == 0 ? "beehome codec: all checks passed"
                 : ("beehome codec: " + fails + " FAILED"));
         if (fails != 0) System.exit(1);

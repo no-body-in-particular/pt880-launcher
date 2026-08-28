@@ -17,17 +17,11 @@ public class BootReceiver extends BroadcastReceiver {
 
     @Override
     public void onReceive(Context c, Intent in) {
-        // Before the sleep-logging check, not after: the pulse watchdog has
-        // nothing to do with sleep logging, and putting it below the early
-        // return would leave it disarmed on any watch that does not log sleep.
-        // A restart is also exactly when it needs re-arming, because replacing
-        // the package cancels every alarm it owned.
-        PpgWatchdog.start(c);
-
-        // And straight away rather than waiting for the first watchdog tick: a
-        // reboot is exactly when memory is tightest and everything is starting
-        // at once, which is when the tracker is most likely to be taken.
-        Guard.protectTracker(c);
+        // Before the sleep-logging check, not after. Reporting has nothing to do with sleep
+        // logging, and below the early return it would never start on a watch that does not
+        // log sleep -- which is most of them. Nothing else in the app starts this service, so
+        // if it is missing here the watch simply never reports again after a reboot.
+        TrackerService.start(c);
 
         if (!SleepLog.enabled(c)) return;
 

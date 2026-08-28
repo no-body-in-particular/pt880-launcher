@@ -24,8 +24,8 @@ public class SystemMenuScreen extends ListScreen {
         //terminal. Anything added here needs a case, and anything removed needs its case
         //taken out with it.
         l.add(new Item("Sleep log", SleepLog.enabled(shell) ? "on" : "off", AppIcons.GEAR));
-        l.add(new Item("Diagnostics", WatchdogReport.enabled(shell) ? "on" : "off", AppIcons.GEAR));
-        l.add(new Item("Root shell", shell.root().describe(), AppIcons.TERMINAL));
+        l.add(new Item("Reporting", TrackerService.enabled(shell) ? "on" : "off", AppIcons.GEAR));
+        l.add(new Item("Terminal", null, AppIcons.TERMINAL));
         l.add(new Item("About", null, AppIcons.DEVICE));
         addBack(l);
         l.add(new Item("Exit app", null, AppIcons.BACK, Ui.WARN));
@@ -64,9 +64,12 @@ public class SystemMenuScreen extends ListScreen {
                 render();
                 break;
             case 3:
-                boolean diag = !WatchdogReport.enabled(shell);
-                WatchdogReport.setEnabled(shell, diag);
-                shell.toast(diag ? "Diagnostics on" : "Diagnostics off");
+                // This is the only switch for reporting on the watch itself, and it is the
+                // same decision as retiring the vendor app: with both off nothing reports at
+                // all, and with both on two clients fight over one identity on the server.
+                boolean track = !TrackerService.enabled(shell);
+                TrackerService.setEnabled(shell, track);
+                shell.toast(track ? "Reporting on" : "Reporting off");
                 render();
                 break;
             case 4:
