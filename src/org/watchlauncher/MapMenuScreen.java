@@ -19,6 +19,25 @@ public class MapMenuScreen extends ListScreen {
 
     MapMenuScreen(MapScreen map) { this.map = map; }
 
+    /*
+     * Tell the map it is behind a menu.
+     *
+     * The route keeps running while this list is up - that is the point of background
+     * navigation - but it does not get to talk over somebody reading it. MapScreen.announce
+     * drops prompts while this is set; a prompt the wearer asked for, like Test voice, still
+     * goes through.
+     */
+
+    @Override
+    public void onShow() {
+        map.setMenuOpen(true);
+    }
+
+    @Override
+    public void onHide() {
+        map.setMenuOpen(false);
+    }
+
     @Override
     public String title() {
         if (busy.length() > 0) return busy;
@@ -144,6 +163,18 @@ public class MapMenuScreen extends ListScreen {
         // engine, no voice data, a muted stream, headphones that took the
         // audio elsewhere. Saying something on request and reporting what the
         // engine said back turns all of them into one answer.
+        // Off means a route stops being followed the moment the map is covered - which on a
+        // watch is the screen timing out - so it is on unless somebody says otherwise.
+        row(l, new Item("Background navigation", map.backgroundNav() ? "on" : "off",
+                        AppIcons.GEAR, map.backgroundNav() ? Ui.OK : Ui.DIM),
+                new Runnable() { public void run() {
+                    map.setBackgroundNav(!map.backgroundNav());
+                    shell.toast(map.backgroundNav()
+                            ? "Navigation continues with the screen off"
+                            : "Navigation stops when the map is closed");
+                    render();
+                } });
+
         row(l, new Item("Test voice", map.voiceStatus(), AppIcons.MUSIC,
                         map.voiceReady() ? Ui.OK : Ui.WARN),
                 new Runnable() { public void run() {

@@ -238,7 +238,7 @@ public class MapScreen extends Screen implements LocationListener {
     public void onHide() {
         ui.removeCallbacks(saySoon);
         soon = null;
-        if (navigating()) {
+        if (navigating() && backgroundNav()) {
             holdForNavigation();
             return;
         }
@@ -253,6 +253,74 @@ public class MapScreen extends Screen implements LocationListener {
     /** A route in hand that has not been finished. */
     private boolean navigating() {
         return route != null && !arrived;
+    }
+
+    /** True while the map's own menu is in front of it. */
+    private boolean menuOpen;
+
+    void setMenuOpen(boolean open) {
+        menuOpen = open;
+    }
+
+    private static final String PREF_BACKGROUND_NAV = "map.backgroundNav";
+
+    /**
+     * Whether a route keeps being followed once the map is no longer in front.
+     *
+     * On by default, because it is what makes the feature usable on a wrist: the screen goes
+     * off thirty seconds after you last touched it, and guidance that stops there is guidance
+     * you have to hold the screen lit for.
+     *
+     * Off is a real choice though. It holds a partial wake lock and keeps the receiver running
+     * for as long as the route lasts, and someone who set a destination to look at it rather
+     * than to drive it should not pay for that until they next open the map.
+     */
+    boolean backgroundNav() {
+        try {
+            return shell.prefs().getBoolean(PREF_BACKGROUND_NAV, true);
+        } catch (Throwable t) {
+            return true;
+        }
+    }
+
+    void setBackgroundNav(boolean on) {
+        try {
+            shell.prefs().edit().putBoolean(PREF_BACKGROUND_NAV, on).commit();
+        } catch (Throwable t) { /* the default stands */ }
+        // Take effect now rather than at the next hide: turning it off while the map is covered
+        // and a route is running should stop the receiver, not wait for the drive to end.
+        if (!on && menuOpen) {
+            ui.removeCallbacks(saySoon);
+            soon = null;
+            releaseNavigation();
+            stopFixes();
+        }
+    }
+
+    /**
+     * Say something the wearer asked for, whatever else is going on.
+     *
+     * {@link #announce} is for the route talking by itself; this is for a button being pressed.
+     */
+    private void sayNow(String s) {
+        voice().say(s);
+    }
+
+    /**
+     * Say something the route decided to say.
+     *
+     * Dropped rather than queued while the map's menu is open. A turn instruction spoken over
+     * somebody reading a settings list is an interruption they did not ask for and cannot stop,
+     * and by the time they close the menu it is stale anyway - the next fix produces a better
+     * one. Arrival and recalculation go the same way for the same reason.
+     */
+    private void announce(String s) {
+        if (s == null) return;
+        if (menuOpen) {
+            Log.i("watchmap", "menu is open; not speaking \"" + s + "\"");
+            return;
+        }
+        voice().say(s);
     }
 
     private android.os.PowerManager.WakeLock navLock;
@@ -723,7 +791,7 @@ public class MapScreen extends Screen implements LocationListener {
         rerouting = true;
         lastReroute = now;
         note = "recalculating";
-        voice().say("recalculating");
+        announce("recalculating");
 
         final double la = lat, lo = lon;
         final Destination to = target;
@@ -781,7 +849,7 @@ public class MapScreen extends Screen implements LocationListener {
                 if (!arrived) {
                     arrived = true;
                     releaseNavigation();          // the drive is over
-                    voice().say("you have arrived");
+                    announce("you have arrived");
                     // The route has done its job. Keeping it drawn would leave
                     // a line to somewhere you already are.
                     route = null;
@@ -792,7 +860,7 @@ public class MapScreen extends Screen implements LocationListener {
         }
 
         String say = route.instruction(lat, lon, speedMs);
-        if (say != null) voice().say(say);
+        if (say != null) announce(say);
 
         scheduleImminent();
 
@@ -1422,7 +1490,7 @@ public class MapScreen extends Screen implements LocationListener {
                         setRoute(r);
                         note = "";
                         int km = r.totalMetres / 1000;
-                        voice().say("route found, " + km + " kilometres");
+                        announce("route found, " + km + " kilometres");
                         changed();
                     }
                 });
@@ -1562,7 +1630,7 @@ public class MapScreen extends Screen implements LocationListener {
             lastCameraLat = n.lat;
             lastCameraLon = n.lon;
 
-            voice().say("speed camera ahead");
+            announce("speed camera ahead");
             note = "speed camera " + Route.screenDistance((int) Math.round(n.metres));
             break;                                      // one at a time
         }
@@ -1768,7 +1836,7 @@ public class MapScreen extends Screen implements LocationListener {
             String what = Route.action(t.kind);
             if (what == null) return;
             route.markSaid(t);
-            voice().say(what);
+            announce(what);
             updateTurnLine();
             changed();
         }
@@ -1808,7 +1876,8 @@ public class MapScreen extends Screen implements LocationListener {
         return speech;
     }
 
-    void speak(String s) { voice().say(s); }
+    /** From a menu action, so it is said even though the menu is what is showing. */
+    void speak(String s) { sayNow(s); }
 
     String voiceStatus() { return voice().status(); }
 

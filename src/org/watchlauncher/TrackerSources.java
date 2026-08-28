@@ -311,7 +311,12 @@ public final class TrackerSources {
                     continue;
                 }
                 if (l == null) continue;
-                if (best == null || l.getTime() > best.getTime()) best = l;
+                // Newest by the monotonic clock, for the same reason isFresh uses it: a gps
+                // fix and a network fix are timestamped from different clocks, so comparing
+                // getTime() across providers picks whichever clock is running ahead.
+                long a = ageOf(l);
+                if (a < 0) continue;
+                if (best == null || a < ageOf(best)) best = l;
             }
             return best;
         } catch (Throwable t) {
@@ -508,8 +513,36 @@ public final class TrackerSources {
      */
     private static final long FIX_MAX_AGE_MS = 30 * 60 * 1000L;
 
+    /**
+     * How long ago a fix was taken, in milliseconds, or -1 if it cannot be told.
+     *
+     * From the monotonic clock, not the wall clock. A GPS fix's getTime() is satellite time,
+     * and this watch sets its clock from the network: the two disagree by enough that
+     * System.currentTimeMillis() - getTime() came out *negative*, which the old test read as
+     * "not fresh" and threw the fix away. The log caught it exactly - a fix at 15 metres from
+     * five satellites, and the frame twenty milliseconds later saying V with zeroes.
+     *
+     * elapsedRealtimeNanos is the same clock at both ends, so it cannot skew.
+     */
+    private static long ageOf(Location l) {
+        if (l == null) return -1;
+        try {
+            long et = l.getElapsedRealtimeNanos();
+            if (et > 0) {
+                long age = (android.os.SystemClock.elapsedRealtimeNanos() - et) / 1000000L;
+                return age >= 0 ? age : 0;
+            }
+        } catch (Throwable ignored) { /* pre-17 shape; fall through */ }
+
+        long wall = System.currentTimeMillis() - l.getTime();
+        // A small negative is clock skew between the receiver and the system, not a fix from
+        // the future. Anything beyond that is a timestamp worth distrusting.
+        if (wall < 0) return wall > -FIX_MAX_AGE_MS ? 0 : -1;
+        return wall;
+    }
+
     private static boolean isFresh(Location l) {
-        long age = System.currentTimeMillis() - l.getTime();
+        long age = ageOf(l);
         return age >= 0 && age < FIX_MAX_AGE_MS;
     }
 

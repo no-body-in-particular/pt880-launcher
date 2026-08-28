@@ -56,6 +56,61 @@ public final class Capture {
      * Blocking, and safe to call from a worker thread only -- it waits on the driver's callback
      * and would deadlock the UI thread.
      */
+    /** What the server expects, and what the vendor sent: portrait, 480 by 640. */
+    private static final int WANT_W = 480;
+    private static final int WANT_H = 640;
+
+    /**
+     * Ask for 480x640, or the nearest thing the driver admits to.
+     *
+     * Left alone, the camera hands back whatever its default is, which on this unit is a good
+     * deal larger than anything a watch needs to send: every picture goes to the server a
+     * kilobyte at a time over a length-delimited protocol, so the size is the upload time.
+     *
+     * Both orientations are accepted before falling back to nearest-by-area, because a driver
+     * that lists its sizes landscape has the same pixels and the same file.
+     */
+    private static void setPictureSize(Camera camera) {
+        try {
+            Camera.Parameters p = camera.getParameters();
+            java.util.List<Camera.Size> sizes = p.getSupportedPictureSizes();
+            if (sizes == null || sizes.isEmpty()) return;
+
+            Camera.Size best = null;
+            for (int i = 0; i < sizes.size(); i++) {
+                Camera.Size s = sizes.get(i);
+                if ((s.width == WANT_W && s.height == WANT_H)
+                        || (s.width == WANT_H && s.height == WANT_W)) {
+                    best = s;
+                    break;
+                }
+            }
+            if (best == null) {
+                long want = (long) WANT_W * WANT_H;
+                long bestOff = Long.MAX_VALUE;
+                for (int i = 0; i < sizes.size(); i++) {
+                    Camera.Size s = sizes.get(i);
+                    long off = Math.abs((long) s.width * s.height - want);
+                    if (off < bestOff) {
+                        bestOff = off;
+                        best = s;
+                    }
+                }
+                Log.i(TAG, "no " + WANT_W + "x" + WANT_H + "; nearest is "
+                        + (best == null ? "none" : best.width + "x" + best.height));
+            }
+            if (best == null) return;
+
+            p.setPictureSize(best.width, best.height);
+            camera.setParameters(p);
+            Log.i(TAG, "picture size " + best.width + "x" + best.height);
+        } catch (Throwable t) {
+            // A driver that refuses the size still takes a picture at its own, which is worth
+            // more than no picture.
+            Log.w(TAG, "could not set the picture size", t);
+        }
+    }
+
     public static File once() {
         Camera camera = null;
         SurfaceTexture dummy = null;
@@ -68,6 +123,8 @@ public final class Capture {
                 Log.w(TAG, "no camera");
                 return null;
             }
+
+            setPictureSize(camera);
 
             dummy = new SurfaceTexture(0);
             camera.setPreviewTexture(dummy);
