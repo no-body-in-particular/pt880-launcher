@@ -909,24 +909,6 @@ public class TrackerService extends Service {
      * had to notice them. Once it is gone nothing else takes a measurement, so the client has to
      * ask the sensor itself.
      */
-    private void sendVitals(OutputStream out) {
-        try {
-            final HeartRate hr = new HeartRate(this, null);
-            if (!hr.available()) return;
-            hr.start();
-            // An optical reading needs several seconds of clean signal; past that it is not
-            // coming, and holding the LED against the skin for longer only costs battery.
-            for (int i = 0; i < 40 && hr.bpm() <= 0; i++) Thread.sleep(500);
-            int bpm = calibratedPulse(hr.bpm());
-            if (bpm > 0) {
-                send(out, BeehomeCodec.health(TrackerSources.stamp(), JK_PULSE, bpm));
-                TrackerLog.recordPulse(this, bpm, System.currentTimeMillis());
-                sendPressure(out, hr);
-            }
-        } catch (Throwable t) {
-            Log.w(TAG, "no vitals reading", t);
-        }
-    }
 
     private void send(OutputStream out, String frame) throws Exception {
         synchronized (sendLock) {
@@ -1032,55 +1014,6 @@ public class TrackerService extends Service {
      * the client answering the server for the whole measurement, and the server polls heart
      * rate often enough that the connection would spend much of its life deaf.
      */
-    private void measureAsync(final int type) {
-        new Thread(new Runnable() {
-            public void run() {
-                HeartRate hr = null;
-                try {
-                    hr = new HeartRate(TrackerService.this, null);
-                    if (!hr.available()) {
-                        Log.w(TAG, "no optical sensor; cannot answer a vitals request");
-                        return;
-                    }
-                    hr.start();
-                    for (int i = 0; i < 40 && hr.bpm() <= 0; i++) Thread.sleep(500);
-
-                    if (type == MEASURE_BP) {
-                        sendPressureAsync(hr);
-                        return;
-                    }
-                    if (type == MEASURE_SPO2) {      // never reached; kept for the compiler
-                        // There is nothing here to read. gh30x_sensor reports three values and
-                        // they are pulse, systolic and diastolic - dumpsys shows
-                        // "last=<59.0,120.0,79.0>" and there is no fourth. The vendor gets
-                        // oxygen from its own binder, com.ic.work.IHeartRateSensorService,
-                        // whose single work queue holds forever on a measurement whose callback
-                        // never arrives; protocol/README.md section 10 has the write-up, and it
-                        // is why the code that used it was taken out. Reaching for it again to
-                        // answer this would risk the pulse stream that does work.
-                        //
-                        // Sending nothing is the honest answer. What was here before - the
-                        // heart rate, under type 5 - was worse than silence, because a number
-                        // the server files as blood oxygen is a claim, and this one was false.
-                        Log.w(TAG, "blood oxygen asked for; no sensor on this watch reports it, "
-                                + "so nothing is sent");
-                        return;
-                    }
-                    int bpm = calibratedPulse(hr.bpm());
-                    if (bpm > 0) {
-                        sendAsync(BeehomeCodec.health(TrackerSources.stamp(), JK_PULSE, bpm));
-                        sendPressureAsync(hr);
-                        TrackerLog.recordPulse(TrackerService.this, bpm,
-                                System.currentTimeMillis());
-                    } else {
-                        Log.w(TAG, "no reading after 20s; the wrist is probably not there");
-                    }
-                } catch (Throwable t) {
-                    Log.w(TAG, "vitals request failed", t);
-                }
-            }
-        }, "vitals").start();
-    }
 
     /**
      * Answer FIND#: make the watch draw attention to itself.
@@ -1452,9 +1385,21 @@ public class TrackerService extends Service {
                         // nothing.
                         HeartRate hr = new HeartRate(TrackerService.this, null);
                         if (hr.available()) {
-                            hr.start();
-                            for (int i = 0; i < 30 && hr.bpm() <= 0; i++) Thread.sleep(500);
-                            pulse = hr.bpm() > 0;
+                            try {
+                                hr.start();
+                                for (int i = 0; i < 30 && hr.bpm() <= 0; i++) Thread.sleep(500);
+                                pulse = hr.bpm() > 0;
+                            } finally {
+                                // Always, and this is the whole bug: HeartRate.stop() used to
+                                // be reached only from take(), when a reading arrived. The
+                                // cached value arrived instantly, so it always was. Rejecting
+                                // that cache as stale - correctly - removed the only path that
+                                // ever unregistered the sensor, so every wear check left a
+                                // listener holding the LED on for good. dumpsys showed the
+                                // connections still there with com.ic.work force-stopped,
+                                // which is what pinned it on us rather than the firmware.
+                                hr.stop();
+                            }
                         } else {
                             // No sensor to disagree with the accelerometer, so do not let a
                             // missing one manufacture a removal.

@@ -33,7 +33,7 @@ public class BeehomeCodecTest {
         // 5128.0000 is 51 degrees 28.0000 minutes, not 51.4667000 degrees.
         eq("lat 51.4667000 -> ddmm.mmmm", BeehomeCodec.dm(51.0 + 28.0000 / 60.0, 2), "5128.0000");
         eq("lon 4.5000000 -> dddmm.mmmm", BeehomeCodec.dm(4.0 + 30.0000 / 60.0, 3), "00430.0000");
-        eq("lon pads to three degree digits", BeehomeCodec.dm(5.0, 3), "00430.0000");
+        eq("lon pads to three degree digits", BeehomeCodec.dm(4.5, 3), "00430.0000");
 
         // --- a real position frame ------------------------------------------------
         // Straight out of the server's log, from when the vendor client was still running:

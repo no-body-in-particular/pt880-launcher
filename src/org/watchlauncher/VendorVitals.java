@@ -121,6 +121,27 @@ public final class VendorVitals {
     /** Ours, so a reading we asked for is distinguishable from the firmware's own. */
     private static final int FROM = 4242;
 
+    /** How long to keep listening for the pressures after the pulse says the measurement is
+     *  done. They come in their own callback and lag it; waiting the whole budget for them
+     *  would hold the sensor on for nothing when the wrist is not giving them up. */
+    private static final long BP_GRACE_MS = 8000;
+
+    /**
+     * Fill the gaps in what we have with what just arrived.
+     *
+     * Each field independently: a callback carrying only a pulse must not wipe a pressure an
+     * earlier one delivered, and a later zero is "not ready", not "zero".
+     */
+    private static Reading merge(Reading have, Reading fresh) {
+        if (fresh == null) return have;
+        if (have == null) return fresh;
+        if (fresh.oxygen > 0) have.oxygen = fresh.oxygen;
+        if (fresh.heartRate > 0) have.heartRate = fresh.heartRate;
+        if (fresh.systolic > 0) have.systolic = fresh.systolic;
+        if (fresh.diastolic > 0) have.diastolic = fresh.diastolic;
+        return have;
+    }
+
     /** 0 ALL, 1 JUST_OXYGEN, 2 JUST_HEART_RATE -- ALL, so one measurement answers everything. */
     private static final int TYPE_ALL = 0;
 
@@ -151,8 +172,15 @@ public final class VendorVitals {
         // it, and arrives with the fields that are not ready yet still at zero. Taking the
         // first callback that carried any number at all meant taking a partial one: a pulse
         // with "SpO2 0%, 0/0" beside it, seconds before the real answer.
-        final Reading[] got = new Reading[1];
-        final Reading[] partial = new Reading[1];
+        // Merged across every callback rather than taken from one of them.
+        //
+        // The service streams a measurement: onHeartRateUpdate carries whatever is ready so
+        // far with the rest at zero, and onHeartRateGet ends it. Taking the first callback
+        // gave a pulse with "0/0" beside it; taking only the finished one lost the pressures,
+        // which is what stopped blood pressure arriving. Neither snapshot is the reading - the
+        // reading is what all of them together said.
+        final Reading[] acc = new Reading[1];
+        final long[] finishedAt = new long[1];
         final IBinder[] service = new IBinder[1];
 
         final Binder callback = new Binder() {
@@ -165,10 +193,8 @@ public final class VendorVitals {
                 if (code == CB_GET || code == CB_UPDATE) {
                     data.enforceInterface(CALLBACK);
                     Reading r = parse(data);
-                    if (r != null) {
-                        if (code == CB_GET) got[0] = r;
-                        else partial[0] = r;
-                    }
+                    if (r != null) acc[0] = merge(acc[0], r);
+                    if (code == CB_GET) finishedAt[0] = System.currentTimeMillis();
                     // The caller may or may not be waiting on a reply; answering when it is not
                     // is harmless, not answering when it is would hang it.
                     if (reply != null) reply.writeNoException();
@@ -235,26 +261,33 @@ public final class VendorVitals {
             if (!register(service[0], callback, ctx.getPackageName())) return null;
             try {
                 ask(service[0], ctx.getPackageName());
-                while (got[0] == null && System.currentTimeMillis() < deadline) {
+                while (System.currentTimeMillis() < deadline) {
+                    Reading a = acc[0];
+                    if (finishedAt[0] > 0 && a != null && a.heartRate > 0) {
+                        // The measurement says it is done and a pulse is in. Give the
+                        // pressures a moment to follow - they arrive in their own callback
+                        // and lag the pulse - but do not wait out the whole budget for them.
+                        if (a.systolic > 0
+                                || System.currentTimeMillis() - finishedAt[0] > BP_GRACE_MS) {
+                            break;
+                        }
+                    }
                     Thread.sleep(200);
                 }
             } finally {
                 unregister(service[0], callback);
             }
 
-            if (got[0] == null && partial[0] != null) {
-                // The finished callback never came, but something was measured. Better than
-                // nothing, and said plainly so a partial reading is not mistaken for a full one.
-                Log.i(TAG, "only a progress reading: " + partial[0]);
-                return partial[0];
-            }
-            if (got[0] == null) {
+            if (acc[0] == null) {
                 Log.w(TAG, "no reading in " + (timeoutMs / 1000) + "s; the work queue is "
                         + "probably wedged, which is its known failure and not worth retrying");
                 return null;
             }
-            Log.i(TAG, "" + got[0]);
-            return got[0];
+            if (finishedAt[0] == 0) {
+                Log.i(TAG, "measurement did not finish; reporting what arrived: " + acc[0]);
+            }
+            Log.i(TAG, "" + acc[0]);
+            return acc[0];
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return null;
