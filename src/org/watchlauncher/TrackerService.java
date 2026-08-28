@@ -467,7 +467,12 @@ public class TrackerService extends Service {
             // does both jobs depending on its payload -- the same shape as BPSM and @monitor@.
             ackIfCommand(out, f);
             for (int i = 0; i < f.fields.size(); i++) {
-                if (f.fields.get(i).indexOf("photo") >= 0) {
+                String v = f.fields.get(i).trim();
+                // The marker, not the word. handleBPU8 matches the literal ">*photo@1*<", and
+                // this frame's other job is carrying arbitrary pushed text - so "photo"
+                // anywhere in a field would let someone open the camera by mentioning it in a
+                // message. A spurious picture is the worse failure of the two available.
+                if (v.indexOf(">*photo") >= 0 || v.equals("photo")) {
                     beginPhoto();
                     return;
                 }
