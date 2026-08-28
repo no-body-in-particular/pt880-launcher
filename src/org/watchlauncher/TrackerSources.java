@@ -281,9 +281,15 @@ public final class TrackerSources {
         return age >= 0 && age < FIX_MAX_AGE_MS;
     }
 
-    /** Local time in the shape {@code APJK} carries it. */
+    /**
+     * The time in the shape {@code APJK} carries it, in UTC.
+     *
+     * It was local, which put every reading two hours into the future for a watch on CEST --
+     * the server parses these with {@code timegm}. SleepUpload has always stamped UTC, so the
+     * two senders disagreed about what the same field meant, and one of them had to be wrong.
+     */
     public static String stamp() {
-        Calendar cal = Calendar.getInstance();
+        Calendar cal = Calendar.getInstance(TimeZone.getTimeZone("UTC"));
         return String.format(Locale.US, "%04d-%02d-%02d %02d:%02d:%02d",
                 cal.get(Calendar.YEAR), cal.get(Calendar.MONTH) + 1, cal.get(Calendar.DAY_OF_MONTH),
                 cal.get(Calendar.HOUR_OF_DAY), cal.get(Calendar.MINUTE), cal.get(Calendar.SECOND));

@@ -124,6 +124,16 @@ public class TrackerService extends Service {
     /** Matches the cadence the vendor used, and what the server expects to see. */
     private static final int HEARTBEAT_MS = 10 * 60 * 1000;
 
+    /*
+     * There is deliberately no session recycle here.
+     *
+     * The server buffers a connection's log lines and writes them when the connection closes,
+     * so a long-lived session looks silent in the log while it is working perfectly. Closing
+     * the socket every ten minutes would make the log timely, and it was tried -- but the fix
+     * for a display delay is not to keep dropping a healthy connection. Frames are flushed to
+     * the socket as they are written, which is the part this end is responsible for.
+     */
+
     /** Backoff between reconnects: quick at first, then out of the way. */
     private static final int[] BACKOFF_MS = {5000, 15000, 60000, 300000};
 
@@ -182,6 +192,9 @@ public class TrackerService extends Service {
 
     /** Voice messages arrive a packet at a time, so the assembly outlives one frame. */
     private final VoiceAssembler voice = new VoiceAssembler();
+
+    /** The id of the session in progress, for the readings that are sent off the loop thread. */
+    private volatile String deviceId;
 
     // ------------------------------------------------------------------ lifecycle
 
@@ -266,6 +279,7 @@ public class TrackerService extends Service {
         // the opcode, so the id is field 0. Without this the session is filed against
         // 0000000000000000 and nothing the watch says appears under its own device, though the
         // socket works and every frame is answered.
+        deviceId = id;
         send(out, BeehomeCodec.login(id));
         send(out, BeehomeCodec.heartbeat(id, TrackerSources.steps(this),
                 TrackerSources.battery(this), cycleSeconds()));
@@ -418,7 +432,15 @@ public class TrackerService extends Service {
             return;
         }
         if ("46".equals(f.op)) {                    // take a picture now
-            ackIfCommand(out, f);
+            // Not acknowledged. The generic reply sends "IWAP46,<token>#", and the server reads
+            // AP46 as a location frame -- its log says
+            //
+            //     Invalid location package recieved. ... got message: IWAP46,080835
+            //
+            // which is the same shape of mistake as acking BPJK or BP42: a bare token in a
+            // frame whose opcode means something with a payload. The picture is the answer to
+            // this command, and it goes up as AP42 packets that the server acknowledges one by
+            // one, so nothing is waiting on a reply here.
             beginPhoto();
             return;
         }
@@ -724,6 +746,7 @@ public class TrackerService extends Service {
             if (bpm > 0) {
                 send(out, BeehomeCodec.health(TrackerSources.stamp(), JK_PULSE, bpm));
                 TrackerLog.recordPulse(this, bpm, System.currentTimeMillis());
+                sendPressure(out, hr);
             }
         } catch (Throwable t) {
             Log.w(TAG, "no vitals reading", t);
@@ -848,12 +871,7 @@ public class TrackerService extends Service {
                     for (int i = 0; i < 40 && hr.bpm() <= 0; i++) Thread.sleep(500);
 
                     if (type == MEASURE_BP) {
-                        int sys = hr.systolic() + prefs(TrackerService.this).getInt(KEY_CAL_BPH, 0);
-                        int dia = hr.diastolic() + prefs(TrackerService.this).getInt(KEY_CAL_BPL, 0);
-                        if (sys > 0 && dia > 0) {
-                            sendAsync(BeehomeCodec.frame("JZ", TrackerSources.stamp(),
-                                    Integer.toString(sys), Integer.toString(dia)));
-                        }
+                        sendPressureAsync(hr);
                         return;
                     }
                     if (type == MEASURE_SPO2) {
@@ -876,6 +894,7 @@ public class TrackerService extends Service {
                     int bpm = calibratedPulse(hr.bpm());
                     if (bpm > 0) {
                         sendAsync(BeehomeCodec.health(TrackerSources.stamp(), JK_PULSE, bpm));
+                        sendPressureAsync(hr);
                         TrackerLog.recordPulse(TrackerService.this, bpm,
                                 System.currentTimeMillis());
                     } else {
@@ -1039,6 +1058,49 @@ public class TrackerService extends Service {
 
     private static int clamp(int v, int lo, int hi) {
         return v < lo ? lo : (v > hi ? hi : v);
+    }
+
+    /**
+     * Blood pressure, from the same reading the pulse came from.
+     *
+     * This is what the original did and this client was not. gh30x_sensor answers with three
+     * values at once -- dumpsys shows "last=<59.0,120.0,79.0>", pulse and the two pressures --
+     * and the vendor uploaded all of it together, which is what "server received uploaded heart
+     * rate and blood pressure" in its own APHT handler is describing. This client read the same
+     * three values, sent the first, threw the other two away, and sent a pressure only when the
+     * server explicitly asked with BPXY.
+     *
+     * So the server's systolic and diastolic series stop dead on the day the vendor app was
+     * retired, while the heart rate carries on. Nothing was broken; two thirds of every reading
+     * was simply being discarded.
+     */
+    private void sendPressure(OutputStream out, HeartRate hr) {
+        String f = pressureFrame(hr);
+        if (f == null) return;
+        try {
+            send(out, f);
+        } catch (Throwable t) {
+            Log.w(TAG, "could not send blood pressure", t);
+        }
+    }
+
+    private void sendPressureAsync(HeartRate hr) {
+        String f = pressureFrame(hr);
+        if (f != null) sendAsync(f);
+    }
+
+    /** Null when the sensor gave no pressure, which is not the same as a pressure of zero. */
+    private String pressureFrame(HeartRate hr) {
+        int sys = hr.systolic();
+        int dia = hr.diastolic();
+        if (sys <= 0 || dia <= 0) return null;
+        sys = clamp(sys + prefs(this).getInt(KEY_CAL_BPH, 0), 60, 260);
+        dia = clamp(dia + prefs(this).getInt(KEY_CAL_BPL, 0), 30, 200);
+        if (dia >= sys) {
+            Log.w(TAG, "blood pressure " + sys + "/" + dia + " is not a pressure; not sending");
+            return null;
+        }
+        return BeehomeCodec.bloodPressure(TrackerSources.stamp(), sys, dia);
     }
 
     /** A pulse with the server's PPG offset applied, still inside a believable range. */

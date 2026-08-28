@@ -71,6 +71,9 @@ public class BeehomeCodecTest {
         eq("APVR version", BeehomeCodec.version(id, "l009-EU-noAnti-Common-V3.70.20240808.162444"),
                 "IWAPVR," + id + ",l009-EU-noAnti-Common-V3.70.20240808.162444#");
 
+        // No device id in this frame, and that is the vendor's own shape: its recorded
+        // frames read "IWAPJK,2026-08-25 17:33:03,2,57#". The session is identified by the
+        // AP00 login, and the server attributes what follows to the connection.
         eq("APJK health", BeehomeCodec.health("2026-08-26 21:46:08", 3, 36.35),
                 "IWAPJK,2026-08-26 21:46:08,3,36.35#");
 

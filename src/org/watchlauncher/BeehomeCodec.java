@@ -286,14 +286,25 @@ public final class BeehomeCodec {
      * nothing downstream can tell. So this refuses anything it does not own rather than
      * formatting it faithfully. Sleep readings go through {@link #sleep}.
      */
-    public static String health(String isoLocalTime, int type, double value) {
+    public static String health(String isoUtcTime, int type, double value) {
         if (type != JK_HEART_RATE && type != JK_TEMPERATURE) {
             throw new IllegalArgumentException(
                     "health() sends heart rate and temperature; " + type + " is "
                     + jkName(type) + " -- use sleep() for those");
         }
-        return frame("JK", isoLocalTime, Integer.toString(type),
+        return frame("JK", isoUtcTime, Integer.toString(type),
                 String.format(Locale.US, "%.2f", value));
+    }
+
+    /**
+     * Blood pressure, which the JK frame carries as one field rather than two.
+     *
+     * Type 1, value "<diastolic>|<systolic>" - the shape the vendor's own recorded frames use,
+     * "1,80|121". The server has kept systolic and diastolic series since long before this
+     * client existed, and they were fed by frames of exactly this form.
+     */
+    public static String bloodPressure(String isoUtcTime, int systolic, int diastolic) {
+        return frame("JK", isoUtcTime, "1", diastolic + "|" + systolic);
     }
 
     /**
