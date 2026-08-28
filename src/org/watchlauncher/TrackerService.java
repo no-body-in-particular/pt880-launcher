@@ -136,8 +136,26 @@ public class TrackerService extends Service {
      * the socket as they are written, which is the part this end is responsible for.
      */
 
-    /** Backoff between reconnects: quick at first, then out of the way. */
-    private static final int[] BACKOFF_MS = {5000, 15000, 60000, 300000};
+    /**
+     * Backoff between reconnects: quick at first, then out of the way.
+     *
+     * The last step used to be five minutes, and on a flaky link that is most of the outage.
+     * The server's own log counted the cost - "device reconnected after 569 seconds", "after
+     * 924", "after 2199" - because each failed retry waited the full cap again, so a WiFi blip
+     * lasting seconds cost a quarter of an hour of readings. A minute is long enough to stop
+     * hammering a server that is genuinely down and short enough that a link which has come
+     * back is noticed while it is still worth noticing.
+     */
+    private static final int[] BACKOFF_MS = {5000, 15000, 30000, 60000};
+
+    /**
+     * A session that lasted this long was working, whatever ended it.
+     *
+     * Without this the backoff only reset on a clean return, so hours of healthy connection
+     * followed by one dropped socket started the next reconnect at the longest wait, as though
+     * the server had been refusing all along.
+     */
+    private static final long SESSION_OK_MS = 30000;
 
     /** How long to wait for a media packet's BP07 before sending that packet again. Longer than
      *  a tick, so a slow ack is not mistaken for a lost one. */
@@ -460,12 +478,23 @@ public class TrackerService extends Service {
     private void loop() {
         int attempt = 0;
         while (running) {
+            long began = SystemClock.elapsedRealtime();
             try {
                 connectAndServe();
                 attempt = 0;                       // a clean session resets the backoff
             } catch (Throwable t) {
                 lastState = "disconnected: " + t;
-                Log.w(TAG, "session ended", t);
+                // A session that ran for a while was a working one, so the drop is news about
+                // the link rather than about the server, and the next attempt should be as
+                // eager as the first.
+                long ran = SystemClock.elapsedRealtime() - began;
+                if (ran > SESSION_OK_MS) {
+                    Log.w(TAG, "session of " + (ran / 1000) + "s ended; treating it as healthy "
+                            + "and reconnecting straight away", t);
+                    attempt = 0;
+                } else {
+                    Log.w(TAG, "session ended after " + (ran / 1000) + "s", t);
+                }
             }
             if (!running) break;
             int wait = BACKOFF_MS[Math.min(attempt, BACKOFF_MS.length - 1)];

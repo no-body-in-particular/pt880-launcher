@@ -1,6 +1,13 @@
 package org.watchlauncher;
 
+import android.content.Context;
+import android.hardware.Sensor;
+import android.hardware.SensorEvent;
+import android.hardware.SensorEventListener;
+import android.hardware.SensorManager;
 import android.util.Log;
+
+import com.ic.jni.ICJniUtils;
 
 import java.io.FileInputStream;
 import java.io.IOException;
@@ -87,6 +94,9 @@ final class SensorInput {
      */
     private static final int SETTLE_SAMPLES = 4;
 
+    /** Samples arrive once a second, so this much silence means the measurement has ended. */
+    private static final long QUIET_MS = 5000;
+
     /** Plausibility bounds. Outside these the sensor is talking to itself. */
     private static final int HR_MIN = 30, HR_MAX = 220;
     private static final int SPO2_MIN = 70, SPO2_MAX = 100;
@@ -112,6 +122,47 @@ final class SensorInput {
         public String toString() {
             return heartRate + " bpm, SpO2 " + oxygen + "%"
                     + (systolic > 0 ? ", " + systolic + "/" + diastolic : "");
+        }
+    }
+
+    /**
+     * The current pressure pair from the vendor's library, or null.
+     *
+     * Read only, and deliberately: no enablePPG here. Driving the chip ourselves was tried and
+     * gives heart rate alone - enablePPG() starts it in heart rate mode, and the library said
+     * so on every sample of a full window, "event ppg 59 , spo2 0 , weared 1". SpO2 mode is
+     * started by the HAL ("command, GH_30X gh30x_Spo2Start" lives in sensors.sl8521e.so), so
+     * the service still starts the measurement and this only reads out of the chip while it
+     * runs. Starting a second one underneath it would be two callers on one i2c device.
+     *
+     * The pressures are the one thing that has to come from here. They are not on the input
+     * device - the measurement that produced 123/81 emitted eleven REL_RX and no REL_RY at all
+     * - so they are derived above the driver, and this library is where.
+     */
+    static int[] pressure() {
+        if (!LIB_OK) return null;
+        try {
+            int h = ICJniUtils.getHighBloodPressure();
+            int l = ICJniUtils.getLowBloodPressure();
+            if (h >= SYS_MIN && h <= SYS_MAX && l >= DIA_MIN && l <= DIA_MAX && l < h) {
+                return new int[] { h, l };
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "the vendor library would not give a pressure", t);
+        }
+        return null;
+    }
+
+    /** Whether libICJniUtils.so loaded. Checked once; a missing library is not an error here. */
+    private static final boolean LIB_OK = loadLib();
+
+    private static boolean loadLib() {
+        try {
+            System.loadLibrary("ICJniUtils");
+            return true;
+        } catch (Throwable t) {
+            Log.i(TAG, "libICJniUtils.so did not load (" + t + "); using the input device only");
+            return false;
         }
     }
 
@@ -148,130 +199,229 @@ final class SensorInput {
      * Returns null if the node is not usable, which leaves the caller with the vendor service's
      * answer and no worse off than before.
      */
-    static Reader start() {
+    static Reader start(Context ctx) {
         if (!available()) {
             Log.i(TAG, NODE + " is not readable; leaving the reading to the service");
             return null;
         }
         try {
-            return new Reader();
+            return new Reader(ctx);
         } catch (IOException e) {
             Log.w(TAG, "could not open " + NODE, e);
             return null;
         }
     }
 
-    static final class Reader implements Runnable {
-        private final FileInputStream in;
-        private final Thread thread;
-        private final List<Integer> hr = new ArrayList<Integer>();
-        private final List<Integer> spo2 = new ArrayList<Integer>();
-        private volatile int seen;
-        private volatile boolean closing;
-        /** Last plausible pressure pair off REL_RY; guarded by the same lock as the lists. */
-        private int systolic;
-        private int diastolic;
+    /**
+     * Switch the sensor on the way com.ic.work does, and get SpO2 mode with it.
+     *
+     * The HAL is only half broken. It never delivers an event - a measurement sits at "First
+     * flush pending" for its whole window and last= never moves - but activating a sensor
+     * through it does work, and that is what puts the chip in the right mode: "command, GH_30X
+     * gh30x_Spo2Start" is a string in sensors.sl8521e.so, not in libICJniUtils. Driving the
+     * chip ourselves with the library's enablePPG() gets heart rate mode and nothing else, and
+     * the library said so on every sample of a full window: "event ppg 59 , spo2 0 , weared 1".
+     *
+     * So register a listener that is never expected to hear anything. The activation is the
+     * whole point of it; the samples come off the input device, which is not on the path that
+     * loses them. com.ic.work is not needed for this - the vendor app registers the same way,
+     * a plain SensorEventListener rather than a TriggerEventListener, despite dumpsys calling
+     * the sensor on-demand.
+     *
+     * Found by name rather than by type constant: it is a vendor sensor with a vendor type
+     * number, and the name is the thing that is actually documented anywhere - it is what
+     * /sys/class/input/event1/device/name says too.
+     */
+    private static final SensorEventListener DEAF = new SensorEventListener() {
+        public void onSensorChanged(SensorEvent e) { }
+        public void onAccuracyChanged(Sensor s, int a) { }
+    };
 
-        Reader() throws IOException {
-            in = new FileInputStream(NODE);
-            thread = new Thread(this, "gh30x");
-            thread.setDaemon(true);
-            thread.start();
+    private static Sensor find(SensorManager sm) {
+        for (Sensor s : sm.getSensorList(Sensor.TYPE_ALL)) {
+            if (EXPECT_NAME.equals(s.getName())) return s;
+        }
+        return null;
+    }
+
+    /**
+     * The one thread that reads the node, for the life of the process.
+     *
+     * There used to be one per measurement, and they leaked: finish() closed the node to break
+     * the thread out of read(), and on Linux that does not wake a thread already inside read()
+     * on a character device. A thread dump caught two at once, both parked in libc read+8, each
+     * still holding the node open. Between measurements the driver is silent for minutes, so
+     * that is where they stayed.
+     *
+     * Polling available() instead was worse, and briefly shipped: available() is FIONREAD,
+     * evdev does not implement it, and every reader died on its first call with "ioctl failed:
+     * EINVAL" - which showed up as every measurement seeing 0 raw samples.
+     *
+     * So the blocking read was right and the thread per measurement was wrong. One pump, never
+     * stopped, parked in read() when there is nothing to read - which costs nothing - and a
+     * measurement is a window over what it saw rather than a thread of its own.
+     */
+    private static Thread pump;
+
+    /** {elapsedRealtime, heart rate, SpO2} per sample, newest last. Guarded by SAMPLES. */
+    private static final List<long[]> SAMPLES = new ArrayList<long[]>();
+
+    /** Several minutes of once-a-second samples; older ones interest nobody. */
+    private static final int KEEP = 600;
+
+    private static synchronized void ensurePump() {
+        if (pump != null && pump.isAlive()) return;
+        pump = new Thread(new Runnable() {
+            public void run() {
+                byte[] buf = new byte[EVENT_BYTES];
+                FileInputStream in = null;
+                try {
+                    in = new FileInputStream(NODE);
+                    while (true) {
+                        int got = 0;
+                        while (got < EVENT_BYTES) {
+                            int n = in.read(buf, got, EVENT_BYTES - got);
+                            if (n < 0) return;
+                            got += n;
+                        }
+                        if (le16(buf, 8) != EV_REL) continue;
+                        int code = le16(buf, 10);
+                        int value = le32(buf, 12);
+
+                        if (code == REL_RY) {
+                            // Declared in capabilities/rel and never once emitted. Logged raw so
+                            // that if one arrives the encoding is read off it, not guessed.
+                            Log.i(TAG, "REL_RY (pressure?) raw 0x" + Integer.toHexString(value));
+                            continue;
+                        }
+                        if (code != REL_RX) continue;
+
+                        long now = android.os.SystemClock.elapsedRealtime();
+                        synchronized (SAMPLES) {
+                            SAMPLES.add(new long[] { now, (value >> 8) & 0xFF, value & 0xFF });
+                            while (SAMPLES.size() > KEEP) SAMPLES.remove(0);
+                        }
+                    }
+                } catch (IOException e) {
+                    Log.w(TAG, "the reader stopped; readings will be missing until it restarts",
+                            e);
+                } finally {
+                    close(in);
+                }
+            }
+        }, "gh30x");
+        pump.setDaemon(true);
+        pump.start();
+    }
+
+    /** One measurement: the sensor switched on, and a window over what the pump sees meanwhile. */
+    static final class Reader {
+        private final SensorManager sm;
+        private boolean registered;
+        private final long from;
+
+        Reader(Context ctx) throws IOException {
+            ensurePump();
+            from = android.os.SystemClock.elapsedRealtime();
+            sm = (SensorManager) ctx.getSystemService(Context.SENSOR_SERVICE);
+            Sensor s = sm == null ? null : find(sm);
+            if (s != null) {
+                sm.registerListener(DEAF, s, SensorManager.SENSOR_DELAY_NORMAL);
+                registered = true;
+                Log.i(TAG, "switched on " + s.getName() + " (type " + s.getType() + ")");
+            } else {
+                Log.w(TAG, "no " + EXPECT_NAME + " in the sensor list; leaving the start to "
+                        + "the service");
+            }
         }
 
-        public void run() {
-            byte[] buf = new byte[EVENT_BYTES];
-            try {
-                while (!closing) {
-                    int got = 0;
-                    while (got < EVENT_BYTES) {
-                        int n = in.read(buf, got, EVENT_BYTES - got);
-                        if (n < 0) return;
-                        got += n;
-                    }
-                    if (le16(buf, 8) != EV_REL) continue;
-                    int code = le16(buf, 10);
-                    int value = le32(buf, 12);
-
-                    if (code == REL_RY) {
-                        // Never yet seen. Logged raw so the encoding can be read off a real one
-                        // rather than trusted from the guess at the constant.
-                        Log.i(TAG, "REL_RY (pressure?) raw 0x" + Integer.toHexString(value));
-                        int sys = (value >> 8) & 0xFF;
-                        int dia = value & 0xFF;
-                        if (sys >= SYS_MIN && sys <= SYS_MAX
-                                && dia >= DIA_MIN && dia <= DIA_MAX && dia < sys) {
-                            synchronized (hr) {
-                                systolic = sys;
-                                diastolic = dia;
-                            }
-                        }
-                        continue;
-                    }
-                    if (code != REL_RX) continue;
-
-                    seen++;
-                    if (seen <= SETTLE_SAMPLES) continue;
-
-                    int beats = (value >> 8) & 0xFF;
-                    int ox = value & 0xFF;
-                    synchronized (hr) {
-                        if (beats >= HR_MIN && beats <= HR_MAX) hr.add(Integer.valueOf(beats));
-                        if (ox >= SPO2_MIN && ox <= SPO2_MAX) spo2.add(Integer.valueOf(ox));
-                    }
-                }
-            } catch (IOException e) {
-                // Expected: finish() closes the node to interrupt this read.
-                if (!closing) Log.w(TAG, "reading " + NODE + " stopped", e);
+        /** How many samples have arrived since this measurement began. */
+        private int since() {
+            int n = 0;
+            synchronized (SAMPLES) {
+                for (int i = SAMPLES.size() - 1; i >= 0 && SAMPLES.get(i)[0] >= from; i--) n++;
             }
+            return n;
         }
 
         /**
-         * Stop reading and return the reading, taken from the end of the window.
+         * Let the measurement run its course, then stop and return what it saw.
          *
-         * Not the median of everything, which is what the first version did and what got a
-         * genuine 100 % reported as 82 %. SpO2 does not hold still and average out - it climbs
-         * and then plateaus:
-         *
-         *     22, 24, 80, 81, 81, 81, 82, 82, 100, 100, 100, 100
-         *
-         * so the median of the whole window is a point on the ramp, and the ramp is the sensor
-         * still working it out rather than a lower reading. The plateau is the answer. Heart
-         * rate is steady from the first sample and does not care either way, but it comes in
-         * the same packet, so both are taken the same way.
-         *
-         * The median of the last third rather than the final sample: the tail is where the
-         * value has settled, and a median over it still absorbs one bad packet arriving as the
-         * sensor powers down, which the final sample on its own would not.
+         * There is no "done" signal to wait for - the chip simply stops producing - so this
+         * waits for the samples to stop arriving rather than for a fixed time. A good window is
+         * twenty to thirty of them, and once several seconds pass with no new one there is
+         * nothing to gain by holding the sensor on.
          */
-        Sample finish() {
-            closing = true;
-            close(in);
+        Sample collect(long timeoutMs) {
+            long deadline = android.os.SystemClock.elapsedRealtime() + timeoutMs;
+            int last = -1;
+            long changed = android.os.SystemClock.elapsedRealtime();
             try {
-                thread.join(1000);
+                while (android.os.SystemClock.elapsedRealtime() < deadline) {
+                    Thread.sleep(500);
+                    long now = android.os.SystemClock.elapsedRealtime();
+                    int n = since();
+                    if (n != last) {
+                        last = n;
+                        changed = now;
+                    } else if (n > SETTLE_SAMPLES && now - changed > QUIET_MS) {
+                        break;
+                    }
+                }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
-            synchronized (hr) {
-                if (hr.isEmpty() && spo2.isEmpty() && systolic == 0) {
-                    Log.w(TAG, "the driver produced no usable sample (" + seen + " raw)");
-                    return null;
-                }
-                Sample s = new Sample(medianOfTail(hr), medianOfTail(spo2),
-                        systolic, diastolic);
-                Log.i(TAG, "from the driver: " + s + " (" + seen + " samples, "
-                        + hr.size() + " usable)");
-                return s;
+            return finish();
+        }
+
+        /**
+         * Switch the sensor off and work out the reading.
+         *
+         * Taken from the end of the window rather than the middle of it. The median of
+         * everything reported a genuine 100 % as 82 %, because SpO2 climbs and then plateaus -
+         * 22, 24, 80, 81, 82, 100, 100 - so the median of the whole window sits on the ramp,
+         * and the ramp is the sensor still working it out. The median of the last third
+         * instead: the plateau is the answer, and a median over it still absorbs one bad packet
+         * arriving as the sensor powers down.
+         */
+        Sample finish() {
+            if (registered) {
+                try { sm.unregisterListener(DEAF); } catch (Throwable ignored) { }
+                registered = false;
             }
+            List<Integer> hr = new ArrayList<Integer>();
+            List<Integer> spo2 = new ArrayList<Integer>();
+            int seen = 0;
+            synchronized (SAMPLES) {
+                for (long[] s : SAMPLES) {
+                    if (s[0] < from) continue;
+                    seen++;
+                    if (seen <= SETTLE_SAMPLES) continue;
+                    int beats = (int) s[1], ox = (int) s[2];
+                    if (beats >= HR_MIN && beats <= HR_MAX) hr.add(Integer.valueOf(beats));
+                    if (ox >= SPO2_MIN && ox <= SPO2_MAX) spo2.add(Integer.valueOf(ox));
+                }
+            }
+            // The chip has only just stopped, so this is the last moment it has a pressure to
+            // give - and the pressures are the one thing not on the input device at all.
+            int[] bp = pressure();
+            if (hr.isEmpty() && spo2.isEmpty() && bp == null) {
+                Log.w(TAG, "the driver produced no usable sample (" + seen + " raw)");
+                return null;
+            }
+            Sample s = new Sample(medianOfTail(hr), medianOfTail(spo2),
+                    bp == null ? 0 : bp[0], bp == null ? 0 : bp[1]);
+            Log.i(TAG, "from the driver: " + s + " (" + seen + " samples, "
+                    + hr.size() + " usable)");
+            return s;
         }
     }
 
     /**
      * The median of the last third of the samples, in arrival order.
      *
-     * At least three of them where there are that many, so the median is over a real spread
-     * and not one packet wearing a median's clothes. Sorting a copy, because the caller's list
-     * is in arrival order and the last third only means anything while it stays that way.
+     * At least three where there are that many, so the median is over a real spread rather than
+     * one packet wearing a median for a hat.
      */
     private static int medianOfTail(List<Integer> v) {
         if (v.isEmpty()) return 0;

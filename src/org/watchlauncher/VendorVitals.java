@@ -168,6 +168,20 @@ public final class VendorVitals {
      * wedged, and is not worth retrying.
      */
     public static Reading measure(Context ctx, long timeoutMs) {
+        // Driving the sensor ourselves through libICJniUtils was tried and gives heart rate
+        // only: enablePPG() starts the chip in heart rate mode, and the library's own event
+        // said so on every sample of a full 45 s window -
+        //
+        //     GH_gh30x   event ppg 59 , spo2 0 , weared 1
+        //
+        // SpO2 mode is started by the HAL, not by that library: "command, GH_30X
+        // gh30x_Spo2Start" is a string in sensors.sl8521e.so. Which is why SpO2 appears on the
+        // input device only while com.ic.work is running the measurement.
+        //
+        // So the service still starts it. What has changed is that nothing depends on the HAL
+        // delivering the result any more: heart rate and SpO2 come off the input device, and
+        // the pressures come from the library, polled during the same window.
+
         // onHeartRateGet is the finished measurement; onHeartRateUpdate is progress towards
         // it, and arrives with the fields that are not ready yet still at zero. Taking the
         // first callback that carried any number at all meant taking a partial one: a pulse
@@ -227,6 +241,14 @@ public final class VendorVitals {
         try {
             long deadline = System.currentTimeMillis() + timeoutMs;
 
+            // Starting it ourselves and waiting was tried here, and only wasted the budget.
+            // Registering a listener does switch the sensor on - "switched on gh30x_sensor
+            // (type 21)" - but that alone runs no measurement: 45 s of it produced no sample at
+            // all, and the request then had to be made anyway, having spent the timeout. The
+            // vendor's native start is what actually runs the PPG.
+            //
+            // So ask the service first, as before. The reader below still registers a listener
+            // while it collects, which costs nothing and keeps the sensor up for the window.
             for (int a = 0; a < CANDIDATES.length && service[0] == null; a++) {
                 if (bound) {
                     try { ctx.unbindService(conn); } catch (Throwable ignored) { }
@@ -266,7 +288,7 @@ public final class VendorVitals {
             // Start listening to the driver before asking for the measurement, so nothing is
             // missed between the request going in and the sensor powering up. See SensorInput:
             // the HAL loses every sample, so this is where the heart rate and SpO2 come from.
-            driver = SensorInput.start();
+            driver = SensorInput.start(ctx);
             try {
                 ask(service[0], ctx.getPackageName());
                 while (System.currentTimeMillis() < deadline) {
