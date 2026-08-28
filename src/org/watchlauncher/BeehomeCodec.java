@@ -324,7 +324,35 @@ public final class BeehomeCodec {
     }
 
     /**
+     * The five characters the vendor puts after the battery, unexplained.
+     *
+     * Constant across every captured frame - "...09900008", "...09800008", "...09300008" - and
+     * the block is exactly 59 characters with it and 54 without, which is the length CTracker's
+     * sscanf wants. So it is sent as the vendor sends it rather than dropped for not being
+     * understood.
+     */
+    private static final String TAIL = "00008";
+
+    /**
      * A position report.
+     *
+     * <h3>The layout, from frames the server actually received</h3>
+     *
+     * <pre>
+     * IWAP01 260827 A 5128.0000 N 00430.0000 E 001.0 214302 345.89 073 005 099 00008
+     *        yymmdd |    lat    |     lon    |  speed hhmmss course sig sat batt tail
+     * </pre>
+     *
+     * Not from a specification: those are real frames out of the server's own log, from when
+     * the vendor client was still running. The block is 59 characters, which is exactly the
+     * minimum CTracker checks for before it will read one.
+     *
+     * <h3>What this used to send</h3>
+     *
+     * Course as "%03d." - four characters instead of six - then no signal, no satellites, no
+     * battery, and the device id appended where the vendor puts none. 58 characters, one short
+     * of the check, with every field after the time at the wrong offset. The id is not in this
+     * frame at all: the session is identified by the AP00 login.
      *
      * @param valid false sends the no-fix form the server already expects indoors
      * @param cells {@code MCC,MNC,LAC,CI} as four fields
@@ -334,6 +362,7 @@ public final class BeehomeCodec {
                                   double speedKmh, double courseDeg,
                                   int year, int month, int day,
                                   int hour, int minute, int second,
+                                  int signal, int satellites, int battery,
                                   String[] cells, String wifi) {
         StringBuilder b = new StringBuilder(UP).append("01");
         b.append(String.format(Locale.US, "%02d%02d%02d", year % 100, month, day));
@@ -346,8 +375,11 @@ public final class BeehomeCodec {
         }
         b.append(String.format(Locale.US, "%05.1f", clamp(speedKmh, 0, 999.9)));
         b.append(String.format(Locale.US, "%02d%02d%02d", hour, minute, second));
-        b.append(String.format(Locale.US, "%03d.", ((int) Math.round(courseDeg) % 360 + 360) % 360));
-        b.append(id);
+        b.append(String.format(Locale.US, "%06.2f", ((courseDeg % 360) + 360) % 360));
+        b.append(String.format(Locale.US, "%03d", (int) clamp(signal, 0, 999)));
+        b.append(String.format(Locale.US, "%03d", (int) clamp(satellites, 0, 999)));
+        b.append(String.format(Locale.US, "%03d", (int) clamp(battery, 0, 999)));
+        b.append(TAIL);
         if (cells != null) {
             for (String c : cells) b.append(',').append(c);
         }

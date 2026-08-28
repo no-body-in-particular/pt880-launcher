@@ -36,21 +36,31 @@ public class BeehomeCodecTest {
         eq("lon pads to three degree digits", BeehomeCodec.dm(5.0, 3), "00430.0000");
 
         // --- a real position frame ------------------------------------------------
-        // IWAP01260826A5128.0000N00430.0000E000.2214309015.<id>,204,08,3270,1561888,<wifi>
+        // Straight out of the server's log, from when the vendor client was still running:
+        //
+        //   IWAP01260827A5128.0000N00430.0000E001.0214302345.8907300509900008,204,08,...
+        //          yymmdd|    lat  |    lon   | spd hhmmss course sig sat bat tail
+        //
+        // 59 characters before the first comma, which is the length CTracker checks for. There
+        // is no device id in it: the session is identified by the AP00 login.
         String wifi = "AP1|60:a4:b7:68:f1:ae|-55";
         String got = BeehomeCodec.location(id, true,
                 51.0 + 28.0000 / 60.0, 4.0 + 30.0000 / 60.0,
-                0.2, 15, 2026, 8, 26, 21, 43, 9,
+                1.0, 345.89, 2026, 8, 27, 21, 43, 2,
+                73, 5, 99,
                 new String[]{"204", "08", "3270", "1561888"}, wifi);
         eq("AP01 matches a captured frame", got,
-                "IWAP01260826A5128.0000N00430.0000E000.2214309015." + id
+                "IWAP01260827A5128.0000N00430.0000E001.0214302345.8907300509900008"
                         + ",204,08,3270,1561888," + wifi + "#");
+        check("the block is 59 characters, as the server's sscanf wants",
+                got.indexOf(',') - 6 == 59, "" + (got.indexOf(',') - 6));
 
         // no fix: the server already understands this, it is what the vendor sends indoors
         String nofix = BeehomeCodec.location(id, false, 0, 0, 0, 356,
-                2026, 8, 26, 21, 58, 59, new String[]{"204", "08", "3270", "1561888"}, "");
+                2026, 8, 26, 21, 58, 59, 65, 0, 93,
+                new String[]{"204", "08", "3270", "1561888"}, "");
         eq("AP01 no-fix form", nofix,
-                "IWAP01260826V0000.0000N00000.0000E000.0215859356." + id
+                "IWAP01260826V0000.0000N00000.0000E000.0215859356.0006500009300008"
                         + ",204,08,3270,1561888,#");
 
         // --- heartbeat, which is also the login -----------------------------------

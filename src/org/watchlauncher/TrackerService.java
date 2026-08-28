@@ -160,6 +160,39 @@ public class TrackerService extends Service {
     private final Object sendLock = new Object();
     private volatile String lastState = "not started";
 
+    /**
+     * Open the receiver for a window, so the next position frame has something in it.
+     *
+     * After the frame rather than before it: waiting for a fix before sending would hold the
+     * loop for a minute and delay the heartbeat with it, and on a ten minute cycle a fix taken
+     * now is well inside the half hour a frame will still call fresh.
+     */
+    private void acquireFixAsync() {
+        new Thread(new Runnable() {
+            public void run() {
+                try {
+                    android.location.Location l =
+                            TrackerSources.acquireGps(TrackerService.this, GPS_WINDOW_MS);
+                    if (l == null) return;
+
+                    // A fix arrived, and the frame that went out a moment ago said there was
+                    // none. Report it now rather than sitting on a real position until the next
+                    // cycle: the whole difference between a track and a row of dots is whether
+                    // the first fix after a cold start waits ten minutes to be mentioned.
+                    String id = deviceId;
+                    if (id != null) sendAsync(TrackerSources.positionFrame(TrackerService.this, id));
+                } catch (Throwable t) {
+                    Log.w(TAG, "fix attempt failed", t);
+                }
+            }
+        }, "gps").start();
+    }
+
+    /** How long the receiver is held open for one fix. A cold start with assistance is
+     *  seconds; without a sky view no amount of waiting helps, so this gives up rather than
+     *  holding the receiver on indoors. */
+    private static final int GPS_WINDOW_MS = 90 * 1000;
+
     /** Set by requestFix() so an out-of-band ask does not wait for the next cycle. */
     private volatile boolean fixNow;
 
@@ -207,6 +240,7 @@ public class TrackerService extends Service {
             return START_NOT_STICKY;
         }
         live = this;
+        TrackerSources.watchSignal(this);
         if (worker == null) {
             running = true;
             worker = new Thread(new Runnable() {
@@ -289,6 +323,7 @@ public class TrackerService extends Service {
         // know where it is, and waiting a full cycle to say so is the difference between a gap
         // on the map and a continuous track.
         send(out, TrackerSources.positionFrame(this, id));
+        acquireFixAsync();
 
         long nextBeat = SystemClock.elapsedRealtime() + HEARTBEAT_MS;
         long nextFix = SystemClock.elapsedRealtime() + cycleSeconds() * 1000L;
@@ -332,6 +367,7 @@ public class TrackerService extends Service {
             if (now >= nextFix) {
                 send(out, TrackerSources.positionFrame(this, id));
                 nextFix = now + cycleSeconds() * 1000L;
+                acquireFixAsync();
             }
             if (now >= nextVitals) {
                 measureAsync(MEASURE_PULSE);

@@ -10,7 +10,10 @@ import android.hardware.SensorManager;
 import android.hardware.TriggerEvent;
 import android.hardware.TriggerEventListener;
 import android.location.Location;
+import android.location.LocationListener;
 import android.location.LocationManager;
+import android.os.Bundle;
+import android.os.Looper;
 import android.net.wifi.ScanResult;
 import android.net.wifi.WifiManager;
 import android.telephony.TelephonyManager;
@@ -57,11 +60,169 @@ public final class TrackerSources {
      * this device it is usually the one with nothing to say, so preferring it unconditionally
      * would throw away the only position available.
      */
+    /** The last fix this client asked for and got, which is not the same as the framework's. */
+    private static volatile Location ourFix;
+
+    /** Satellites used in the last fix, for the position frame's own field. */
+    private static volatile int lastSats = 0;
+
+    /** Signal as a percentage, kept up to date by the listener {@link #watchSignal} starts. */
+    private static volatile int lastSignal = 0;
+
+    public static int satellites() { return lastSats; }
+
+    public static int signal() { return lastSignal; }
+
+    /**
+     * Keep the GSM signal strength current.
+     *
+     * There is no getter for it on this API level -- a listener is the only way -- so one is
+     * registered for the life of the service rather than woken per frame. Registered on the
+     * main looper because PhoneStateListener needs one and the tracker thread has none.
+     *
+     * The vendor's frames carry 065 and 073 in this field, so it is a percentage rather than
+     * asu or dBm; getGsmSignalStrength gives 0-31 with 99 for "unknown", which scales.
+     */
+    public static void watchSignal(final Context c) {
+        try {
+            new android.os.Handler(Looper.getMainLooper()).post(new Runnable() {
+                public void run() {
+                    try {
+                        TelephonyManager tm = (TelephonyManager)
+                                c.getSystemService(Context.TELEPHONY_SERVICE);
+                        if (tm == null) return;
+                        tm.listen(new android.telephony.PhoneStateListener() {
+                            public void onSignalStrengthsChanged(
+                                    android.telephony.SignalStrength s) {
+                                if (s == null) return;
+                                int asu = s.getGsmSignalStrength();
+                                if (asu < 0 || asu > 31) return;      // 99 means unknown
+                                lastSignal = (int) Math.round(asu * 100.0 / 31.0);
+                            }
+                        }, android.telephony.PhoneStateListener.LISTEN_SIGNAL_STRENGTHS);
+                    } catch (Throwable t) {
+                        Log.w(TAG, "no signal strength", t);
+                    }
+                }
+            });
+        } catch (Throwable t) {
+            Log.w(TAG, "could not watch the signal", t);
+        }
+    }
+
+    /**
+     * Ask the receiver for a fix, and wait for one.
+     *
+     * <h3>Why the tracker has to ask</h3>
+     *
+     * Turning the gps provider on in secure settings does not produce fixes. Something has to
+     * call {@code requestLocationUpdates}, and on this watch the only things that ever did were
+     * the map and the sports screen - so a position was available exactly while somebody was
+     * looking at one, and the tracker, which reads last-known, found whatever those had left
+     * behind or nothing at all. That is why every frame goes up as V with zeroes even with the
+     * receiver switched on.
+     *
+     * <h3>Duty cycled, not left running</h3>
+     *
+     * A receiver held open costs battery continuously and, on this watch, makes the firmware's
+     * heart rate sensor wedge sooner - the trade the sports menu names. So this opens it for a
+     * bounded window, takes the first fix, and closes it again. One window per position cycle,
+     * which on a ten minute cycle is a few per cent of the time rather than all of it.
+     *
+     * The listener is delivered on the main looper because this runs on the tracker's own
+     * thread, which has none, and blocking here is the point: the caller is a worker whose only
+     * job is to have a fix ready for the next frame.
+     *
+     * @return the fix, or null if none arrived inside {@code timeoutMs}
+     */
+    public static Location acquireGps(Context c, long timeoutMs) {
+        final LocationManager lm =
+                (LocationManager) c.getSystemService(Context.LOCATION_SERVICE);
+        if (lm == null) return null;
+        try {
+            if (!lm.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+                Log.i(TAG, "gps provider is off; not asking for a fix");
+                return null;
+            }
+        } catch (Throwable t) {
+            return null;
+        }
+
+        // Time and a rough position turn a cold start from minutes into seconds, and both are
+        // things this watch already has.
+        try {
+            Gps.assist(lm);
+        } catch (Throwable ignored) { }
+
+        // Satellite count for the frame's own field. Counted while the receiver is open,
+        // because GpsStatus is only meaningful during a session.
+        final android.location.GpsStatus.Listener sats = new android.location.GpsStatus.Listener() {
+            public void onGpsStatusChanged(int event) {
+                try {
+                    android.location.GpsStatus st = lm.getGpsStatus(null);
+                    if (st == null) return;
+                    int used = 0;
+                    for (android.location.GpsSatellite s : st.getSatellites()) {
+                        if (s.usedInFix()) used++;
+                    }
+                    lastSats = used;
+                } catch (Throwable ignored) { }
+            }
+        };
+        try {
+            lm.addGpsStatusListener(sats);
+        } catch (Throwable ignored) { }
+
+        final Location[] got = new Location[1];
+        final LocationListener listener = new LocationListener() {
+            public void onLocationChanged(Location l) {
+                if (l != null && got[0] == null) got[0] = l;
+            }
+
+            public void onStatusChanged(String p, int s, Bundle extras) { }
+
+            public void onProviderEnabled(String p) { }
+
+            public void onProviderDisabled(String p) { }
+        };
+
+        try {
+            lm.requestLocationUpdates(LocationManager.GPS_PROVIDER, 0L, 0f, listener,
+                    Looper.getMainLooper());
+            long deadline = System.currentTimeMillis() + timeoutMs;
+            while (got[0] == null && System.currentTimeMillis() < deadline) {
+                Thread.sleep(250);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (Throwable t) {
+            Log.w(TAG, "could not ask for a fix", t);
+        } finally {
+            try {
+                lm.removeUpdates(listener);
+            } catch (Throwable ignored) { }
+            try {
+                lm.removeGpsStatusListener(sats);
+            } catch (Throwable ignored) { }
+        }
+
+        if (got[0] == null) {
+            Log.i(TAG, "no gps fix inside " + (timeoutMs / 1000) + "s");
+            return null;
+        }
+        ourFix = got[0];
+        Log.i(TAG, "gps fix: " + got[0].getLatitude() + "," + got[0].getLongitude()
+                + " +/-" + got[0].getAccuracy() + "m");
+        return got[0];
+    }
+
     public static Location lastFix(Context c) {
         try {
             LocationManager lm = (LocationManager) c.getSystemService(Context.LOCATION_SERVICE);
             if (lm == null) return null;
-            Location best = null;
+            // Ours first: it was taken deliberately for a frame, and on this watch the
+            // framework's last-known is usually empty or older.
+            Location best = ourFix;
             List<String> providers = lm.getAllProviders();
             for (int i = 0; i < providers.size(); i++) {
                 Location l;
@@ -249,6 +410,7 @@ public final class TrackerSources {
                 (valid && l.hasBearing()) ? l.getBearing() : 0,
                 cal.get(Calendar.YEAR), cal.get(Calendar.MONTH) + 1, cal.get(Calendar.DAY_OF_MONTH),
                 cal.get(Calendar.HOUR_OF_DAY), cal.get(Calendar.MINUTE), cal.get(Calendar.SECOND),
+                signal(), valid ? satellites() : 0, battery(c),
                 cells, aps);
     }
 
