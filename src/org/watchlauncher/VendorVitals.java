@@ -11,17 +11,31 @@ import android.os.RemoteException;
 import android.util.Log;
 
 /**
- * Blood oxygen, the only way this watch can produce it.
+ * A real vitals measurement: the only thing on this watch that starts one.
  *
- * <h3>Why not the sensor framework</h3>
+ * <h3>Why the platform sensor is not enough</h3>
  *
- * There is no oxygen sensor in it. {@code dumpsys sensorservice} lists five, and the optical
- * one, {@code gh30x_sensor}, reports three values: pulse, systolic, diastolic. That is the
- * whole of what the platform exposes.
+ * {@code gh30x_sensor} looks like the obvious route and it is a mirror, not a measurement.
+ * Watch it while asking for readings:
  *
- * The vendor gets oxygen from its own service instead, {@code com.ic.work.SensorDataService},
- * which is declared {@code exported="true"} with no permission, so any app on the watch can
- * bind it. Its {@code HeartRate} parcel carries oxygen as its first field.
+ * <pre>
+ * gh30x_sensor | Goodix | 0x08 | on-demand | last=&lt; 59.0,120.0, 79.0&gt;
+ * Active sensors:
+ * 0 active connections
+ * </pre>
+ *
+ * That {@code last=} has not changed in hours, through dozens of requests, and the green LED
+ * never comes on. registerListener replays the cached triple immediately and
+ * requestTriggerSensor returns without the HAL starting anything: the measurement is driven by
+ * the vendor's own service, and the platform sensor only reports whatever it last produced. So
+ * a client reading gh30x directly gets the same frozen numbers for ever - 59 bpm and 120/79,
+ * hour after hour, which is exactly what the server's chart showed.
+ *
+ * <h3>What does start one</h3>
+ *
+ * {@code com.ic.work.SensorDataService}, declared {@code exported="true"} with no permission,
+ * so any app on the watch can bind it. Its {@code HeartRate} parcel carries all four numbers:
+ * oxygen, heart rate, and the two pressures.
  *
  * <h3>The interface</h3>
  *
@@ -61,12 +75,38 @@ import android.util.Log;
  * from {@link HeartRate} through the platform sensor, which is a different route that does not
  * touch this queue. So a wedge here costs the oxygen reading and nothing else.
  */
-public final class Spo2 {
+public final class VendorVitals {
 
-    private static final String TAG = "Spo2";
+    private static final String TAG = "VendorVitals";
 
     private static final String PKG = "com.ic.work";
     private static final String CLS = "com.ic.work.SensorDataService";
+
+    /**
+     * The action decides which binder comes back, and the manifest does not say so.
+     *
+     * An explicit component is not enough: bindService returns true, because the system found
+     * the class, and onServiceConnected never fires, because onBind returned null. Nor is the
+     * action from the package manager's resolver table - action.WORK_SERVICE_SECOND_TIMER is
+     * what starts its timer, not what binds it.
+     *
+     * onBind's own constants, read out of ICL02WorkService.odex, are the answer:
+     *
+     * <pre>
+     * "on service bind package name -- > "  " action name is == > "
+     * "com.ic.blood"  "com.ic.sensor.data.action.HEART_RATE"
+     * "com.ic.temp"   "com.ic.sensor.data.action.TEMPERATURE"
+     * </pre>
+     *
+     * So there are two binders behind one service, chosen by action, and the vendor's own
+     * callers are com.ic.blood and com.ic.temp. Tried in order, the real one first, with the
+     * others kept because they cost one bind each and rule themselves out in the log.
+     */
+    private static final String[][] CANDIDATES = {
+        {"com.ic.work.SensorDataService", "com.ic.sensor.data.action.HEART_RATE"},
+        {"com.ic.work.SensorDataService", "action.WORK_SERVICE_SECOND_TIMER"},
+        {"com.ic.work.SensorDataService", null},
+    };
 
     private static final String SERVICE = "com.ic.work.IHeartRateSensorService";
     private static final String CALLBACK = "com.ic.work.IHeartRateSensorCallback";
@@ -84,9 +124,9 @@ public final class Spo2 {
     /** 0 ALL, 1 JUST_OXYGEN, 2 JUST_HEART_RATE -- ALL, so one measurement answers everything. */
     private static final int TYPE_ALL = 0;
 
-    private Spo2() { }
+    private VendorVitals() { }
 
-    /** One reading, or null. */
+    /** One measurement: whatever of the four the sensor managed. */
     public static final class Reading {
         public int oxygen;
         public int heartRate;
@@ -107,7 +147,12 @@ public final class Spo2 {
      * wedged, and is not worth retrying.
      */
     public static Reading measure(Context ctx, long timeoutMs) {
+        // onHeartRateGet is the finished measurement; onHeartRateUpdate is progress towards
+        // it, and arrives with the fields that are not ready yet still at zero. Taking the
+        // first callback that carried any number at all meant taking a partial one: a pulse
+        // with "SpO2 0%, 0/0" beside it, seconds before the real answer.
         final Reading[] got = new Reading[1];
+        final Reading[] partial = new Reading[1];
         final IBinder[] service = new IBinder[1];
 
         final Binder callback = new Binder() {
@@ -120,7 +165,10 @@ public final class Spo2 {
                 if (code == CB_GET || code == CB_UPDATE) {
                     data.enforceInterface(CALLBACK);
                     Reading r = parse(data);
-                    if (r != null && got[0] == null) got[0] = r;
+                    if (r != null) {
+                        if (code == CB_GET) got[0] = r;
+                        else partial[0] = r;
+                    }
                     // The caller may or may not be waiting on a reply; answering when it is not
                     // is harmless, not answering when it is would hang it.
                     if (reply != null) reply.writeNoException();
@@ -147,22 +195,42 @@ public final class Spo2 {
 
         boolean bound = false;
         try {
-            Intent i = new Intent();
-            i.setClassName(PKG, CLS);
-            bound = ctx.bindService(i, conn, Context.BIND_AUTO_CREATE);
-            if (!bound) {
-                Log.w(TAG, "could not bind " + CLS);
-                return null;
+            long deadline = System.currentTimeMillis() + timeoutMs;
+
+            for (int a = 0; a < CANDIDATES.length && service[0] == null; a++) {
+                if (bound) {
+                    try { ctx.unbindService(conn); } catch (Throwable ignored) { }
+                    bound = false;
+                }
+                String cls = CANDIDATES[a][0];
+                String action = CANDIDATES[a][1];
+                Intent i = new Intent();
+                i.setClassName(PKG, cls);
+                if (action != null) i.setAction(action);
+
+                bound = ctx.bindService(i, conn, Context.BIND_AUTO_CREATE);
+                Log.i(TAG, "bind " + cls + " / " + (action == null ? "<no action>" : action)
+                        + " -> " + bound);
+                if (!bound) continue;
+
+                // Short per attempt: a bind that is going to succeed does so promptly, and
+                // there are three of these to get through inside one budget.
+                long attemptEnds = Math.min(deadline, System.currentTimeMillis() + 4000);
+                while (service[0] == null && System.currentTimeMillis() < attemptEnds) {
+                    Thread.sleep(100);
+                }
             }
 
-            long deadline = System.currentTimeMillis() + timeoutMs;
-            while (service[0] == null && System.currentTimeMillis() < deadline) {
-                Thread.sleep(100);
-            }
             if (service[0] == null) {
-                Log.w(TAG, "the sensor service never connected");
+                Log.w(TAG, "the sensor service never connected; onBind returned null for every "
+                        + "component and action tried");
                 return null;
             }
+            // Which interface actually came back. The transactions below are numbered for
+            // IHeartRateSensorService; sending them to something else would be a guess.
+            try {
+                Log.i(TAG, "bound interface: " + service[0].getInterfaceDescriptor());
+            } catch (Throwable ignored) { }
 
             if (!register(service[0], callback, ctx.getPackageName())) return null;
             try {
@@ -174,6 +242,12 @@ public final class Spo2 {
                 unregister(service[0], callback);
             }
 
+            if (got[0] == null && partial[0] != null) {
+                // The finished callback never came, but something was measured. Better than
+                // nothing, and said plainly so a partial reading is not mistaken for a full one.
+                Log.i(TAG, "only a progress reading: " + partial[0]);
+                return partial[0];
+            }
             if (got[0] == null) {
                 Log.w(TAG, "no reading in " + (timeoutMs / 1000) + "s; the work queue is "
                         + "probably wedged, which is its known failure and not worth retrying");
@@ -258,9 +332,14 @@ public final class Spo2 {
             r.heartRate = p.readInt();
             r.systolic = p.readInt();
             r.diastolic = p.readInt();
-            // A finger off the sensor reads zero, and zero per cent is not a measurement.
-            if (r.oxygen < 50 || r.oxygen > 100) return null;
-            return r;
+            // Each field stands on its own: a wrist can give a good pulse and no oxygen, and
+            // throwing the reading away because one number is out of range loses the rest.
+            if (r.oxygen < 50 || r.oxygen > 100) r.oxygen = 0;
+            if (r.heartRate < 25 || r.heartRate > 250) r.heartRate = 0;
+            if (r.systolic < 60 || r.systolic > 260) r.systolic = 0;
+            if (r.diastolic < 30 || r.diastolic > 200) r.diastolic = 0;
+            if (r.diastolic >= r.systolic) { r.systolic = 0; r.diastolic = 0; }
+            return (r.oxygen > 0 || r.heartRate > 0) ? r : null;
         } catch (Throwable t) {
             Log.w(TAG, "could not read the reading", t);
             return null;

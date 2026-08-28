@@ -177,22 +177,85 @@ public class TrackerService extends Service {
      * stall only queues more behind the stuck item. Spo2 has the full account. The pulse and
      * the pressures do not come from there, so a wedge costs this reading and nothing else.
      */
-    private void measureOxygenAsync() {
+    /** Consecutive measurements that came back with nothing. */
+    private volatile int vitalsMisses;
+
+    /** Set while a measurement is in flight, so two cannot queue behind each other. */
+    private volatile boolean measuring;
+
+    /**
+     * How many cycles to sit out after a failure.
+     *
+     * A measurement that finds no wrist holds the sensor for the full timeout and, on this
+     * firmware, takes a turn on a work queue that cannot be recovered if it jams. Off the wrist
+     * that is every cycle, all night, for nothing. So each miss doubles the wait, to a cap;
+     * a reading resets it.
+     */
+    private int skipCycles() {
+        int n = vitalsMisses;
+        if (n <= 0) return 0;
+        int skip = 1;
+        for (int i = 1; i < n && skip < 8; i++) skip *= 2;
+        return skip;
+    }
+
+    private volatile int vitalsSkipped;
+
+    private void measureVitalsAsync() {
+        if (measuring) {
+            Log.i(TAG, "a measurement is already running; not starting another");
+            return;
+        }
+        if (vitalsSkipped < skipCycles()) {
+            vitalsSkipped++;
+            return;
+        }
+        vitalsSkipped = 0;
+        measuring = true;
         new Thread(new Runnable() {
             public void run() {
                 try {
-                    Spo2.Reading r = Spo2.measure(TrackerService.this, SPO2_TIMEOUT_MS);
-                    if (r == null) return;
-                    sendAsync(BeehomeCodec.health(TrackerSources.stamp(), JK_OXYGEN, r.oxygen));
+                    VendorVitals.Reading r =
+                            VendorVitals.measure(TrackerService.this, VITALS_TIMEOUT_MS);
+                    if (r == null) {
+                        vitalsMisses++;
+                        // Nothing from the service. The platform sensor is not a fallback: it
+                        // mirrors this service's last result, so it would answer with the same
+                        // stale triple that made every reading identical for hours.
+                        Log.w(TAG, "no vitals measurement (" + vitalsMisses + " in a row); "
+                                + "sending nothing rather than the cached value gh30x would "
+                                + "hand back, and sitting out " + skipCycles() + " cycles");
+                        return;
+                    }
+                    vitalsMisses = 0;
+                    String when = TrackerSources.stamp();
+                    if (r.heartRate > 0) {
+                        int bpm = calibratedPulse(r.heartRate);
+                        sendAsync(BeehomeCodec.health(when, JK_PULSE, bpm));
+                        TrackerLog.recordPulse(TrackerService.this, bpm,
+                                System.currentTimeMillis());
+                    }
+                    if (r.systolic > 0 && r.diastolic > 0) {
+                        int sys = clamp(r.systolic + prefs(TrackerService.this)
+                                .getInt(KEY_CAL_BPH, 0), 60, 260);
+                        int dia = clamp(r.diastolic + prefs(TrackerService.this)
+                                .getInt(KEY_CAL_BPL, 0), 30, 200);
+                        if (dia < sys) sendAsync(BeehomeCodec.bloodPressure(when, sys, dia));
+                    }
+                    if (r.oxygen > 0) {
+                        sendAsync(BeehomeCodec.health(when, JK_OXYGEN, r.oxygen));
+                    }
                 } catch (Throwable t) {
-                    Log.w(TAG, "oxygen reading failed", t);
+                    Log.w(TAG, "vitals measurement failed", t);
+                } finally {
+                    measuring = false;
                 }
             }
-        }, "spo2").start();
+        }, "vitals").start();
     }
 
-    /** A pulse oximeter needs a good few seconds of signal; past this it is not coming. */
-    private static final int SPO2_TIMEOUT_MS = 45 * 1000;
+    /** An optical measurement needs a good few seconds of signal; past this it is not coming. */
+    private static final int VITALS_TIMEOUT_MS = 45 * 1000;
 
     /** How often oxygen is measured unasked. Slower than the pulse deliberately -- every
      *  reading is a turn on a queue that cannot be recovered if it jams. */
@@ -404,11 +467,11 @@ public class TrackerService extends Service {
                 acquireFixAsync();
             }
             if (now >= nextVitals) {
-                measureAsync(MEASURE_PULSE);
+                measureVitalsAsync();
                 nextVitals = now + vitalsSeconds() * 1000L;
             }
             if (now >= nextOxygen) {
-                measureOxygenAsync();
+                measureVitalsAsync();
                 nextOxygen = now + oxygenSeconds() * 1000L;
             }
             if (now >= nextTemp) {
@@ -475,17 +538,17 @@ public class TrackerService extends Service {
             // nothing else, which is why it is the most frequent downlink in the logs and never
             // produced a reading: the server kept asking.
             ackIfCommand(out, f);
-            measureAsync(MEASURE_PULSE);
+            measureVitalsAsync();
             return;
         }
         if ("XY".equals(f.op)) {                    // BLOODPRESSURE#
             ackIfCommand(out, f);
-            measureAsync(MEASURE_BP);
+            measureVitalsAsync();
             return;
         }
         if ("OX".equals(f.op) || "XZ".equals(f.op)) {   // SPO2# / OXYGEN#
             ackIfCommand(out, f);
-            measureOxygenAsync();
+            measureVitalsAsync();
             return;
         }
         if ("00".equals(f.op)) {
