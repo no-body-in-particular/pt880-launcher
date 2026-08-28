@@ -293,8 +293,13 @@ public final class BeehomeCodec {
                     "health() sends heart rate, temperature and blood oxygen; " + type + " is "
                     + jkName(type) + " -- use sleep() or bloodPressure() for the rest");
         }
-        return frame("JK", isoUtcTime, Integer.toString(type),
-                String.format(Locale.US, "%.2f", value));
+        // A pulse and a percentage are counts: the vendor's own frames carry "2,57" and
+        // "4,97", and this was sending "2,59.00". Only the temperature has a fraction worth
+        // keeping, and that one the vendor writes as 36.97.
+        String v = (type == JK_TEMPERATURE)
+                ? String.format(Locale.US, "%.2f", value)
+                : Integer.toString((int) Math.round(value));
+        return frame("JK", isoUtcTime, Integer.toString(type), v);
     }
 
     /**

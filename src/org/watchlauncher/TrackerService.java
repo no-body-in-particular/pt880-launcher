@@ -214,9 +214,33 @@ public class TrackerService extends Service {
      * table; it is not there to ignore somebody pressing a button on the other end, and a
      * command that silently does nothing is worse than one that tries and reports nothing.
      */
+    /** When the last measurement was started, for the floor below. */
+    private volatile long lastMeasureAt;
+
+    /**
+     * The shortest gap between two measurements, from any source.
+     *
+     * Three things ask for one: the vitals cycle, the wear check when the watch goes on, and
+     * the server, which sends XL about as often as the cycle runs. Nothing coordinated them,
+     * and the vendor's service has no way to be told to stop, so each request left the optical
+     * sensor running - dumpsys showed gh30x_sensor with four connections open at once and the
+     * LED never going off, which is a flat battery and a hot wrist rather than more readings.
+     *
+     * A measurement takes seconds and the values do not move meaningfully inside a minute, so
+     * a floor costs nothing and is the only lever available: the queue behind it cannot be
+     * cancelled once a request is in.
+     */
+    private static final long MEASURE_FLOOR_MS = 150 * 1000;
+
     private void measureVitalsAsync(boolean asked) {
         if (measuring) {
             Log.i(TAG, "a measurement is already running; not starting another");
+            return;
+        }
+        long since = SystemClock.elapsedRealtime() - lastMeasureAt;
+        if (lastMeasureAt > 0 && since < MEASURE_FLOOR_MS) {
+            Log.i(TAG, "last measurement was " + (since / 1000) + "s ago; too soon for another"
+                    + (asked ? " even though the server asked" : ""));
             return;
         }
         if (!asked && vitalsSkipped < skipCycles()) {
@@ -225,6 +249,7 @@ public class TrackerService extends Service {
         }
         vitalsSkipped = 0;
         measuring = true;
+        lastMeasureAt = SystemClock.elapsedRealtime();
         new Thread(new Runnable() {
             public void run() {
                 try {
