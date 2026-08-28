@@ -211,6 +211,7 @@ public class MapScreen extends Screen implements LocationListener {
         loadRoute();
         startFixes();
         seedFromLastFix();
+        catchUpFromLastFix();
         seedFromServer();
         view.invalidate();
     }
@@ -539,6 +540,62 @@ public class MapScreen extends Screen implements LocationListener {
         try { locations.removeUpdates(this); } catch (Exception e) { /* ignore */ }
     }
 
+    /**
+     * When the fix being shown was taken, on the monotonic clock, or 0 if unknown.
+     *
+     * Not {@link #fixAt}, which is when it was received. Only this one can be compared with a
+     * {@link Location}'s own stamp.
+     */
+    private long fixTakenEt;
+
+    /** When a fix was taken, on the monotonic clock, or 0 if it cannot be told. */
+    private static long etOf(Location l) {
+        if (l == null) return 0;
+        try {
+            long ns = l.getElapsedRealtimeNanos();
+            if (ns > 0) return ns / 1000000L;
+        } catch (Throwable ignored) { /* pre-17 shape */ }
+        return 0;
+    }
+
+    /**
+     * Catch up on whatever arrived while the map was not listening.
+     *
+     * Without a route, onHide() drops the subscription - so the position freezes while the
+     * screen is off, and the map used to come back still showing wherever the watch was when
+     * the screen went off. It stayed wrong until a fresh fix arrived, which outdoors is
+     * seconds and indoors can be never.
+     *
+     * Nothing extra has to be switched on for this. The tracker keeps taking fixes on its own
+     * schedule the whole time the screen is off, and those land in getLastKnownLocation, so
+     * the newer position is usually sitting there already.
+     *
+     * Compared on the monotonic clock, for the reason {@code TrackerSources.ageOf} sets out at
+     * length: a fix's getTime() is satellite time and this watch sets its clock from the
+     * network, so wall-clock comparisons between the two have already been seen to come out
+     * negative. A last known fix whose stamp cannot be read is left alone rather than guessed
+     * at - the subscription is running again by now, so the cost of skipping it is one fix.
+     */
+    private void catchUpFromLastFix() {
+        if (locations == null) return;
+        Location best = null;
+        long bestEt = fixTakenEt;
+        try {
+            List<String> ps = locations.getAllProviders();
+            for (int i = 0; i < ps.size(); i++) {
+                long et = etOf(locations.getLastKnownLocation(ps.get(i)));
+                if (et > bestEt) {
+                    best = locations.getLastKnownLocation(ps.get(i));
+                    bestEt = et;
+                }
+            }
+        } catch (Exception e) { /* nothing known */ }
+        if (best != null) {
+            Log.i("watchmap", "catching up from a fix taken while the screen was off");
+            take(best);
+        }
+    }
+
     /** Something to draw before the first fix arrives, rather than a blank. */
     private void seedFromLastFix() {
         if (locations == null || !Double.isNaN(lat)) return;
@@ -648,6 +705,10 @@ public class MapScreen extends Screen implements LocationListener {
         bearing = l.hasBearing() ? l.getBearing() : -1;
         speedMs = l.hasSpeed() ? l.getSpeed() : -1;
         fixAt = System.currentTimeMillis();
+        // A fix with no readable stamp counts as taken now: it is the one being shown, and
+        // treating it as ancient would let catchUpFromLastFix replace it with something older.
+        fixTakenEt = etOf(l);
+        if (fixTakenEt == 0) fixTakenEt = android.os.SystemClock.elapsedRealtime();
         drive.fix(fixAt, lat, lon, speedMs);
         // Renewed while the screen is off, so the timeout never runs out
         // mid-drive; harmless while it is on, because onShow released it.
