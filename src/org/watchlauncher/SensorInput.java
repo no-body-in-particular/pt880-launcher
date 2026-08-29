@@ -503,6 +503,9 @@ final class SensorInput {
             // after the stop returned the command buffer instead - "driver report: 6 0 0 0 0 0",
             // 6 being the ppgStop opcode just written to it.
             held = Gh30x.read();
+            // Once, while the chip is still running and has just finished computing: if the
+            // pressure is behind one of the driver's other commands, this is when it is there.
+            Gh30x.probeOnce();
             return finish();
         }
 

@@ -79,6 +79,35 @@ final class Gh30x {
     private static int logged;
     private static final int LOG_FIRST = 6;
 
+    private static native int[] probe();
+
+    /**
+     * Ask the driver's other commands what they hold, and log it.
+     *
+     * The daemon computes a pressure and does not publish it where anything here can see it.
+     * These are the remaining read-shaped 'G' commands on the same node, which is the only
+     * thing it opens, so if the pair is handed over at all it is through one of them.
+     */
+    static void probeOnce() {
+        if (!LOADED) return;
+        try {
+            int[] r = probe();
+            if (r == null) {
+                Log.i(TAG, "probe: the node would not open");
+                return;
+            }
+            String[] names = { "_IOWR(G,4,8)", "_IOWR(G,8,4)", "_IOR(G,0,1)" };
+            for (int i = 0; i + 3 < r.length; i += 4) {
+                int which = r[i];
+                Log.i(TAG, "probe " + (which < names.length ? names[which] : "?")
+                        + "  rc=" + r[i + 1] + "  w0=" + r[i + 2] + "  w1=" + r[i + 3]);
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "probe failed", t);
+        }
+    }
+
+
     /** Whether the vendor library is present and still has the symbols this needs. */
     static boolean usable() {
         if (!LOADED) return false;

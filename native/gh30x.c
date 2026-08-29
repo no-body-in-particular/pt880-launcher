@@ -189,6 +189,60 @@ Java_org_watchlauncher_Gh30x_report(JNIEnv *env, jclass cls)
     return out;
 }
 
+/*
+ * Ask the driver the other 'G' commands and report what each one says.
+ *
+ * gh3011_service computes the pressure - its log prints "bp1:146,1" during a heart beat
+ * measurement - and publishes it neither on the input device nor in the report this code
+ * already reads, whose bph and bpl stay zero throughout. It opens nothing but /dev/gh_tools, so
+ * whatever it hands the pair over on has to be another command on this same node.
+ *
+ * Scanning the daemon for ioctl-shaped constants turned up four more with the right magic
+ * besides the two already known, and one of them is the size a pressure pair would be:
+ *
+ *     _IOWR('G', 4, 8)    two words
+ *     _IOWR('G', 8, 4)
+ *     _IOW ('G', 2, 4)
+ *     _IOR ('G', 0, 1)
+ *
+ * Read-shaped ones only, and each into a zeroed buffer of its declared size. _IOW('G', 2, 4) is
+ * a write and is left alone: sending an unknown write command to a sensor on somebody's wrist
+ * is not a thing to do speculatively.
+ *
+ * Returns pairs of {command index, word} so the caller can log them; nothing is interpreted
+ * here, because the point is to find out what these are rather than to assume.
+ */
+JNIEXPORT jintArray JNICALL
+Java_org_watchlauncher_Gh30x_probe(JNIEnv *env, jclass cls)
+{
+    static const unsigned int cmds[] = { 0xc0084704u, 0xc0044708u, 0x80014700u };
+    static const int sizes[] = { 8, 4, 1 };
+    unsigned char buf[32];
+    jint out[12];
+    int fd, i, n = 0;
+    jintArray arr;
+    (void) cls;
+
+    fd = open(NODE, O_RDONLY);
+    if (fd < 0) return NULL;
+
+    for (i = 0; i < 3; i++) {
+        int rc;
+        memset(buf, 0, sizeof buf);
+        rc = ioctl(fd, cmds[i], buf);
+        out[n++] = i;
+        out[n++] = rc;
+        out[n++] = (sizes[i] >= 4) ? (int) (*(unsigned int *) buf) : buf[0];
+        out[n++] = (sizes[i] >= 8) ? (int) (*(unsigned int *) (buf + 4)) : 0;
+    }
+    close(fd);
+
+    arr = (*env)->NewIntArray(env, n);
+    if (!arr) return NULL;
+    (*env)->SetIntArrayRegion(env, arr, 0, n, out);
+    return arr;
+}
+
 /* Whether the node is there at all. The library is not required for the direct path. */
 JNIEXPORT jboolean JNICALL
 Java_org_watchlauncher_Gh30x_available(JNIEnv *env, jclass cls)

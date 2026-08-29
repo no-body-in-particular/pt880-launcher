@@ -157,3 +157,64 @@ leans on the difference between skin and surroundings, so in a cold room or outd
 drifts. It is a wrist thermometer, not a clinical one.
 
 The plausibility band is 34-43. It was 20-45, which is what let the raw wrist reading through.
+
+## Blood pressure is not a measurement
+
+Worth stating plainly, because the number looks like the others and is not like them at all.
+
+`gh3011_service` computes the pressure in `FUN_0002cde8`, and that function contains no pressure
+model: no pulse transit time, no waveform morphology fitted to anything, no calibration. It is a
+cascade of hand-written threshold rules that ratchets a value upward from a fixed set:
+
+```c
+uStack_34 = 0x28;                                  // start at 40
+if (...) uStack_34 = (short)iVar14 - 10;           // a feature, minus a constant
+if (...) { iVar31 = 0x41; ... max(iVar31, uStack_34) }   //  65
+if (... && uStack_34 < 0x55) uStack_34 = 0x55;     //  85
+if (... && uStack_34 < 0x66) uStack_34 = 0x66;     // 102
+if (... && uStack_34 < 0x73) uStack_34 = 0x73;     // 115
+if (... && uStack_34 < 0x78) uStack_34 = 0x78;     // 120
+if (... && uStack_34 < 0x3c) uStack_34 = 0x3c;     //  60
+```
+
+Start at 40; each rule that fires raises the number to a floor - 65, 85, 102, 115, 120 - or to
+some counter minus 5 or 10. The result is kept only if it lands in 41 to 109
+(`uVar6 - 0x29 < 0x45`).
+
+That is why every reading this watch has ever produced sits in 116-123 over 77-81 regardless of
+who is wearing it, and why `bp1:117` held for 158 consecutive log lines without moving.
+
+It also explains the searching that went nowhere. Published PPG blood pressure methods use pulse
+transit time between two points, or a regression trained on waveform features; this matches
+none of them because it is not from that literature. There is no paper to find and no reference
+implementation to compare against.
+
+The physics is the reason nothing better is available from this hardware. Pressure relates to
+how fast the pulse wave travels, and a velocity needs two points in time - ECG to PPG, or two
+PPG sites. One sensor on one wrist has no transit to measure, so anything single-site is
+inferring pressure from the shape of the wave, which is a correlate and not a measurement.
+Single-PPG estimators need per-person calibration against a cuff, drift within hours, and the
+published ones sit around 8-10 mmHg of standard deviation - wider than the clinical threshold.
+
+**So the pressures on the chart are decoration.** Heart rate, SpO2 and temperature are real
+sensor readings. The pressures are a decision tree emitting plausible numbers. Keeping them is
+defensible - the stock firmware shows the same figures - but they should not be read as health
+data, and a reimplementation of that cascade would reproduce the decoration rather than improve
+on it.
+
+### What the raw waveform could honestly support
+
+The chip does produce a real waveform, one sample at a time:
+
+    ppg=49090,accx=496,accy=-32,accz=-8112
+
+From that, these are genuine and worth having: **HRV** from beat-to-beat intervals, **respiration
+rate** from the amplitude and baseline modulation, and pulse waveform indices such as
+augmentation and stiffness index - which correlate with arterial stiffness and are honest about
+being their own quantity rather than a pressure.
+
+Getting at it is the open problem. The daemon logs the samples but an ordinary app cannot read
+another process's log, and `/dev/socket/gh30x_socket` - which init creates and its own rc even
+tries to `chmod 666` - is never listened on: `/proc/net/unix` shows it without SO_ACCEPTCON, so
+connecting to it returns ECONNREFUSED. The remaining routes are an ioctl on `/dev/gh_tools` that
+returns the FIFO, or installing this launcher as a system app so it can read the daemon's log.
