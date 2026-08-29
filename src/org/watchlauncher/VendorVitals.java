@@ -258,7 +258,18 @@ public final class VendorVitals {
         //
         // Nothing in that path can wedge, because the piece that wedges is not in it.
         if (Gh30x.usable()) {
-            SensorInput.Reader own = SensorInput.start(ctx, false);
+            // Both halves, because each alone does only part of the job.
+            //
+            // Registering with the framework wakes the hook process that services the chip's
+            // interrupts and posts the input events - without it the node stays silent - but
+            // activation on its own runs no measurement: 45 s of it produced not one sample.
+            // enableSPO2 runs a measurement but does not wake the collector: that gave "no
+            // lock: 0 samples" while the chip was plainly started.
+            //
+            // So the framework is used for what still works, activation, and not for what does
+            // not, delivery. The wedge is in delivery - "First flush pending", last= frozen -
+            // and nothing here waits on it: the samples come off the input device.
+            SensorInput.Reader own = SensorInput.start(ctx, true);
             if (own != null) {
                 boolean started = false;
                 try {

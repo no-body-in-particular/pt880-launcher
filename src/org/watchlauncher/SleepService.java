@@ -127,8 +127,15 @@ public class SleepService extends Service implements SensorEventListener {
      */
     private static final int START_AFTER_STILL_MIN_NO_BPM = 60;
 
-    /** Do not bother scoring a stretch shorter than this. */
-    private static final int MIN_SCORABLE_MIN = 90;
+    /**
+     * Do not bother scoring a stretch shorter than this.
+     *
+     * Was ninety minutes, which threw away real sleep: a nap, an early night broken up, or a
+     * detector that only caught the back half of one, all vanished rather than being recorded
+     * short. Half an hour is the same bout length the onset test uses, so anything the watcher
+     * was willing to call sleep is now something the scorer is willing to score.
+     */
+    private static final int MIN_SCORABLE_MIN = 30;
 
     /**
      * How often the live sleeping flag is resent when nothing has changed.

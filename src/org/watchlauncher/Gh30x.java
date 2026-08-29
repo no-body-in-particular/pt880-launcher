@@ -49,6 +49,35 @@ final class Gh30x {
     private static native boolean available();
     private static native int enableSpo2();
     private static native int disablePpg();
+    private static native int[] report();
+
+    /**
+     * The driver's own reading, or null.
+     *
+     * Six words out of _IOR('G', 11, 24). The library's log line names five of them - "is wared
+     * %d , ppg %d , spo2 %d , bph %d , bpl %d" - and the sixth is unaccounted for, so the whole
+     * lot is logged the first few times rather than trusted: a field order worked out from a
+     * format string is a good guess, not a measurement.
+     */
+    static int[] read() {
+        if (!LOADED) return null;
+        try {
+            int[] r = report();
+            if (r != null && logged < LOG_FIRST) {
+                logged++;
+                StringBuilder b = new StringBuilder("driver report:");
+                for (int i = 0; i < r.length; i++) b.append(' ').append(r[i]);
+                b.append("   (expected: worn, ppg, spo2, bph, bpl, ?)");
+                Log.i(TAG, b.toString());
+            }
+            return r;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private static int logged;
+    private static final int LOG_FIRST = 6;
 
     /** Whether the vendor library is present and still has the symbols this needs. */
     static boolean usable() {

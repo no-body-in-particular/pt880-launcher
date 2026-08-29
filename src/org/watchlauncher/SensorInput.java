@@ -322,6 +322,9 @@ final class SensorInput {
     /** {elapsedRealtime, heart rate, SpO2} per sample, newest last. Guarded by SAMPLES. */
     private static final List<long[]> SAMPLES = new ArrayList<long[]>();
 
+    /** {elapsedRealtime, systolic, diastolic} off REL_RY. Guarded by SAMPLES, like the rest. */
+    private static final List<long[]> PRESSURES = new ArrayList<long[]>();
+
     /** Several minutes of once-a-second samples; older ones interest nobody. */
     private static final int KEEP = 600;
 
@@ -345,9 +348,26 @@ final class SensorInput {
                         int value = le32(buf, 12);
 
                         if (code == REL_RY) {
-                            // Declared in capabilities/rel and never once emitted. Logged raw so
-                            // that if one arrives the encoding is read off it, not guessed.
-                            Log.i(TAG, "REL_RY (pressure?) raw 0x" + Integer.toHexString(value));
+                            // It emits after all. Nothing produced one until the measurement ran
+                            // long enough - the vendor's own window stops at ten readings and
+                            // this axis had not appeared once in any of them. Starting the chip
+                            // ourselves runs it far longer, and the pair turns up:
+                            //
+                            //     0x5f00 -> 95 / 0     while it is still working it out
+                            //     0x5f42 -> 95 / 66    a pair
+                            //
+                            // Same packing as REL_RX: high byte then low. Kept rather than only
+                            // logged - it was logging-only while nothing ever sent one, and
+                            // that oversight quietly discarded the first real ones.
+                            long now = android.os.SystemClock.elapsedRealtime();
+                            int sys = (value >> 8) & 0xFF, dia = value & 0xFF;
+                            if (sys >= SYS_MIN && sys <= SYS_MAX
+                                    && dia >= DIA_MIN && dia <= DIA_MAX && dia < sys) {
+                                synchronized (SAMPLES) {
+                                    PRESSURES.add(new long[] { now, sys, dia });
+                                    while (PRESSURES.size() > KEEP) PRESSURES.remove(0);
+                                }
+                            }
                             continue;
                         }
                         if (code != REL_RX) continue;
@@ -429,8 +449,15 @@ final class SensorInput {
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
+            // While the chip is still running, which is the only time it has one. Reading it
+            // after the stop returned the command buffer instead - "driver report: 6 0 0 0 0 0",
+            // 6 being the ppgStop opcode just written to it.
+            held = Gh30x.read();
             return finish();
         }
+
+        /** The driver's report, taken at the end of the window before anything was stopped. */
+        private int[] held;
 
         /**
          * Switch the sensor off and work out the reading.
@@ -460,9 +487,40 @@ final class SensorInput {
                     if (ox >= SPO2_MIN && ox <= SPO2_MAX) spo2.add(Integer.valueOf(ox));
                 }
             }
-            // The chip has only just stopped, so this is the last moment it has a pressure to
-            // give - and the pressures are the one thing not on the input device at all.
-            int[] bp = pressure();
+            // The driver's own pressure first, when it sent one. It only does so on a long
+            // measurement - see the REL_RY note in the pump - and when it does it is the same
+            // stream the pulse came from rather than a separate poll of the algorithm.
+            int[] bp = null;
+            synchronized (SAMPLES) {
+                for (long[] p : PRESSURES) {
+                    if (p[0] >= from) bp = new int[] { (int) p[1], (int) p[2] };
+                }
+            }
+            if (bp != null) {
+                Log.i(TAG, "pressure from the driver: " + bp[0] + "/" + bp[1]);
+            } else {
+                // The driver's report next: six words out of _IOR('G', 11, 24), which the
+                // vendor's own log line names as worn, ppg, spo2, bph, bpl. This is the only
+                // pressure available once the chip is started directly - the library's
+                // getHighBloodPressure reads an algorithm that runs during *its* measurement,
+                // and going around it means that algorithm never ran. Losing blood pressure
+                // was the price of independence until this was wired up.
+                int[] rep = held != null ? held : Gh30x.read();
+                if (rep != null && rep.length >= 5) {
+                    int sys = rep[3], dia = rep[4];
+                    if (sys >= SYS_MIN && sys <= SYS_MAX
+                            && dia >= DIA_MIN && dia <= DIA_MAX && dia < sys) {
+                        bp = new int[] { sys, dia };
+                        Log.i(TAG, "pressure from the driver report: " + sys + "/" + dia);
+                    } else if (sys != 0 || dia != 0) {
+                        Log.i(TAG, "driver report pressure " + sys + "/" + dia
+                                + " is outside " + SYS_MIN + "-" + SYS_MAX + " over "
+                                + DIA_MIN + "-" + DIA_MAX + "; not reporting it");
+                    }
+                }
+                // And the library last, for the path where it started the measurement itself.
+                if (bp == null) bp = pressure();
+            }
 
             // No SpO2 in range at all means the sensor never got a lock, and the heart rate
             // from such a window is not a measurement either. Two of them reported 107 and 86
@@ -478,7 +536,7 @@ final class SensorInput {
                 return null;
             }
 
-            // SpO2 only if it stopped climbing.
+            // SpO2 from the plateau, wherever in the window it happens to be.
             //
             // It converges in two stages, and the first one looks exactly like an answer:
             //
@@ -489,9 +547,9 @@ final class SensorInput {
             // always long enough to leave it - the tail median faithfully reports 81, which is
             // a reading nobody took. A window that is still rising when it ends has not
             // finished, so the pulse is kept and the percentage is not.
-            int ox = settled(spo2) ? medianOfTail(spo2) : 0;
+            int ox = plateau(spo2);
             if (ox == 0) {
-                Log.i(TAG, "SpO2 still climbing when the window ended (" + tail(spo2)
+                Log.i(TAG, "SpO2 never held a value in this window (" + tail(spo2)
                         + "); reporting the pulse only");
             }
             Sample s = new Sample(medianOfTail(hr), ox,
@@ -549,16 +607,42 @@ final class SensorInput {
      * The floor applies to both, which is what keeps the false plateau out - 81, 81, 81 is as
      * steady as any real reading and is still the sensor on its way up.
      */
-    private static boolean settled(List<Integer> v) {
-        int n = v.size();
-        if (n < 2) return false;
-        int last = v.get(n - 1).intValue();
-        if (last == v.get(n - 2).intValue() && last >= SPO2_SETTLED_MIN) return true;
-        if (n < 3) return false;
-        int a = v.get(n - 3).intValue(), b = v.get(n - 2).intValue();
-        int hi = Math.max(last, Math.max(a, b));
-        int lo = Math.min(last, Math.min(a, b));
-        return hi - lo <= SPO2_SPREAD && medianOfTail(v) >= SPO2_SETTLED_MIN;
+    /** A run has to be at least this long before it counts as somewhere the value settled. */
+    private static final int PLATEAU_MIN = 3;
+
+    /**
+     * The value this series held, or 0 if it never held one.
+     *
+     * The longest run of consecutive samples within {@link #SPO2_SPREAD} of each other, taken
+     * as its median, provided that median is at or above the floor.
+     *
+     * Looking at the end of the window was right while the window was the vendor's ten readings
+     * and stopped the moment it had them. Running the measurement ourselves makes it far longer
+     * - sixty-seven samples against eight - and the end is then the sensor winding down rather
+     * than the answer: a real capture read 100, 100, 91, 78 at its tail, having sat at 100 for
+     * some time before. Taking the last three of that reported nothing.
+     *
+     * So the plateau is looked for wherever it falls. Ramp at the start and decay at the end are
+     * both short and both moving; the middle is where the value stays put, and the longest place
+     * it stays put is the reading.
+     */
+    private static int plateau(List<Integer> v) {
+        int bestStart = -1, bestLen = 0;
+        int i = 0;
+        while (i < v.size()) {
+            int j = i + 1;
+            while (j < v.size()
+                    && Math.abs(v.get(j).intValue() - v.get(j - 1).intValue()) <= SPO2_SPREAD) {
+                j++;
+            }
+            if (j - i > bestLen) { bestLen = j - i; bestStart = i; }
+            i = j;
+        }
+        if (bestLen < PLATEAU_MIN) return 0;
+        List<Integer> run = new ArrayList<Integer>(v.subList(bestStart, bestStart + bestLen));
+        Collections.sort(run);
+        int med = run.get(run.size() / 2).intValue();
+        return med >= SPO2_SETTLED_MIN ? med : 0;
     }
 
     /** The last few values, for saying in a log line why a reading was refused. */
