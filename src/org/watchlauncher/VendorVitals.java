@@ -304,6 +304,11 @@ public final class VendorVitals {
             if (own != null) {
                 boolean started = false;
                 try {
+                    // Tested and it makes no difference either way: registration alone gives
+                    // the same ninety-odd samples and the same absent pressure. com.ic.work
+                    // does not call enableSPO2 at all - its only uses of that library are
+                    // getStepCount and getBodyTempFromWristTemp - so sending the start twice
+                    // looked like the difference between the paths, and is not.
                     started = Gh30x.start();
                     if (started) {
                         SensorInput.Sample s = own.collect(timeoutMs);

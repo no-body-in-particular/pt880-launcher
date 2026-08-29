@@ -127,9 +127,23 @@ Java_org_watchlauncher_Gh30x_enableSpo2(JNIEnv *env, jclass cls)
      * price when com.ic.work and the HAL - the parts that actually wedge - are avoided either
      * way. The ioctl stays as the fallback, and the numbers stay recorded above.
      */
-    rc = vendor_call("enableSPO2");
+    /*
+     * HB mode, not SpO2 mode, when a pressure is wanted.
+     *
+     * gh3011_service - the root daemon that actually runs the algorithms, and the piece none of
+     * this looked at for two days - has three run modes and no blood pressure mode among them:
+     *
+     *     RUN_MODE_ADT_HB_DET   handle_hb_mode_result    "BPD Ver:0.0.1", "bp1:%d,%d"
+     *     RUN_MODE_HRV_DET
+     *     RUN_MODE_SPO2_DET     handle_spo2_mode_result  "spo2_result: %d, lvl %d, hb %d..."
+     *
+     * The pressure belongs to the heart beat path. Every measurement we have ever started went
+     * through enableSPO2, so it ran the SpO2 path, whose result carries an SpO2 and a heart beat
+     * and no pressure at all - which is the whole of why ours never had one.
+     */
+    rc = vendor_call("enablePPG");
     if (rc >= 0) return rc;
-    return gh_cmd(GH_CMD_SPO2);
+    return gh_cmd(GH_CMD_PPG);
 }
 
 JNIEXPORT jint JNICALL
