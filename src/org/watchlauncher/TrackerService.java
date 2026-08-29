@@ -339,8 +339,24 @@ public class TrackerService extends Service {
         }, "vitals").start();
     }
 
-    /** An optical measurement needs a good few seconds of signal; past this it is not coming. */
-    private static final int VITALS_TIMEOUT_MS = 45 * 1000;
+    /**
+     * How long to wait for a measurement before deciding it is not coming.
+     *
+     * Has to be longer than the measurement, and that is not a fixed number: the service stops
+     * after a set count of readings, and tools/patch_ic_work.py can raise it. At the stock ten
+     * a measurement runs 21 to 31 s and 45 s was ample. Raised to twenty, it runs closer to 40,
+     * and 45 stopped being ample - which cost blood pressure twice over.
+     *
+     * The pressures arrive in the callback that ends the measurement. Timing out before it does
+     * not mean waiting a bit less; it means taking the intermediate callbacks instead, whose
+     * pressures are whatever the algorithm had reached so far. That showed up first as noise -
+     * a systolic band that had sat at 118 to 123 spreading to 103 to 127 on a sleeping wrist -
+     * and then as nothing at all, once measurements ran past the timeout entirely.
+     *
+     * So this has to have room for the longest measurement the odex allows, plus the several
+     * seconds the sensor spends finding a pulse before the first reading counts.
+     */
+    private static final int VITALS_TIMEOUT_MS = 75 * 1000;
 
     /** How often oxygen is measured unasked. Slower than the pulse deliberately -- every
      *  reading is a turn on a queue that cannot be recovered if it jams. */

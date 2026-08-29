@@ -452,19 +452,96 @@ def reseal(buf, base):
     buf[base + 8:base + 12] = csum.to_bytes(4, "little")
 
 
+MARK_WINDOW = "checkCount == > "
+OP_CONST_16 = 0x13
+OP_IF_GT = 0x36
+
+
+def patch_window(dx, apply_it, readings):
+    """
+    Let a measurement run longer than ten readings.
+
+    SpO2 does not arrive, it converges, and on this sensor it does so in two stages: five or
+    six samples sitting at 81-82, then a jump to the high nineties. The service stops the
+    measurement after ten readings -
+
+        009f  iget-quick v0, offset 48     checkCount
+        00a1  const/16 v3, 10
+        00a3  if-gt v0, v3 -> stop
+
+    - which is often before the second stage, so the reading available at the end is a point on
+    the ramp rather than an answer. Of twenty-four windows captured, five converged far enough
+    to be trusted. The rest ended early.
+
+    Driving is worse than resting and for a second reason: motion puts noise on the signal, and
+    the same wrist that gives 82, 82, 100, 100 sitting still gives 82, 93, 90, 91 in a car. Ten
+    samples is not enough to average that out; thirty is.
+
+    One 16 bit operand, so nothing moves and every other offset in the file stays valid. The
+    cost is the sensor being lit for longer - the measurement is paced at about a reading a
+    second, so thirty readings is roughly thirty seconds against ten - and that is the whole
+    trade: battery and a warm wrist against an SpO2 that means something.
+
+    Found by the log line the method prints for the very counter being tested, then the
+    const/16 that the following if-gt compares it against. Not a file offset, and not the
+    number 10, which appears all over a dex.
+    """
+    notes = []
+    cname, mname, code, unit = dx.find_by_string(MARK_WINDOW)
+    if code is None:
+        return False, ["  could not find %r anywhere" % MARK_WINDOW]
+    notes.append("  %s.%s counts readings at unit %04x" % (cname, mname, unit))
+
+    site = None
+    prev = None
+    for u, p, op, _n in dx.walk(code):
+        if u > unit and prev is not None and op == OP_IF_GT:
+            site = prev
+            break
+        prev = (u, p) if op == OP_CONST_16 else None
+    if site is None:
+        return False, notes + ["  no const/16 feeding an if-gt after it; refusing"]
+
+    u, p = site
+    was = struct.unpack_from("<h", dx.b, p + 2)[0]
+    if was == readings:
+        notes.append("  %04x  already const/16 v%d, %d" % (u, dx.b[p + 1], readings))
+        return True, notes
+    if was != WINDOW_STOCK:
+        notes.append("  %04x  limit is %d, expected %d -- refusing"
+                     % (u, was, WINDOW_STOCK))
+        return False, notes
+    notes.append("  %04x  const/16 v%d, %d  ->  %d readings"
+                 % (u, dx.b[p + 1], was, readings))
+    if apply_it:
+        struct.pack_into("<h", dx.b, p + 2, readings)
+    return True, notes
+
+
+# The limit as the vendor shipped it.
+WINDOW_STOCK = 10
+
+
 def main():
     ap = argparse.ArgumentParser(
-        description="Patch com.ic.work's odex: wear detector and work queue mutex.")
+        description="Patch com.ic.work's odex: wear detector, work queue mutex, "
+                    "measurement length.")
     ap.add_argument("odex")
     ap.add_argument("-o", "--out")
     ap.add_argument("--verify", action="store_true", help="report only, write nothing")
     ap.add_argument("--wear", action="store_true", help="only the wear detector")
     ap.add_argument("--queue", action="store_true", help="only the queue mutex")
+    ap.add_argument("--window", nargs="?", type=int, const=30, metavar="READINGS",
+                    help="only the measurement length; how many readings before the "
+                         "service stops (stock %d, default %d)" % (WINDOW_STOCK, 30))
     args = ap.parse_args()
 
-    chosen = args.wear or args.queue
+    chosen = args.wear or args.queue or args.window is not None
     want_wear = args.wear or not chosen
     want_queue = args.queue or not chosen
+    # Not part of "everything": the other two were diagnostic and neither fixed anything,
+    # while this one costs sensor time every measurement. Asked for by name or not at all.
+    want_window = args.window is not None
 
     buf = bytearray(open(args.odex, "rb").read())
     if bytes(buf[:4]) == ODEX_MAGIC:
@@ -490,6 +567,14 @@ def main():
     if want_queue:
         print("work queue mutex:")
         good, notes = patch_queue(dx, apply_it)
+        for n in notes:
+            print(n)
+        ok &= good
+        print()
+
+    if want_window:
+        print("measurement length:")
+        good, notes = patch_window(dx, apply_it, args.window)
         for n in notes:
             print(n)
         ok &= good

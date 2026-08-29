@@ -667,12 +667,28 @@ public final class TrackerSources {
         return got[0];
     }
 
+    /**
+     * The lowest and highest a living wrist's owner can be.
+     *
+     * Was 20 to 45, which let the raw wrist reading through: a wrist sits a few degrees above
+     * the room, so 21 passed the test and was filed as a body temperature. Nothing in that band
+     * below about 34 is a person - it is the thermometer reporting the room, or a watch on a
+     * table - and reporting it as body heat is worse than reporting nothing.
+     */
+    private static final float BODY_MIN = 34f, BODY_MAX = 43f;
+
     public static float temperature(Context c) {
-        // The vendor's binder, for the same reason the pulse uses it: GXTS02S in the platform
-        // sensor list is a mirror sitting at last=<0.0,0.0,0.0>, and registerListener on it
-        // returns that for ever. VendorVitals has the account.
-        float v = VendorVitals.temperature(c, 20000);
-        if (v > 20f && v < 45f) lastTemp = v;
+        // The vendor's own conversion first. The thermometer reads the wrist, which is not a
+        // body temperature and never was; SensorInput.bodyTemperature has the derivation.
+        float v = SensorInput.bodyTemperature();
+        if (v < BODY_MIN || v > BODY_MAX) {
+            // The vendor's binder, for the same reason the pulse uses it: GXTS02S in the
+            // platform sensor list is a mirror sitting at last=<0.0,0.0,0.0>, and
+            // registerListener on it returns that for ever. VendorVitals has the account.
+            v = VendorVitals.temperature(c, 20000);
+        }
+        if (v >= BODY_MIN && v <= BODY_MAX) lastTemp = v;
+        else if (v > 0f) Log.i(TAG, "temperature " + v + " C is not a body; not reporting it");
         return lastTemp;
     }
 

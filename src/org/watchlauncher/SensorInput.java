@@ -153,6 +153,50 @@ final class SensorInput {
         return null;
     }
 
+    /**
+     * A body temperature, or 0 if the library cannot give one.
+     *
+     * The thermometer reads the wrist, and a wrist is not a body: it sits a few degrees above
+     * the room and well below the person, which is how a reading of 21 got reported as a body
+     * temperature. The vendor does not use that number raw either - com.ic.work converts it in
+     * its own onSensorChanged, and the conversion is in the same library everything else here
+     * comes from:
+     *
+     *     iget-wide  offset 24            the wrist reading
+     *     invoke-static a(wrist, ambient) -> getBodyTempFromWristTemp
+     *     iput-wide  offset 32            the body temperature
+     *
+     * with a constant 26.0 standing in for ambient whenever the measured one is not usable.
+     * There is no ambient thermometer to read here, so 26.0 is what this passes - the vendor's
+     * own fallback, and the same number its code uses for most of the day.
+     *
+     * That approximation is worth stating plainly: the conversion leans on the difference
+     * between skin and surroundings, so in a cold room or outdoors the result drifts in the
+     * direction of the error. It is a wrist thermometer either way, not a clinical one.
+     */
+    static float bodyTemperature() {
+        if (!LIB_OK) return 0f;
+        try {
+            if (ICJniUtils.isTemperatureDevAvailable() <= 0) return 0f;
+            ICJniUtils.enableTemperature();
+            try {
+                double wrist = ICJniUtils.getTemperature();
+                if (wrist <= 0) return 0f;
+                double body = ICJniUtils.getBodyTempFromWristTemp(wrist, AMBIENT_C);
+                Log.i(TAG, String.format("wrist %.2f C -> body %.2f C", wrist, body));
+                return (float) body;
+            } finally {
+                ICJniUtils.disableTemperature();
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "the vendor library would not give a temperature", t);
+            return 0f;
+        }
+    }
+
+    /** What com.ic.work passes when it has no ambient reading of its own. */
+    private static final double AMBIENT_C = 26.0;
+
     /** Whether libICJniUtils.so loaded. Checked once; a missing library is not an error here. */
     private static final boolean LIB_OK = loadLib();
 

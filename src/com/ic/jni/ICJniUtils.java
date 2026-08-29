@@ -33,4 +33,20 @@ public final class ICJniUtils {
     public static native int getSPO2();
     public static native int getHighBloodPressure();
     public static native int getLowBloodPressure();
+
+    public static native int enableTemperature();
+    public static native int disableTemperature();
+    public static native int isTemperatureDevAvailable();
+
+    /** What the thermometer reads at the wrist, which is not a body temperature. */
+    public static native double getTemperature();
+
+    /**
+     * Wrist reading and ambient in, body temperature out.
+     *
+     * The vendor's own path, and the reason a wrist reads 21 degrees without it. com.ic.work
+     * calls exactly this from its onSensorChanged, with the measured ambient where there is one
+     * and the constant 26.0 where there is not.
+     */
+    public static native double getBodyTempFromWristTemp(double wrist, double ambient);
 }

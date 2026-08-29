@@ -360,6 +360,21 @@ public final class VendorVitals {
                     && svc.heartRate > 0 && raw.heartRate > 0
                     && Math.abs(svc.heartRate - raw.heartRate) <= HR_AGREE_BPM;
 
+            // A measurement that did not finish has no pressures worth having.
+            //
+            // They arrive in the callback that ends it; before that the service reports what
+            // the algorithm has reached so far, and that is a number in progress rather than a
+            // reading. Taking those is what turned a steady 118-123 systolic into 103-127 on a
+            // sleeping wrist. The pulse and the percentage are fine from a partial measurement,
+            // so only the pair is dropped.
+            boolean finished = finishedAt[0] > 0;
+            if (!finished && svc != null && svc.systolic > 0) {
+                Log.i(TAG, "measurement unfinished; dropping its " + svc.systolic + "/"
+                        + svc.diastolic + " as not yet settled");
+                svc.systolic = 0;
+                svc.diastolic = 0;
+            }
+
             Reading out = new Reading();
             if (svc != null && (crossChecked || raw == null)) {
                 // Verified, or the only account of this window there is.
@@ -382,7 +397,10 @@ public final class VendorVitals {
             if (raw != null) {
                 if (out.heartRate <= 0 && raw.heartRate > 0) out.heartRate = raw.heartRate;
                 if (out.oxygen <= 0 && raw.oxygen > 0) out.oxygen = raw.oxygen;
-                if (out.systolic <= 0 && raw.systolic > 0) {
+                // Same guard as above, and for the same reason: this pair is polled out of the
+                // algorithm while it is still running, so before the measurement ends it is
+                // only ever a number on its way somewhere.
+                if (out.systolic <= 0 && raw.systolic > 0 && finished) {
                     out.systolic = raw.systolic;
                     out.diastolic = raw.diastolic;
                 }
