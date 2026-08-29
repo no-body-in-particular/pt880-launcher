@@ -560,6 +560,26 @@ public class TrackerService extends Service {
         send(out, TrackerSources.positionFrame(this, id));
         acquireFixAsync();
 
+        // Then whatever was measured while there was nowhere to send it. After the position
+        // rather than before: the server has just watched this device reconnect and the first
+        // thing it should learn is where the watch is now, not where it was an hour ago.
+        final OutputStream spoolOut = out;
+        int waiting = Spool.size(this);
+        if (waiting > 0) {
+            Log.i(TAG, waiting + " frame(s) waiting from while the connection was down");
+            Spool.drain(this, new Spool.Sender() {
+                public boolean send(String frame) {
+                    try {
+                        TrackerService.this.send(spoolOut, frame);
+                        return true;
+                    } catch (Throwable t) {
+                        // The socket has gone again. Spool keeps the rest.
+                        return false;
+                    }
+                }
+            });
+        }
+
         long nextBeat = SystemClock.elapsedRealtime() + HEARTBEAT_MS;
         long nextFix = SystemClock.elapsedRealtime() + cycleSeconds() * 1000L;
         long nextVitals = SystemClock.elapsedRealtime() + vitalsSeconds() * 1000L;
@@ -597,11 +617,11 @@ public class TrackerService extends Service {
             }
             if (fixNow) {
                 fixNow = false;
-                send(out, TrackerSources.positionFrame(this, id));
+                sendKeeping(out, TrackerSources.positionFrame(this, id));
                 nextFix = now + cycleSeconds() * 1000L;
             }
             if (now >= nextFix) {
-                send(out, TrackerSources.positionFrame(this, id));
+                sendKeeping(out, TrackerSources.positionFrame(this, id));
                 nextFix = now + cycleSeconds() * 1000L;
                 acquireFixAsync();
             }
@@ -1020,6 +1040,26 @@ public class TrackerService extends Service {
     }
 
     /**
+     * Send something worth keeping, and keep it if the send fails.
+     *
+     * For the frames that carry their own timestamp and describe a moment - a position, a
+     * reading. The exception is still thrown, because a failed write means the session is over
+     * and the loop above has to hear that; the frame is simply saved on the way past.
+     *
+     * Not for login, heartbeat or acknowledgements. Those describe the connection rather than
+     * the wearer, and replaying one into a later session would be describing that session
+     * wrongly.
+     */
+    private void sendKeeping(OutputStream out, String frame) throws Exception {
+        try {
+            send(out, frame);
+        } catch (Exception e) {
+            Spool.add(this, frame);
+            throw e;
+        }
+    }
+
+    /**
      * Send from a background task, if the session is still up.
      *
      * Quiet when it is not: a measurement that finishes after a disconnect has nowhere to go,
@@ -1027,11 +1067,17 @@ public class TrackerService extends Service {
      */
     private void sendAsync(String frame) {
         OutputStream o = outStream;
-        if (o == null) return;
+        if (o == null) {
+            // Measured with the socket down. The frame stamps itself, so it is still worth
+            // having when the connection comes back - see Spool.
+            Spool.add(this, frame);
+            return;
+        }
         try {
             send(o, frame);
         } catch (Throwable t) {
-            Log.w(TAG, "could not send " + frame, t);
+            Log.w(TAG, "could not send " + frame + "; keeping it for the next connection", t);
+            Spool.add(this, frame);
         }
     }
 
