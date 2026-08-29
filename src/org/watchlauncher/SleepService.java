@@ -8,6 +8,7 @@ import android.content.Intent;
 import android.hardware.Sensor;
 import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
+import android.util.Log;
 import android.hardware.SensorManager;
 import android.os.Handler;
 import android.os.IBinder;
@@ -47,6 +48,8 @@ import android.os.SystemClock;
  */
 public class SleepService extends Service implements SensorEventListener {
 
+    private static final String TAG = "SleepService";
+
     /** How often to sample once sleep has been detected. */
     public static final long INTERVAL_MS = 30000;
 
@@ -72,8 +75,57 @@ public class SleepService extends Service implements SensorEventListener {
      *  keeps its own log. */
     private static final double STILL_ENMO = 0.015;
 
-    /** And the arm may not have changed angle by more than this. */
+    /**
+     * And the arm may not have changed angle by more than this, when the question is meaningful.
+     *
+     * Van Hees watches the wrist angle on short epochs and calls it sleep when it stops changing.
+     * Comparing two bursts five minutes apart is not that measurement: five minutes is long
+     * enough for a sleeper to turn over, so an ordinary posture change read as movement and reset
+     * the whole accumulation. Three nights of the watcher's own log say how badly - 43 % of
+     * bursts flagged, the longest still run 4 against a threshold of 6, and the night never
+     * detected at all.
+     *
+     * So the angle is only consulted at the fine cadence below, where consecutive samples are
+     * thirty seconds apart and a change really does mean the arm moved. At the coarse cadence
+     * only ENMO is asked, because it measures movement during the burst rather than the
+     * difference between two snapshots.
+     */
     private static final double STILL_ANGLE_DEG = 10.0;
+
+    /**
+     * The cadence used once a burst looks still, so the angle test above means something.
+     *
+     * Sampling this fast all day would cost ten times what the watcher costs now - a five second
+     * burst every thirty seconds is a sixth of the processor, against a sixtieth at five
+     * minutes - and would buy nothing while the wrist is plainly busy. It is only during a
+     * candidate still stretch that the fine grain is worth having, so that is when it is taken.
+     */
+    private static final long CONFIRM_INTERVAL_MS = 30000;
+
+    /**
+     * How close to its owner's resting pulse a wrist has to be before stillness counts as sleep.
+     *
+     * Stillness alone is not sleep-specific and never was. The watcher's own log caught it
+     * declaring sleep at 14:40 on an afternoon, which is what became a "35 minute night" on the
+     * server: sitting still after lunch looks exactly like sleeping to an accelerometer.
+     *
+     * A pulse tells them apart, and there is now a verified one every three minutes. Asleep this
+     * wrist reads 51-55; sedentary and awake it reads 60-85. The margin sits inside that gap.
+     */
+    private static final int SLEEP_BPM_MARGIN = 8;
+
+    /** A pulse older than this says nothing about what the wrist is doing now. */
+    private static final long BPM_FRESH_MS = 12 * 60 * 1000;
+
+    /**
+     * Stillness needed to start a log when there is no usable pulse.
+     *
+     * The vitals path can be down - the sensor HAL wedges, and docs/vitals.md has the account -
+     * and sleep tracking should not stop with it. Without the discriminator the only defence
+     * left is a longer bout, so it asks for double, which no afternoon of sitting still on this
+     * watcher's record has ever reached.
+     */
+    private static final int START_AFTER_STILL_MIN_NO_BPM = 60;
 
     /** Do not bother scoring a stretch shorter than this. */
     private static final int MIN_SCORABLE_MIN = 90;
@@ -284,28 +336,61 @@ public class SleepService extends Service implements SensorEventListener {
         double flat = Math.sqrt(mx * mx + my * my);
         double angle = Math.atan2(mz, flat) * 180.0 / Math.PI;
 
+        int state = SleepLog.state(this);
+
+        // How long since the previous burst, which is also which cadence produced it. The angle
+        // test only applies at the fine one; see STILL_ANGLE_DEG.
+        long sinceLast = SleepLog.lastBurstAt(this) > 0 ? now - SleepLog.lastBurstAt(this) : 0;
+        boolean fine = sinceLast > 0 && sinceLast <= CONFIRM_INTERVAL_MS * 2;
+        SleepLog.setLastBurstAt(this, now);
+
         float previous = SleepLog.lastAngle(this);
-        boolean turned = !Float.isNaN(previous)
+        boolean turned = fine && !Float.isNaN(previous)
                 && Math.abs(angle - previous) > STILL_ANGLE_DEG;
         boolean still = enmo < STILL_ENMO && !turned;
         SleepLog.setLastAngle(this, angle);
 
-        int state = SleepLog.state(this);
-        int run = still == (state == SleepLog.WATCHING) ? SleepLog.run(this) + 1 : 0;
-
         if (state == SleepLog.WATCHING) {
             SleepLog.appendWatch(this, now, mx, my, mz, sd, enmo, range, samples);
-            int needed = (START_AFTER_STILL_MIN * 60)
-                    / (int) (WATCH_INTERVAL_MS / 1000);
-            if (still && run >= needed) {
+
+            // Seconds of stillness rather than a count of bursts, because the cadence changes
+            // underneath it: six bursts means half an hour at the coarse rate and three minutes
+            // at the fine one, and counting bursts silently means whichever it happens to be.
+            // A gap longer than the coarse cadence is credited only that much - the watch may
+            // have been off, or the alarm delayed, and neither is evidence of a still wrist.
+            int held = still
+                    ? SleepLog.run(this) + (int) (Math.min(sinceLast, WATCH_INTERVAL_MS) / 1000)
+                    : 0;
+
+            int bpm = TrackerLog.recentBpm(this, BPM_FRESH_MS);
+            int resting = SleepLog.restingBpm(this);
+            boolean pulseKnown = bpm > 0 && resting > 0;
+            boolean pulseSaysSleep = pulseKnown && bpm <= resting + SLEEP_BPM_MARGIN;
+            int needSecs = (pulseKnown ? START_AFTER_STILL_MIN
+                                       : START_AFTER_STILL_MIN_NO_BPM) * 60;
+
+            if (still && held >= needSecs && (!pulseKnown || pulseSaysSleep)) {
+                Log.i(TAG, "asleep: " + (held / 60) + " min still"
+                        + (pulseKnown ? ", pulse " + bpm + " against a resting " + resting
+                                      : ", no recent pulse so the long bout was required"));
                 SleepLog.setState(this, SleepLog.LOGGING);
                 sendFlag(1, now);
                 return INTERVAL_MS;
             }
-            SleepLog.setRun(this, run);
+            if (still && held >= needSecs) {
+                // Still for long enough, but the wrist is not at rest. This is the afternoon
+                // case, and refusing it here is the whole point of asking.
+                Log.i(TAG, "still for " + (held / 60) + " min but the pulse is " + bpm
+                        + " against a resting " + resting + "; not sleep");
+            }
+            SleepLog.setRun(this, held);
             refreshFlag(0, now);
-            return WATCH_INTERVAL_MS;
+            // Look closely while something might be happening, and cheaply when it plainly is
+            // not. This is where the fine cadence is bought and where the angle test earns it.
+            return still ? CONFIRM_INTERVAL_MS : WATCH_INTERVAL_MS;
         }
+
+        int run = still ? 0 : SleepLog.run(this) + 1;
 
         // Logging. Every burst is kept, movement or not -- the scorer needs
         // the wake epochs as much as the sleep ones to measure WASO.

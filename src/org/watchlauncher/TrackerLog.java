@@ -200,9 +200,32 @@ public class TrackerLog {
     }
 
     /** Record a heart rate as it goes out. */
+    /**
+     * The last pulse, if it is recent enough to describe the wrist now, or 0.
+     *
+     * The age matters as much as the value: the sleep detector uses this to tell a still wrist
+     * that is asleep from one that is merely sitting down, and a reading from an hour ago
+     * answers neither question.
+     */
+    public static int recentBpm(Context c, long freshMs) {
+        if (c == null) return 0;
+        try {
+            SharedPreferences p = TrackerService.prefs(c);
+            int v = p.getInt(K_BPM, -1);
+            long at = p.getLong(K_BPM_AT, 0);
+            if (v <= 0 || at <= 0) return 0;
+            long age = System.currentTimeMillis() - at;
+            return (age >= 0 && age <= freshMs) ? v : 0;
+        } catch (Throwable t) {
+            return 0;
+        }
+    }
+
     public static void recordPulse(Context c, int value, long at) {
         if (c == null || at <= 0) return;
         if (value < 25 || value > 250) return;    // the same range the parser accepted
+        // Every accepted pulse teaches the resting estimate the sleep detector compares against.
+        SleepLog.observeBpm(c, value);
         try {
             TrackerService.prefs(c).edit()
                     .putInt(K_BPM, value)

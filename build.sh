@@ -103,11 +103,15 @@ javac -nowarn -encoding UTF-8 \
     -bootclasspath "$(w "$AJAR")" \
     -classpath "$JARS$(w "$AJAR")" \
     -d "$(w "$OUT/classes")" \
-    @"$OUT/sources.txt" 2>&1 | grep -v "^warning:" || true
+    @"$OUT/sources.txt" 2>&1 | grep -v "^warning:"
 
-# javac's exit status is lost to the pipe above, so check for output instead.
-[ -n "$(find "$OUT/classes" -name '*.class' -print -quit)" ] || {
-  echo "compile failed" >&2; exit 1; }
+# javac's status, not grep's. This used to test whether any .class file existed, which is
+# always true: the previous build's classes are still in the directory. So a compile that
+# failed outright was dexed from stale classes and reported success, and the apk installed
+# without the change it was built for. Four errors in SleepService.java went out that way
+# before this was noticed, on a build that printed "built:" and a size like any other.
+rc=${PIPESTATUS[0]}
+[ "$rc" -eq 0 ] || { echo "compile failed" >&2; exit 1; }
 
 echo "[3/6] dex"
 find "$OUT/classes" -name '*.class' | wlist > "$OUT/classes.txt"

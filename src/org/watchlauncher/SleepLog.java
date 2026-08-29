@@ -49,6 +49,8 @@ public class SleepLog {
     private static final String PREF_DAY = "sleepDay";
     private static final String PREF_DAY_MIN = "sleepDayMinutes";
     private static final String PREF_FLAG_AT = "sleepFlagAt";
+    private static final String PREF_BURST_AT = "sleepBurstAt";
+    private static final String PREF_RESTING = "sleepRestingBpm";
 
     /** Watching for sleep to start: a burst every few minutes, nothing kept. */
     public static final int WATCHING = 0;
@@ -107,6 +109,45 @@ public class SleepLog {
     public static void setFlagSentAt(Context c, long at) {
         prefs(c).edit().putLong(PREF_FLAG_AT, at).commit();
     }
+
+    /** When the last burst was taken, so the detector knows which cadence produced it. */
+    public static long lastBurstAt(Context c) {
+        return prefs(c).getLong(PREF_BURST_AT, 0);
+    }
+
+    public static void setLastBurstAt(Context c, long at) {
+        prefs(c).edit().putLong(PREF_BURST_AT, at).commit();
+    }
+
+    /**
+     * This wrist's resting pulse, learned rather than configured.
+     *
+     * A decayed minimum: any lower reading is taken at once, and in its absence the estimate
+     * drifts up slowly, so it follows a person whose resting rate changes over weeks without
+     * being dragged about by one quiet afternoon. The drift is small on purpose - at a reading
+     * every three minutes it comes to about two and a half beats a day, which a single genuine
+     * night of sleep pulls straight back down.
+     *
+     * Seeded by the first reading it sees, so a fresh install spends one night with no
+     * discriminator rather than an invented one. Returns 0 until then, which callers read as
+     * "no opinion" rather than "zero".
+     */
+    public static int restingBpm(Context c) {
+        return Math.round(prefs(c).getFloat(PREF_RESTING, 0f));
+    }
+
+    public static void observeBpm(Context c, int bpm) {
+        if (bpm < 30 || bpm > 220) return;
+        try {
+            float now = prefs(c).getFloat(PREF_RESTING, 0f);
+            float next = now <= 0f ? bpm
+                       : (bpm < now ? bpm : now + RESTING_DRIFT);
+            prefs(c).edit().putFloat(PREF_RESTING, next).commit();
+        } catch (Throwable t) { /* an estimate, not worth failing over */ }
+    }
+
+    /** About two and a half beats a day at one reading every three minutes. */
+    private static final float RESTING_DRIFT = 0.005f;
 
     public static int state(Context c) {
         return prefs(c).getInt(PREF_STATE, WATCHING);
