@@ -249,6 +249,42 @@ public final class VendorVitals {
         // descriptor on the sensor node, and an exception on the way through must not leak
         // either. The measurement path below clears it once it has taken the samples.
         SensorInput.Reader driver = null;
+        // Start the chip ourselves when the shim is there, and leave the HAL out of it entirely.
+        //
+        // This is the whole measurement without com.ic.work: Gh30x calls the vendor's own
+        // enableSPO2 - the entry point that has no Java wrapper, which is the only reason the
+        // service was ever needed to start one - the samples come off the input device, and the
+        // pressures come from getHighBloodPressure, which is wrapped and always was.
+        //
+        // Nothing in that path can wedge, because the piece that wedges is not in it.
+        if (Gh30x.usable()) {
+            SensorInput.Reader own = SensorInput.start(ctx, false);
+            if (own != null) {
+                boolean started = false;
+                try {
+                    started = Gh30x.start();
+                    if (started) {
+                        SensorInput.Sample s = own.collect(timeoutMs);
+                        if (s != null && s.heartRate > 0) {
+                            Reading r = new Reading();
+                            r.heartRate = s.heartRate;
+                            r.oxygen = s.oxygen;
+                            r.systolic = s.systolic;
+                            r.diastolic = s.diastolic;
+                            Log.i(TAG, "" + r + " (without the service)");
+                            return r;
+                        }
+                        Log.i(TAG, "our own measurement gave "
+                                + (s == null ? "nothing" : s.toString())
+                                + "; falling back to the service");
+                    }
+                } finally {
+                    if (started) Gh30x.stop();
+                    own.finish();
+                }
+            }
+        }
+
         try {
             long deadline = System.currentTimeMillis() + timeoutMs;
 

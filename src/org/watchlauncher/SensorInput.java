@@ -244,12 +244,24 @@ final class SensorInput {
      * answer and no worse off than before.
      */
     static Reader start(Context ctx) {
+        return start(ctx, true);
+    }
+
+    /**
+     * @param viaHal whether to switch the sensor on through the sensor framework.
+     *
+     * False when {@link Gh30x} has started the chip directly, which is the point of that shim:
+     * registering a listener here would put the HAL back in a path that exists to avoid it, and
+     * the HAL is the piece that wedges. The reader still watches the same input device either
+     * way - only who turned the sensor on differs.
+     */
+    static Reader start(Context ctx, boolean viaHal) {
         if (!available()) {
             Log.i(TAG, NODE + " is not readable; leaving the reading to the service");
             return null;
         }
         try {
-            return new Reader(ctx);
+            return new Reader(ctx, viaHal);
         } catch (IOException e) {
             Log.w(TAG, "could not open " + NODE, e);
             return null;
@@ -364,19 +376,21 @@ final class SensorInput {
         private boolean registered;
         private final long from;
 
-        Reader(Context ctx) throws IOException {
+        Reader(Context ctx, boolean viaHal) throws IOException {
             ensurePump();
             from = android.os.SystemClock.elapsedRealtime();
-            sm = (SensorManager) ctx.getSystemService(Context.SENSOR_SERVICE);
+            sm = viaHal ? (SensorManager) ctx.getSystemService(Context.SENSOR_SERVICE) : null;
             Sensor s = sm == null ? null : find(sm);
             if (s != null) {
                 sm.registerListener(DEAF, s, SensorManager.SENSOR_DELAY_NORMAL);
                 registered = true;
                 Log.i(TAG, "switched on " + s.getName() + " (type " + s.getType() + ")");
-            } else {
+            } else if (viaHal) {
                 Log.w(TAG, "no " + EXPECT_NAME + " in the sensor list; leaving the start to "
                         + "the service");
             }
+            // No message when viaHal is false: the caller has started the chip itself and the
+            // framework is deliberately not involved.
         }
 
         /** How many samples have arrived since this measurement began. */

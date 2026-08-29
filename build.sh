@@ -127,6 +127,21 @@ find "$OUT/classes" -name '*.class' | wlist > "$OUT/classes.txt"
 echo "[4/6] package dex into apk"
 ( cd "$OUT/dex" && "$BT/aapt$EXE" add -k "$(w "$OUT/base.apk")" classes.dex >/dev/null )
 
+# Native libraries, if any have been built. aapt add stores by the path given, and the runtime
+# looks under lib/<abi>/, so the add has to run from a directory where that is the relative
+# path -- hence the staging copy rather than adding straight out of libs/.
+if ls "$HERE"/libs/armeabi-v7a/*.so >/dev/null 2>&1; then
+  echo "[4b/6] native libs"
+  rm -rf "$OUT/nativelib"
+  mkdir -p "$OUT/nativelib/lib/armeabi-v7a"
+  cp "$HERE"/libs/armeabi-v7a/*.so "$OUT/nativelib/lib/armeabi-v7a/"
+  for so in "$OUT/nativelib/lib/armeabi-v7a"/*.so; do
+    echo "      lib/armeabi-v7a/$(basename "$so")"
+  done
+  ( cd "$OUT/nativelib" && "$BT/aapt$EXE" add -k "$(w "$OUT/base.apk")" \
+        lib/armeabi-v7a/*.so >/dev/null )
+fi
+
 echo "[5/6] zipalign"
 # -p page-aligns the uncompressed oui.db, so the positional reads OuiDb makes
 # land on page boundaries rather than straddling them.

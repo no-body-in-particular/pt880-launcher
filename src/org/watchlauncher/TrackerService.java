@@ -313,6 +313,20 @@ public class TrackerService extends Service {
                     }
                     vitalsMisses = 0;
                     lastVitalsOkAt = System.currentTimeMillis();
+
+                    // A reading with a pulse but neither a pressure nor an SpO2 is the wedge:
+                    // the driver answered and the service did not. See serviceSilent.
+                    if (r.systolic <= 0 && r.oxygen <= 0 && r.heartRate > 0) {
+                        if (++serviceSilent >= SILENT_WEDGE) {
+                            Log.w(TAG, "the service has given neither a pressure nor an SpO2 for "
+                                    + serviceSilent + " measurements while the driver kept "
+                                    + "answering; that is the wedge");
+                            recoverSensorService();
+                        }
+                    } else {
+                        serviceSilent = 0;
+                    }
+
                     String when = TrackerSources.stamp();
                     if (r.heartRate > 0) {
                         int bpm = calibratedPulse(r.heartRate);
@@ -379,15 +393,44 @@ public class TrackerService extends Service {
      * Only after two misses in a row, so one wrist that would not give up a reading does not
      * cost a process restart.
      */
+    /**
+     * Consecutive measurements where the driver answered and the service did not.
+     *
+     * The wedge this counts does not look like a failure from here, which is why it went
+     * unnoticed for so long. The HAL stops delivering, so the service has nothing to report and
+     * contributes neither a pressure nor an SpO2 - but the driver keeps producing a pulse, so a
+     * reading still comes back and vitalsMisses resets to zero every cycle. On the server it
+     * shows as heart rate carrying on while blood pressure and SpO2 stop together, which is the
+     * shape to recognise:
+     *
+     *     blood pressure  last 13:40:38   77|117
+     *     SpO2            last 13:40:38   97
+     *     heart rate      13:44, 13:57 ... still going
+     *
+     * The HAL's own last= sticks at the final delivered triple, which is the confirmation.
+     */
+    private volatile int serviceSilent;
+
+    /** Three of them, about nine minutes. Long enough not to fire on one bad window. */
+    private static final int SILENT_WEDGE = 3;
+
     private void recoverSensorService() {
         Log.w(TAG, "the sensor service looks wedged; restarting com.ic.work");
-        if (shell("am force-stop com.ic.work")) {
+        // Force-stop leaves the package in the stopped state, where it receives no broadcasts
+        // and will not start itself. Starting it explicitly is what actually brings it back;
+        // without this the wedge was traded for an absence.
+        boolean stopped = shell("am force-stop com.ic.work");
+        boolean started = shell("am startservice -n com.ic.work/.SensorDataService");
+        if (stopped) {
             vitalsMisses = 0;
+            serviceSilent = 0;
             vitalsSkipped = 0;
             lastMeasureAt = 0;
-            Log.i(TAG, "com.ic.work restarted; the next cycle will measure");
+            Log.i(TAG, "com.ic.work restarted" + (started ? "" : " but would not start again")
+                    + "; the next cycle will measure");
         } else {
-            Log.w(TAG, "could not restart com.ic.work; needs the root helper");
+            Log.w(TAG, "could not restart com.ic.work; needs the root helper at "
+                    + "/system/xbin/wsu");
         }
     }
 
