@@ -156,6 +156,21 @@ public final class VendorVitals {
      */
     private static final int HR_AGREE_BPM = 6;
 
+    /** How long to keep listening for a pressure after the chip has been told to stop. */
+    private static final long LATE_BP_MS = 6000;
+
+    /**
+     * How often to let the service measure instead, for a blood pressure.
+     *
+     * Every fourth, so roughly one pressure every twelve minutes against a pulse every
+     * three. Those measurements are the vendor's own short ones and carry the HAL's wedge
+     * risk with them - the recovery in TrackerService exists for exactly that - so they
+     * are worth taking sparingly rather than by default.
+     */
+    private static final int BP_EVERY = 4;
+
+    private static int measured;
+
     private VendorVitals() { }
 
     /** One measurement: whatever of the four the sensor managed. */
@@ -257,7 +272,23 @@ public final class VendorVitals {
         // pressures come from getHighBloodPressure, which is wrapped and always was.
         //
         // Nothing in that path can wedge, because the piece that wedges is not in it.
-        if (Gh30x.usable()) {
+        // Ours most of the time, theirs now and then, because neither gives everything.
+        //
+        // Measured side by side on the same wrist minutes apart:
+        //
+        //     ours     94 samples   SpO2 100%   60 bpm   no pressure
+        //     theirs    7 samples   SpO2  98%   58 bpm   120/79
+        //
+        // Our own start collects more than ten times the data and cannot be wedged by the HAL,
+        // which is what makes it the right default. But blood pressure only ever arrives
+        // through com.ic.work's callback - not from the driver's report, which reads zero for
+        // it, and not from libICJniUtils, whose pressure globals belong to a sensor this watch
+        // does not have. Whatever computes it is inside that app.
+        //
+        // So the pulse and the percentage come from the good path every time, and every
+        // BP_EVERY-th measurement is given to the service so there is a pressure to plot.
+        boolean wantPressure = (++measured % BP_EVERY) == 0;
+        if (!wantPressure && Gh30x.usable()) {
             // Both halves, because each alone does only part of the job.
             //
             // Registering with the framework wakes the hook process that services the chip's
@@ -276,6 +307,21 @@ public final class VendorVitals {
                     started = Gh30x.start();
                     if (started) {
                         SensorInput.Sample s = own.collect(timeoutMs);
+                        // Stop first, then give the pressure a moment to arrive. It comes at the
+                        // end of a measurement rather than during one - see latePressure - so
+                        // the pair is looked for after the chip has been told to stop, not
+                        // before, which is where it was being missed.
+                        Gh30x.stop();
+                        started = false;
+                        if (s != null && s.systolic <= 0) {
+                            int[] late = own.latePressure(LATE_BP_MS);
+                            if (late != null) {
+                                s = new SensorInput.Sample(s.heartRate, s.oxygen,
+                                                           late[0], late[1]);
+                                Log.i(TAG, "pressure arrived after the stop: "
+                                        + late[0] + "/" + late[1]);
+                            }
+                        }
                         if (s != null && s.heartRate > 0) {
                             Reading r = new Reading();
                             r.heartRate = s.heartRate;

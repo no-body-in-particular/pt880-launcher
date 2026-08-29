@@ -413,6 +413,46 @@ final class SensorInput {
             // framework is deliberately not involved.
         }
 
+        /**
+         * A pressure that arrived late, after the caller stopped the chip.
+         *
+         * The pair comes at the end of a measurement rather than during it: the one capture that
+         * produced one had it in the final six seconds, and the service's own short measurements
+         * - which reliably yielded a pressure for hours - end after twenty-odd seconds rather
+         * than running on. Reading PRESSURES before the stop therefore looks in the wrong place.
+         *
+         * The pump keeps running regardless, so this is only a matter of asking again a moment
+         * later. Cheap, and the alternative is a pressure that was emitted and thrown away.
+         */
+        int[] latePressure(long waitMs) {
+            long until = android.os.SystemClock.elapsedRealtime() + waitMs;
+            while (android.os.SystemClock.elapsedRealtime() < until) {
+                synchronized (SAMPLES) {
+                    for (int i = PRESSURES.size() - 1; i >= 0; i--) {
+                        long[] p = PRESSURES.get(i);
+                        if (p[0] >= from) return new int[] { (int) p[1], (int) p[2] };
+                    }
+                }
+                try {
+                    Thread.sleep(250);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+            return null;
+        }
+
+        /** Whether a plausible pressure has turned up on REL_RY since this measurement began. */
+        private boolean havePressure() {
+            synchronized (SAMPLES) {
+                for (int i = PRESSURES.size() - 1; i >= 0; i--) {
+                    if (PRESSURES.get(i)[0] >= from) return true;
+                }
+            }
+            return false;
+        }
+
         /** How many samples have arrived since this measurement began. */
         private int since() {
             int n = 0;
@@ -442,7 +482,17 @@ final class SensorInput {
                     if (n != last) {
                         last = n;
                         changed = now;
-                    } else if (n > SETTLE_SAMPLES && now - changed > QUIET_MS) {
+                    } else if (n > SETTLE_SAMPLES && now - changed > QUIET_MS
+                               && (havePressure() || now >= deadline - 1000)) {
+                        // Quiet, and either the pressure has arrived or there is no time left
+                        // to wait for it.
+                        //
+                        // The pair comes late. In the capture that first produced one it
+                        // appeared about sixty seconds in, a second before the measurement
+                        // ended, and measurements that stop at fifty-eight samples never see
+                        // it at all - which is why REL_RY looked like an axis that never fired.
+                        // Stopping the moment the samples pause gives up a second before the
+                        // one number that needs the longest.
                         break;
                     }
                 }

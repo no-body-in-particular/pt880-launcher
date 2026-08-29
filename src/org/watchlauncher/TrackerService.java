@@ -370,7 +370,7 @@ public class TrackerService extends Service {
      * So this has to have room for the longest measurement the odex allows, plus the several
      * seconds the sensor spends finding a pulse before the first reading counts.
      */
-    private static final int VITALS_TIMEOUT_MS = 75 * 1000;
+    private static final int VITALS_TIMEOUT_MS = 110 * 1000;
 
     /** How often oxygen is measured unasked. Slower than the pulse deliberately -- every
      *  reading is a turn on a queue that cannot be recovered if it jams. */
