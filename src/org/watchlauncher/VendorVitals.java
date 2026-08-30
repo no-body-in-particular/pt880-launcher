@@ -179,10 +179,20 @@ public final class VendorVitals {
         public int heartRate;
         public int systolic;
         public int diastolic;
+        /**
+         * Wrist temperature in Celsius, 0 when the thermometer said nothing.
+         *
+         * A wrist and not a body: it sits a few degrees above the room and well below its owner,
+         * which is how the vendor once filed 21 C as a body temperature. Converting one to the
+         * other needs an ambient reading this watch does not have.
+         */
+        public double temperature;
 
         public String toString() {
-            return "SpO2 " + oxygen + "%, " + heartRate + " bpm, "
+            String s = "SpO2 " + oxygen + "%, " + heartRate + " bpm, "
                     + systolic + "/" + diastolic;
+            if (temperature > 0) s = s + ", wrist " + temperature + "C";
+            return s;
         }
     }
 

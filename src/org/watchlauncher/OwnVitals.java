@@ -71,6 +71,9 @@ final class OwnVitals {
         int ox = field(line, "spo2=");
         if (ox >= 70 && ox <= 100) r.oxygen = ox;
 
+        double temp = dfield(line, "temp=");
+        if (temp > 20.0 && temp < 45.0) r.temperature = temp;
+
         int sbp = field(line, "sbp=");
         int dbp = field(line, "dbp=");
         // Both or neither: half a pressure is not a reading. The helper zeroes both when the
@@ -111,6 +114,35 @@ final class OwnVitals {
             return null;
         } finally {
             try { s.close(); } catch (Throwable ignored) { }
+        }
+    }
+
+    /**
+     * Is the watch on a wrist? 1 yes, 0 no, -1 nothing to go on.
+     *
+     * A second and no LED time, against the forty-five seconds a measurement spends failing off
+     * the wrist. -1 means the thermometer would not answer, and the caller should measure rather
+     * than assume either way.
+     */
+    static int worn(Context ctx) {
+        String line = ask("wear");
+        if (line == null) return -1;
+        return field(line, "worn=");
+    }
+
+    /** Read {@code name=<decimal>} out of the reply, or -1. */
+    static double dfield(String line, String name) {
+        if (line == null) return -1;
+        int at = line.indexOf(name);
+        if (at < 0) return -1;
+        int i = at + name.length(), start = i;
+        while (i < line.length()
+                && (Character.isDigit(line.charAt(i)) || line.charAt(i) == '.')) i++;
+        if (i == start) return -1;
+        try {
+            return Double.parseDouble(line.substring(start, i));
+        } catch (NumberFormatException e) {
+            return -1;
         }
     }
 

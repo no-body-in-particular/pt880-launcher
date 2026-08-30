@@ -307,6 +307,16 @@ public class TrackerService extends Service {
                     // Ask for the red mode: it carries the SpO2 ratio and runs at 100 Hz, which
                     // is the only rate that can resolve a pulse shape - green's 25 Hz puts barely
                     // four samples in a systolic upstroke.
+                    // Ask the thermometer before lighting anything. Off the wrist every path
+                    // below fails anyway - ours on no_agreement, the vendor's on its own wear
+                    // detector - but they take a minute or more between them to get there with
+                    // the LEDs lit the whole time. Only a definite no skips the cycle; -1 means
+                    // the thermometer would not say, and then it is better to measure.
+                    if (OwnVitals.worn(TrackerService.this) == 0) {
+                        Log.i(TAG, "not on a wrist; skipping this cycle without measuring");
+                        return;
+                    }
+
                     VendorVitals.Reading r = OwnVitals.measure(TrackerService.this, true);
                     if (r == null) {
                         // Green next: a much stronger pulse, and the rate is all it is for.
