@@ -389,3 +389,34 @@ So the outliers are self-inflicted, and the spread they produced was used to jus
 then to declare that gate a failure. Both conclusions were drawn from contaminated data. The
 uninterrupted stretch, 10:17 to 10:24, reads 0.729, 0.625, 0.583, 0.664 and 0.682 - within eleven
 percent, with nothing rejected.
+
+## Why the vendor manages it in eight seconds, and we do not
+
+The obvious hope was that it never computes a saturation at all - that the chip or the driver
+produces one and `gh3011_service` only reads it. Eight seconds would then be the chip converging
+rather than a daemon working, and everything in ppgd would be reimplementing something already
+available. Two places to look, and both are now closed.
+
+**The derived-report ioctl is a mode readback.** `_IOR('G', 11, 24)` - twenty-four bytes, the
+right size for a handful of results - returns `06` in the first byte before the chip is started
+and `05` after starting it in mode 5, with the remaining twenty-three bytes zero. It reports which
+mode the driver is in. There is nothing derived about it.
+
+**The driver emits no reading of its own.** This file records that a reading arrives on
+`/dev/input/event1` as a single `REL_RX` with the heart rate in the high byte and SpO2 in the low
+one. Listening on that device for a hundred seconds while a full measurement ran gives nothing at
+all - no `REL_RX`, no events of any kind.
+
+The reader is not at fault, which took three attempts to establish. The accelerometer was silent
+because it is idle between sleep bursts, and stays silent with `enable` set to 1 - its sysfs value
+reads `0 0 0`. The thermometer is live, and listening there produces exactly what it should:
+
+    type=3 code=0 value=3387        EV_ABS, 33.87 C
+
+So the tool hears input events when there are input events to hear, and `event1` has none while we
+drive the sensor.
+
+That places the vendor's algorithm in userspace, in the daemon, where the earlier search for a
+callable entry point already put it: the HAL exports nothing, `libICJniUtils` exports nothing, and
+the daemon is stripped to three `getopt` symbols. The eight second cycle is Goodix's algorithm
+being better than ours, not the hardware handing over an answer. There is no shortcut to take.
