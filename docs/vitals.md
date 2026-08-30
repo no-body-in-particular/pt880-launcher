@@ -490,3 +490,40 @@ nothing; getting a reading out of it needs the whole vendor stack driving it, wh
 and leaves no room for ours. The one arrangement that could give both is on demand: hand the chip
 over for a single vendor measurement and take it back, which needs root and is therefore vitalsd's
 job rather than the launcher's. That has not been built.
+
+## What the vendor does that we do not: it reads the accelerometer
+
+The daemon can be watched properly now. Run it under the LD_PRELOAD tap with its arguments passed
+through, leave our own socket absent so the launcher falls through to `VendorVitals`, and it
+performs real measurements while every ioctl is logged. On a sleeping wrist it produced:
+
+    GH_3011 hb_result : 51 , lvl 93 , wearing 1
+    GH_3011 hb_result : 53 , lvl 96 , wearing 1
+    GH_3011 hb_result : 54 , lvl 100 , wearing 1
+
+A correct rate at confidence 100, and `spo2 0` throughout - this is the green heart-rate mode,
+which is what the wearer said all along the vendor leans on.
+
+Its start-up is not the difference. `0x0102=0x09c4`, `0x0104=0xba98`, `0x0186=0x1807` are what
+`seq_hr.h` already replays, so the configuration captured earlier was right.
+
+The difference is the loop. Over 1,728 ioctls during working measurements:
+
+    00004701  wait for interrupt          652
+    40184709  set mode                    422
+    825a470a  read accelerometer FIFO     420      <- we never call this
+    c0044708  get mode                    231      <- nor this
+    40044702  power                         3
+
+It reads the accelerometer on roughly two of every three sensor interrupts. That is not a wear
+check or an occasional sample; it is inside the measurement loop, which is what a PPG algorithm
+does when it means to subtract the arm's movement from the optical trace. Every commercial tracker
+does this and it is the standard answer to the complaint that started this - that motion should
+not destroy a rate. Ours reads the optical channel alone and has nothing to subtract with.
+
+The driver already exposes it: `_IOR('G', 10, 602)` returns an accelerometer FIFO, and 602 bytes
+is a hundred three-axis samples. Nothing else about it needs discovering.
+
+What this capture does not contain is a saturation. The vendor never entered SpO2 mode during it -
+`spo2 0` on every line - so which `MeasureType` selects it, and what `hbd_ctrl` does with the two
+channels once there, is still unseen. The capture is kept as docs/data/vendor-tap-2026-08-30.txt.
