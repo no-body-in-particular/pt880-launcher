@@ -369,7 +369,21 @@ public class SleepService extends Service implements SensorEventListener {
                     ? SleepLog.run(this) + (int) (Math.min(sinceLast, WATCH_INTERVAL_MS) / 1000)
                     : 0;
 
-            int bpm = TrackerLog.recentBpm(this, BPM_FRESH_MS);
+            // A pulse counts as fresh if it was taken inside the current run of stillness, even
+            // when that is older than BPM_FRESH_MS. The window exists so a rate from an active
+            // hour is not used to judge a quiet one, and a wrist that has not moved since the
+            // reading has not had the chance to invalidate it.
+            //
+            // Without this the fallback bar of sixty minutes applies far more often than it was
+            // meant to, because our own daemon returns nothing rather than guessing when its
+            // windows disagree - so TrackerLog goes stale in a way the vendor's
+            // always-an-answer path never did. Last night cost the whole night to it: the
+            // longest still run was 55.9 minutes against a bar of sixty, where the same run
+            // with a pulse to hand needed only thirty.
+            long fresh = BPM_FRESH_MS;
+            long ofRun = (long) SleepLog.run(this) * 1000L;
+            if (ofRun > fresh) fresh = ofRun;
+            int bpm = TrackerLog.recentBpm(this, fresh);
             int resting = SleepLog.restingBpm(this);
             boolean pulseKnown = bpm > 0 && resting > 0;
             boolean pulseSaysSleep = pulseKnown && bpm <= resting + SLEEP_BPM_MARGIN;

@@ -140,14 +140,37 @@ public class SleepLog {
         if (bpm < 30 || bpm > 220) return;
         try {
             float now = prefs(c).getFloat(PREF_RESTING, 0f);
-            float next = now <= 0f ? bpm
-                       : (bpm < now ? bpm : now + RESTING_DRIFT);
+            float next;
+            if (now <= 0f) {
+                next = bpm;
+            } else if (bpm < now) {
+                // Step down, never snap. This used to take any lower reading as the new resting
+                // rate outright, which makes the estimate exactly as good as the worst
+                // measurement ever taken - and ours occasionally reports a 44 or a 45 on a wrist
+                // whose owner counts 52 by hand. One of those pinned the estimate at 44.01, and
+                // with a margin of 8 that put the sleep gate at 52: the wearer's true sleeping
+                // rate, so half his nights failed it and went unlogged.
+                next = Math.max(bpm, now - RESTING_FALL);
+            } else {
+                next = now + RESTING_DRIFT;
+            }
             prefs(c).edit().putFloat(PREF_RESTING, next).commit();
         } catch (Throwable t) { /* an estimate, not worth failing over */ }
     }
 
     /** About two and a half beats a day at one reading every three minutes. */
-    private static final float RESTING_DRIFT = 0.005f;
+    /** Upward drift per observation, in bpm.
+     *
+     * Raised from 0.005, which needed sixteen hundred measurements to climb eight bpm - so an
+     * estimate that had been dragged too low by one bad reading never recovered within any
+     * useful time. */
+    private static final float RESTING_DRIFT = 0.05f;
+
+    /** The most one observation may lower the estimate, in bpm.
+     *
+     * Falls faster than it rises, because the resting rate is a minimum and a genuine fall
+     * should be believed sooner than a rise - but no single measurement gets to redefine it. */
+    private static final float RESTING_FALL = 0.5f;
 
     public static int state(Context c) {
         return prefs(c).getInt(PREF_STATE, WATCHING);
