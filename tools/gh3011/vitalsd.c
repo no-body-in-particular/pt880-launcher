@@ -33,7 +33,7 @@
 #define SOCKNAME "watchvitals"      /* abstract: android.net.LocalSocket, ABSTRACT namespace */
 #define HELPER   "/data/local/tmp/ppgd"
 #define SECS_HR   "40"   /* green is 25 Hz: it needs the time to fill enough windows */
-#define SECS_SPO2 "35"   /* red is 100 Hz - 2500 samples in 25 s is plenty */
+#define SECS_SPO2 "45"   /* red is 100 Hz - 2500 samples in 25 s is plenty */
 
 static int listenfd = -1;
 
