@@ -329,7 +329,7 @@ it. That matches the LED staying visibly red through mode 4 earlier in this file
 So the only lever on the balance remains `0x0180`, and it trades one channel against the other
 rather than raising either.
 
-## The gates work within a session and not between them
+## The gates work within a session and not between them (partly retracted below)
 
 Ten logged passes split into six that agreed and four that did not, and two measurements separate
 them exactly: the window spread of one pass, and whether the matched filter and the bin estimate
@@ -360,3 +360,32 @@ established one.
 
 **Nothing is published.** Six passes agreeing to eleven percent is the closest this has come, and
 it did not survive the wrist being worn again.
+
+## Two retractions, and what the outliers actually were
+
+**The ambient hypothesis is wrong.** The section above proposed that light leaking under the case
+was corrupting the DC normalisation. It can be solved for without ever darkening the LED: both
+channels are time slots on the same photodiode, so ambient reaches them equally, and across
+measurements `m2 = k*m1 + A(1-k)` - a line whose slope is the true LED ratio and whose intercept
+gives the offset. Regressing fourteen measurements gives `m2 = 1.7335*m1 - 919` at R2 = 0.796, so
+A is about 1,250 counts, seven percent of channel 1.
+
+Correcting for it moves every ratio by a uniform three percent and closes none of the gap:
+0.583-0.729 becomes 0.602-0.753, and 0.825/1.060 becomes 0.848/1.096. Ambient is real, small, and
+not the problem.
+
+Sweeping the LED current byte from 0x46 down to 0x01 - seventy-fold - also moves the light not at
+all: channel 1 stays between 3,923 and 4,170 throughout. Taken with the high byte not remapping
+any LED, those three slot registers do nothing this sensor responds to, and the low byte is not a
+current.
+
+**And they were not two sessions.** All fourteen measurements span 10:17 to 10:54 of one morning,
+with the watch never off the wrist - the thermometer holds 33.7 to 34.8 across the whole of it.
+The four outliers fall between 10:36 and 10:41, which is exactly the window in which the slots and
+LED-current experiments were running: stopping the daemon, rewriting registers and power-cycling
+the chip underneath the measurements being logged.
+
+So the outliers are self-inflicted, and the spread they produced was used to justify a gate and
+then to declare that gate a failure. Both conclusions were drawn from contaminated data. The
+uninterrupted stretch, 10:17 to 10:24, reads 0.729, 0.625, 0.583, 0.664 and 0.682 - within eleven
+percent, with nothing rejected.
