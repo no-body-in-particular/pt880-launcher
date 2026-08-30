@@ -138,6 +138,7 @@ int main(int argc, char **argv)
     int i, nrates = 0, rounds = 0, timeouts = 0;
     static double burst_hz[512];
     int nburst = 0;
+    unsigned short gain = 0x9055;   /* the value the start sequence applies */
     struct timeval tprev;
     const char *csvpath = argc > 2 ? argv[2] : NULL;
     int want_spo2 = (argc > 3 && argv[3][0] == 's');
@@ -204,6 +205,41 @@ int main(int argc, char **argv)
             }
             left -= want;
         }
+        /* Gain control, which the daemon does after every burst and we did not do at all.
+         *
+         * It reads the applied gain back from 0x0122 and writes a new one to 0x0118, walking it
+         * 9055 -> 2828 -> 9055 -> 4f3c -> 4645 across one measurement. The two bytes look like
+         * one LED current per channel, which fits our second channel sitting flat at 5 counts
+         * while the vendor's moves by 70: pinning the gain at its initial value leaves that LED
+         * underdriven for the whole measurement.
+         *
+         * Goodix's own control law is not recoverable from the trace, so this is a plain
+         * proportional step towards a target amplitude - enough to keep the signal in range,
+         * which is all the rate estimate needs.
+         */
+        if (ns > before + 20) {
+            unsigned int lo1 = ch1[before], hi1 = ch1[before];
+            unsigned int lo2 = ch2[before], hi2 = ch2[before];
+            int k3;
+            for (k3 = before; k3 < ns; k3++) {
+                if (ch1[k3] < lo1) lo1 = ch1[k3];
+                if (ch1[k3] > hi1) hi1 = ch1[k3];
+                if (ch2[k3] < lo2) lo2 = ch2[k3];
+                if (ch2[k3] > hi2) hi2 = ch2[k3];
+            }
+            {
+                int a1 = (int)(hi1 - lo1), a2 = (int)(hi2 - lo2);
+                int g1 = (gain >> 8) & 0xff, g2 = gain & 0xff;
+                if (a1 < 40 && g1 < 0xf0) g1 += 8;
+                else if (a1 > 400 && g1 > 0x10) g1 -= 8;
+                if (a2 < 40 && g2 < 0xf0) g2 += 8;
+                else if (a2 > 400 && g2 > 0x10) g2 -= 8;
+                gain = (unsigned short)((g1 << 8) | g2);
+                wr16(0x0136, 0x0000);
+                wr16(0x0118, gain);
+            }
+        }
+
         /* The chip's rate, measured from how fast one burst follows the last. Deriving it from
          * total samples over total time is wrong the moment a burst is missed: the rate collapses
          * and, because bpm is 60*fs/lag, it drags the heart rate down with it. That is how one
