@@ -1272,8 +1272,37 @@ int main(int argc, char **argv)
              * sound augmentation index was being thrown away, which is the gate deciding
              * physiology instead of detection. */
             if (sut > 80 && sut < 300 && ai > 0.0 && ai < 1.5) {
-                sbp = 105.0 + 0.28 * med - 0.055 * sut + 11.0 * ai;
-                dbp = 66.0 + 0.19 * med - 0.030 * sut + 6.5 * ai;
+                /* The intercepts now carry a cuff correction.
+                 *
+                 * Both were placeholders picked to land in a plausible range, which was all
+                 * there was to go on without a reference. There is one now. Seven cuff readings
+                 * across a quiet afternoon - 110/66, 113/71, 108/88, 112/71, 113/70, 113/67 and
+                 * 112/68 - against the four resting measurements this code produced in the same
+                 * period:
+                 *
+                 *              ours     cuff     difference
+                 *   systolic   114.8    111.6    +3.2 mmHg
+                 *   diastolic   73.3     68.8    +4.4 mmHg
+                 *
+                 * The cuff's own 88 is left out of its diastolic mean - the other six sit
+                 * between 66 and 71, and a cuff diastolic is the least repeatable number either
+                 * device produces. Two of ours are left out too, at 95 and 112 bpm, because a
+                 * pulse that high says the wearer was moving and it was not a resting
+                 * measurement whatever it printed.
+                 *
+                 * Two things this is not. It is not paired: no measurement here was taken at the
+                 * same moment as a cuff reading, so it sets the middle of one afternoon against
+                 * the middle of the same afternoon. And four points against seven is a thin
+                 * basis, so it moves the offset only - every coefficient below is untouched and
+                 * still unfitted.
+                 *
+                 * The part worth noting is that they agreed to within four before any correction
+                 * at all. The shape features came from the literature rather than from tuning
+                 * against this wearer, and they landed close on the first real test they have
+                 * had.
+                 */
+                sbp = 102.0 + 0.28 * med - 0.055 * sut + 11.0 * ai;
+                dbp = 62.0 + 0.19 * med - 0.030 * sut + 6.5 * ai;
             }
 
             printf("hr=%.0f spread=%.0f hz=%.1f samples=%d windows=%d gain=%04x"

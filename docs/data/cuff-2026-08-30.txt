@@ -1,0 +1,31 @@
+Cuff readings, 30 August 2026, quiet afternoon, wearer resting between them.
+Taken on an upper-arm meter while the watch was on the other wrist.
+
+  systolic  diastolic  pulse
+  110       66         -
+  113       71         49
+  108       88         55
+  112       71         49
+  113       70         -
+  113       67         50
+  112       68         50
+
+The 88 is the cuff disagreeing with itself: its other six diastolics lie between
+66 and 71. A cuff diastolic is the least repeatable number either device makes,
+so it is left out of the mean and left in the record.
+
+What this was compared against - the four resting measurements ppgd produced in
+the same period, at 47 to 51 bpm:
+
+  117/74   118/75   113/73   111/71
+
+Two further measurements, 118/77 at 95 bpm and 129/83 at 112 bpm, are excluded:
+a pulse that high says the wearer was moving, whatever the pressure printed.
+
+              ours     cuff     difference
+  systolic    114.8    111.6    +3.2 mmHg
+  diastolic    73.3     68.8    +4.4 mmHg
+
+Nothing here is paired. No measurement was taken at the same moment as a cuff
+reading, so this sets one afternoon's middle against the same afternoon's
+middle. It is enough to move an offset and not enough to fit a coefficient.
