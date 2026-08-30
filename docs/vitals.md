@@ -453,3 +453,40 @@ them. Alternating between the two per cycle is possible and has not been tried.
 
 The remaining route to a saturation of our own runs through `hbd_ctrl` itself, which is in that
 binary and is exactly the kind of thing Ghidra found `FUN_0002cde8` in.
+
+## Running the vendor daemon: what it costs and what it gives
+
+It can be run. Two things had to be right, and the notes above already said both:
+
+- init starts it as `gh3011_service --daemon` with a socket it creates itself, so the wrapper has
+  to pass the arguments through - `exec ... "$@"`, not a bare exec. Without them it crash-loops,
+  which is what `init.svc.gh3011_daemon` reading `restarting` means.
+- and `printf` does not exist on this device, so writing the wrapper with it truncates
+  `/system/bin/gh3011_service` to zero bytes and the service cannot start at all. Same shape as
+  the `sed` incident that once emptied wpa_supplicant.conf: check the tool exists before
+  redirecting its output over something that matters.
+
+With those right the daemon runs, creates `/dev/socket/gh30x_socket`, and can be watched through
+the LD_PRELOAD tap - 119 kB of its conversation with the chip in ten minutes, including reads of
+registers our own sequence never touches.
+
+**What it does not do is produce a reading.** Ten minutes on a still, sleeping wrist:
+
+    GH_3011 hb_result : 0 , lvl 0 , wearing 1
+    gh_dev_report_key 0, weared 1 ,ppg 0 ,spo2 0 ,ret 0
+
+repeated every couple of seconds, unbroken. It knows the watch is worn. Its heart rate is 0 at
+confidence 0 and its saturation is 0, and it stays that way, because nothing is commanding it:
+`GH30xService::start MeasureType` and `GH30x_CMD_Handler` are what a client sends over that
+socket, and `com.ic.work` is the client. The daemon on its own sits in wear-detection and scans.
+
+And scanning means the LED is lit continuously. The wearer noticed it before the log did - the
+sensor stuck on with nothing stopping it. Stopping the service leaves the chip powered, because
+`ctl.stop` kills it without the cleanup path that writes `0xdddd=0xc4`; any of our own tools
+powers it down on exit, which is how it was recovered.
+
+So "use the vendor daemon" is not a middle path. Running it idle costs the LED and returns
+nothing; getting a reading out of it needs the whole vendor stack driving it, which owns the chip
+and leaves no room for ours. The one arrangement that could give both is on demand: hand the chip
+over for a single vendor measurement and take it back, which needs root and is therefore vitalsd's
+job rather than the launcher's. That has not been built.
