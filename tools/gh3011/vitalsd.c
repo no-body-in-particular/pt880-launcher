@@ -31,6 +31,7 @@
 #include <sys/wait.h>
 #include <stddef.h>
 #include <fcntl.h>
+#include <time.h>
 
 #define SOCKNAME "watchvitals"      /* abstract: android.net.LocalSocket, ABSTRACT namespace */
 #define HELPER   "/data/local/tmp/ppgd"
@@ -93,6 +94,39 @@ static int read_temp(int patience)
         sleep(1);
     }
     return -1;
+}
+
+
+/* Everything measured, kept on the card.
+ *
+ * The reply carries far more than the launcher uses - the ratio, its window spread, the matched
+ * amplitudes, the raw pulse shape before the gate - and all of it is thrown away the moment the
+ * socket closes. Those are exactly the numbers needed to work out why a saturation will not hold
+ * still, and they cannot be reconstructed afterwards from a heart rate.
+ *
+ * One line per measurement, appended, with the time in front of it. It is a few hundred bytes a
+ * measurement and the card has gigabytes; it survives reboots, which logcat does not, and it can
+ * be pulled whenever there is a question to ask of it.
+ */
+#define VLOG "/sdcard/vitals.log"
+
+static void logline(const char *mode, const char *line)
+{
+    FILE *f = fopen(VLOG, "a");
+    time_t now;
+    struct tm *tmv;
+    char when[32];
+
+    if (!f) return;
+    now = time(NULL);
+    tmv = localtime(&now);
+    if (tmv && strftime(when, sizeof when, "%Y-%m-%d %H:%M:%S", tmv) > 0) {
+        fprintf(f, "%s %s %s", when, mode, line);
+    } else {
+        fprintf(f, "%ld %s %s", (long)now, mode, line);
+    }
+    if (line[0] && line[strlen(line)-1] != 0x0a) fputc(0x0a, f);
+    fclose(f);
 }
 
 static int listenfd = -1;
@@ -288,6 +322,7 @@ int main(void)
                 snprintf(reply, sizeof reply, "worn=-1 reason=no_thermometer\n");
         } else {
             measure(req, reply, sizeof reply);
+            logline(req, reply);
         }
         write(c, reply, strlen(reply));
         close(c);

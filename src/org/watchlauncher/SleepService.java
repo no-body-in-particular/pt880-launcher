@@ -121,11 +121,19 @@ public class SleepService extends Service implements SensorEventListener {
      * Stillness needed to start a log when there is no usable pulse.
      *
      * The vitals path can be down - the sensor HAL wedges, and docs/vitals.md has the account -
-     * and sleep tracking should not stop with it. Without the discriminator the only defence
-     * left is a longer bout, so it asks for double, which no afternoon of sitting still on this
-     * watcher's record has ever reached.
+     * and sleep tracking should not stop with it. This used to ask for double, on the reasoning
+     * that without a pulse to tell sleep from sitting still, a longer bout was the only defence
+     * left.
+     *
+     * Thirty at the wearer's request, and the reasoning was costing more than it defended: the
+     * longest still run of the night that went unlogged was 55.9 minutes, four short of the bar,
+     * and our own measurement returns nothing far more often than the vendor's did - so the
+     * no-pulse case is now the common one rather than the exception it was written for.
+     *
+     * The trade is real and worth stating: a still afternoon can now be logged as sleep. The
+     * scorer sees that in the data and it is recoverable, where a night never recorded is not.
      */
-    private static final int START_AFTER_STILL_MIN_NO_BPM = 60;
+    private static final int START_AFTER_STILL_MIN_NO_BPM = 30;
 
     /**
      * Do not bother scoring a stretch shorter than this.

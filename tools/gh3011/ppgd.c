@@ -268,6 +268,110 @@ static int ratio_windows(const unsigned int *a, const unsigned int *b, int n, do
     return nr;
 }
 
+/* Both channels' pulse amplitude, measured against the shape of the pulse itself.
+ *
+ * band_amp asks how much of one sine wave is present, which throws away everything about a beat
+ * that is not its fundamental - and a pulse is not a sine wave. On the strong channel that hardly
+ * matters. On channel 1, which even balanced carries a fraction of the light, the difference
+ * between using a quarter of the beat's energy and all of it is the difference between a ratio
+ * and a coin toss.
+ *
+ * So build the beat first. The strong channel gives a clean ensemble average - the same one the
+ * pressure is measured on - and that becomes a template. Projecting each channel onto it asks
+ * "how much of this exact shape is here", which uses every harmonic the beat has and rejects
+ * anything that does not look like a pulse, whatever frequency it sits at. That is a matched
+ * filter, and for a known shape in noise there is nothing better.
+ *
+ * Per beat, then the median across beats: one bad beat cannot move it, and the answer does not
+ * depend on where the pass happened to start.
+ */
+static int matched_amps(const double *strong, const double *w1, const double *w2,
+                        int n, double fs, double bpm, double *o1, double *o2)
+{
+    enum { MAXB2 = 256, MAXW2 = 512 };
+    static int pk[MAXB2];
+    static double tpl[MAXW2], acc[MAXW2];
+    static double p1[MAXB2], p2[MAXB2];
+    int npk = 0, i, j, k, T, pre, post, wlen, used = 0, n1 = 0, n2 = 0;
+    double mx = 0, thr, tt = 0;
+
+    *o1 = 0;
+    *o2 = 0;
+    if (bpm < 30.0 || bpm > 210.0 || n < 64) return 0;
+    T = (int)(fs * 60.0 / bpm);
+    if (T < 8) return 0;
+    pre = (int)(T * 0.35);
+    post = (int)(T * 0.65);
+    wlen = pre + post + 1;
+    if (wlen > MAXW2 || wlen < 8) return 0;
+
+    /* Peaks on the strong channel, against a threshold an artefact cannot lift: see the note in
+     * pulse_shape on why this is the median of the local maxima and not the largest of them. */
+    {
+        static double tops[MAXB2];
+        int nt = 0;
+        for (i = 1; i < n - 1; i++) {
+            if (strong[i] >= strong[i-1] && strong[i] > strong[i+1] && strong[i] > 0
+                    && nt < MAXB2) tops[nt++] = strong[i];
+        }
+        if (nt < 4) return 0;
+        qsort(tops, nt, sizeof tops[0], cmp_d);
+        mx = tops[nt / 2];
+    }
+    thr = mx * 0.4;
+    for (i = 1; i < n - 1; i++) {
+        if (!(strong[i] >= strong[i-1] && strong[i] > strong[i+1] && strong[i] > thr)) continue;
+        if (npk > 0 && i - pk[npk-1] < T / 2) continue;
+        if (i - pre < 0 || i + post >= n) continue;
+        if (npk < MAXB2) pk[npk++] = i;
+    }
+    if (npk < 4) return 0;
+
+    /* The template: the average beat, normalised so the projection has a fixed meaning. */
+    for (j = 0; j < wlen; j++) acc[j] = 0.0;
+    for (k = 0; k < npk; k++) {
+        const double *seg = strong + pk[k] - pre;
+        double lo = seg[0], hi = seg[0], rng;
+        for (j = 1; j < wlen; j++) {
+            if (seg[j] < lo) lo = seg[j];
+            if (seg[j] > hi) hi = seg[j];
+        }
+        rng = hi - lo;
+        if (rng <= 0) continue;
+        for (j = 0; j < wlen; j++) acc[j] += (seg[j] - lo) / rng;
+        used++;
+    }
+    if (used < 4) return 0;
+    {
+        double m = 0;
+        for (j = 0; j < wlen; j++) tpl[j] = acc[j] / used;
+        for (j = 0; j < wlen; j++) m += tpl[j];
+        m /= wlen;
+        for (j = 0; j < wlen; j++) tpl[j] -= m;      /* zero mean: a DC offset is not a pulse */
+        for (j = 0; j < wlen; j++) tt += tpl[j] * tpl[j];
+        if (tt <= 0) return 0;
+    }
+
+    /* How much of that shape each channel carries, beat by beat. */
+    for (k = 0; k < npk; k++) {
+        int at = pk[k] - pre;
+        double d1 = 0, d2 = 0;
+        if (at < 0 || at + wlen > n) continue;
+        for (j = 0; j < wlen; j++) {
+            d1 += w1[at + j] * tpl[j];
+            d2 += w2[at + j] * tpl[j];
+        }
+        if (n1 < MAXB2) p1[n1++] = d1 / tt;
+        if (n2 < MAXB2) p2[n2++] = d2 / tt;
+    }
+    if (n1 < 4 || n2 < 4) return 0;
+    qsort(p1, n1, sizeof p1[0], cmp_d);
+    qsort(p2, n2, sizeof p2[0], cmp_d);
+    *o1 = p1[n1 / 2];
+    *o2 = p2[n2 / 2];
+    return used;
+}
+
 static double best_amp(const unsigned int *x, int n, double fs)
 {
     double best = 0.0, bpm, a;
@@ -584,7 +688,8 @@ int main(int argc, char **argv)
         /* ppgd 0 <file> redo <bpm> */
         FILE *rf = argc > 2 ? fopen(argv[2], "r") : NULL;
         double rfs = 0, rbpm = argc > 4 ? atof(argv[4]) : 0;
-        double d1 = 0, d2 = 0, l1, l2, a1 = 0, a2 = 0, r = 0;
+        double d1 = 0, d2 = 0, l1, l2, a1 = 0, a2 = 0, r = 0, rmatch = 0;
+        int mbeats = 0;
         unsigned int v1, v2;
         int k;
 
@@ -611,11 +716,40 @@ int main(int argc, char **argv)
         {
             double rmed = 0, rsp = 0;
             int nw = ratio_windows(ch1, ch2, ns, rfs, rbpm, &rmed, &rsp);
-            if (nw >= 3) r = rmed;
-            else if (l1 > 100.0 && l2 > 100.0 && a2 > 0) r = (a1 / l1) / (a2 / l2);
-            printf("r=%.3f spread=%.3f windows=%d at=%.0f dc1=%.0f dc2=%.0f"
+            /* The whole pass, not the median of its windows.
+             *
+             * The median was meant to shrug off a bad second and it did the opposite: six
+             * seconds is too short to measure channel 1 at all steadily, so every window was
+             * noisy and the middle one was no better than the rest. Medians of seven such
+             * windows came out 1.354 and 1.462 where the same passes measured whole gave figures
+             * near 0.9 - and the amplitude ratio behind them, ac1/ac2, sat between 0.42 and 0.55
+             * on every single run. Averaging over the whole 25 seconds is what makes that ratio
+             * hold still.
+             *
+             * The windows still earn their place as a quality measure. How far they disagree
+             * says whether the pass held together, which is worth knowing even when the number
+             * to report comes from the pass as a whole.
+             */
+            if (l1 > 100.0 && l2 > 100.0 && a2 > 0) r = (a1 / l1) / (a2 / l2);
+
+            /* And the same thing measured against the beat instead of against a sine wave. */
+            {
+                static double dw1[MAXS], dw2[MAXS];
+                double m1 = 0, m2 = 0;
+                int nb;
+                src = ch1; detrend(dw1, ns, (int)(rfs * 2.0));
+                src = ch2; detrend(dw2, ns, (int)(rfs * 2.0));
+                nb = matched_amps(l2 > l1 ? dw2 : dw1, dw1, dw2, ns, rfs, rbpm, &m1, &m2);
+                if (nb >= 4 && l1 > 100.0 && l2 > 100.0 && m2 > 0) {
+                    rmatch = (m1 / l1) / (m2 / l2);
+                }
+                mbeats = nb;
+            }
+            printf("rmatch=%.3f mbeats=%d "
+                   "r=%.3f rmed=%.3f spread=%.3f windows=%d acr=%.3f at=%.0f dc1=%.0f dc2=%.0f"
                    " ac1=%.1f ac2=%.1f samples=%d hz=%.1f redone=1\n",
-                   r, rsp, nw, rbpm, d1, d2, a1, a2, ns, rfs);
+                   rmatch, mbeats,
+                   r, rmed, rsp, nw, a2 > 0 ? a1 / a2 : 0.0, rbpm, d1, d2, a1, a2, ns, rfs);
         }
         return 0;
     }
