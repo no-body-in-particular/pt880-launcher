@@ -36,6 +36,19 @@
 struct msg { unsigned short addr, flags, len; unsigned char *buf; };
 struct rdwr { struct msg *msgs; int n; };
 
+/* The code a channel reads with no light on it.
+ *
+ * Both channels floor at 0x300000 exactly: driven dark by a low gain, channel 1 read 3145747 and
+ * 3145747 again at two different gains while channel 2 tracked the gain properly. So this is the
+ * converter's zero-light offset and not part of the signal.
+ *
+ * It matters because R is (AC/DC) per channel, and dividing by a DC that is 98% pedestal makes
+ * the ratio meaningless: channel 1 carries 3,916 counts of light and channel 2 carries 45,992,
+ * a factor of twelve, but as raw codes they are 3,149,644 and 3,191,720 - within 1.3% of each
+ * other. Every R printed before this was that comparison.
+ */
+#define DARK_CODE 3145728.0
+
 /* Resting ratio-of-ratios for this sensor, measured with bin_amp on a still, healthy wrist.
  * See the SpO2 comment below: this sets the offset of the whole scale, so it is the one number
  * to revisit if saturation ever reads implausibly. */
@@ -194,6 +207,23 @@ static double band_amp(const unsigned int *x, int n, double fs, double f)
         nw++;
     }
     return nw ? sum / nw : 0.0;
+}
+
+/* The strongest pulsatile amplitude anywhere a heart could plausibly be.
+ *
+ * band_amp needs a rate, and the rate is exactly what the failure paths do not have. Scanning
+ * 40 to 180 bpm and keeping the best gives each channel's pulsatility without one - which is what
+ * makes a failed run still worth something when the question being asked is "is this channel
+ * carrying any signal at all", as it is while chasing the LED current behind the red channel.
+ */
+static double best_amp(const unsigned int *x, int n, double fs)
+{
+    double best = 0.0, bpm, a;
+    for (bpm = 40.0; bpm <= 180.0; bpm += 2.0) {
+        a = band_amp(x, n, fs, bpm / 60.0);
+        if (a > best) best = a;
+    }
+    return best;
 }
 
 static double period_bpm(const double *seg, int n, double fs, double *conf)
@@ -364,6 +394,21 @@ int main(int argc, char **argv)
                 if (*p == ',') p++;
             }
             wr8(0xdddd, 0xc1);            /* commit, as the sequence itself does */
+            /* Read each one back. The captured sequence writes 0x0132 and 0x0134 but both read
+             * 0x0000 afterwards, so only one LED slot is actually configured - which is the best
+             * explanation yet for channel 1 sitting at a constant 0x300000 with no pulse in it.
+             * Whether a write sticks is the thing worth knowing here. */
+            p = argv[4];
+            while (*p) {
+                unsigned int rg3 = 0, vl3 = 0;
+                unsigned short back = 0;
+                if (sscanf(p, "%x=%x", &rg3, &vl3) == 2) {
+                    rd16((unsigned short)rg3, &back);
+                    fprintf(stderr, "%04x: wrote %04x read %04x\n", rg3, vl3, back);
+                }
+                while (*p && *p != ',') p++;
+                if (*p == ',') p++;
+            }
         }
         gain = want_spo2 ? 0x9055 : 0x1f69;     /* whichever that sequence applied */
     }
@@ -575,6 +620,23 @@ int main(int argc, char **argv)
             double lo = d[0], hi = d[0];
             int q;
             for (q = 0; q < ns; q++) { if (d[q] < lo) lo = d[q]; if (d[q] > hi) hi = d[q]; }
+            {
+                /* Report each channel even though the rate did not survive: a failed run is
+                 * still evidence about signal strength. */
+                /* From after the gain settled, never the whole record. Every gain step moves
+                 * the DC by thousands of counts, so a scan over the raw record finds the AGC
+                 * transient and calls it a pulse - which is how a first attempt reported an
+                 * amplitude of 3900 on a channel that carries 5. */
+                double q1 = 0, q2 = 0, e1 = 0, e2 = 0;
+                int qi, qs = settled_at + (int)fs, qn = ns - qs;
+                if (qn > 32) {
+                    for (qi = qs; qi < ns; qi++) { q1 += ch1[qi]; q2 += ch2[qi]; }
+                    q1 /= qn; q2 /= qn;
+                    e1 = best_amp(ch1 + qs, qn, fs);
+                    e2 = best_amp(ch2 + qs, qn, fs);
+                }
+                printf("dc1=%.0f dc2=%.0f amp1=%.1f amp2=%.1f ", q1, q2, e1, e2);
+            }
             printf("hr=0 reason=no_agreement windows=%d samples=%d hz=%.1f gain=%04x"
                    " swing=%.0f used=%s\n",
                    nrates, ns, fs, gain, hi - lo, src == ch2 ? "ch2" : "ch1");
@@ -662,7 +724,11 @@ int main(int argc, char **argv)
                 a1 = band_amp(ch1, ns, fs, med / 60.0);
                 a2 = band_amp(ch2, ns, fs, med / 60.0);
             }
-            if (dc1 > 0 && dc2 > 0 && a2 > 0) r = (a1 / dc1) / (a2 / dc2);
+            {
+                /* Against the light each channel actually received, not the raw code. */
+                double l1 = dc1 - DARK_CODE, l2 = dc2 - DARK_CODE;
+                if (l1 > 100.0 && l2 > 100.0 && a2 > 0) r = (a1 / l1) / (a2 / l2);
+            }
             /* SpO2 from R, anchored on this sensor rather than on the vendor's.
              *
              * The anchor used to be the vendor's own capture: its two channels at 73 and 69

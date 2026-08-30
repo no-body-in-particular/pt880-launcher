@@ -218,3 +218,42 @@ another process's log, and `/dev/socket/gh30x_socket` - which init creates and i
 tries to `chmod 666` - is never listened on: `/proc/net/unix` shows it without SO_ACCEPTCON, so
 connecting to it returns ECONNREFUSED. The remaining routes are an ioctl on `/dev/gh_tools` that
 returns the FIFO, or installing this launcher as a system app so it can read the daemon's log.
+
+## The zero-light pedestal, and what it did to R
+
+Both FIFO channels carry a fixed offset of 0x300000 - 3,145,728 - that is not light. Driven dark
+by a low gain, channel 1 read 3,145,747 at two different gains while channel 2 tracked the gain
+properly, which is what a converter's zero-light code looks like.
+
+It matters because R is `(AC/DC)` per channel, and for most of this project the DC in that
+expression was 98% pedestal:
+
+    raw codes      dc1 = 3,149,644   dc2 = 3,191,720     within 1.3% of each other
+    actual light   l1  =     3,916   l2  =    45,992     a factor of twelve
+
+So R was comparing two numbers that were almost entirely the same constant, and it came out
+around 0.07. Against received light the same measurements give 2.1 and 2.4, which is at least a
+number of the right kind.
+
+Two things follow. The first is that any earlier conclusion drawn from raw DC needs re-checking,
+because a change of a few thousand counts is invisible against a 3.14M baseline - that is why
+`0x011c`, `0x011e` and `0x0120` were originally ruled out as per-channel LED current. Re-tested
+against light they are still ruled out: `0x011c` moves both channels down together (3597 -> 3428
+and 41717 -> 39683), `0x011e` moves neither, and `0x0120` stops the stream. The ruling-out stands;
+it just now rests on evidence that could have shown the opposite.
+
+The second is that SpO2 is still not measurable here, and for a reason no amount of arithmetic
+fixes. Channel 1 receives twelve times less light than channel 2 and carries **2 counts** of
+pulsatile amplitude against channel 2's 8 to 12. R across three consecutive resting measurements
+came out 2.10, 2.38 and 4.75. That spread is not saturation changing, it is two counts of signal
+being divided by itself.
+
+**So no percentage is reported.** The `a1 > 5` gate suppresses it, which is why measurements print
+`spo2=0` and the launcher publishes nothing for it. A watch that displays a saturation it cannot
+measure is the thing this project exists to stop doing - and the earlier version of this code did
+exactly that, printing a clamped 100% on every run.
+
+Making it measurable needs channel 1's light raised from 3,916 toward channel 2's 45,992. The
+per-slot LED current is the obvious lever and has not been found: the captured sequence's writes
+to `0x0132` and `0x0134` do not stick, though the same writes applied explicitly after the
+sequence do, which is a thread worth pulling.
