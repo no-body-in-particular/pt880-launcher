@@ -139,6 +139,7 @@ int main(int argc, char **argv)
     static double burst_hz[512];
     int nburst = 0;
     unsigned short gain = 0x9055;   /* the value the start sequence applies */
+    int settled_at = 0;             /* first sample after the gain stopped moving */
     struct timeval tprev;
     const char *csvpath = argc > 2 ? argv[2] : NULL;
     int want_spo2 = (argc > 3 && argv[3][0] == 's');
@@ -228,15 +229,53 @@ int main(int argc, char **argv)
                 if (ch2[k3] > hi2) hi2 = ch2[k3];
             }
             {
+                /* Drive the DC level down out of saturation, not the amplitude up.
+                 *
+                 * At the gain the start sequence applies, both channels sit railed near
+                 * 3,210,580 and read almost flat - two or three counts. That looks exactly like
+                 * "not enough gain", and an earlier version of this responded by raising it,
+                 * which drove them further into the rail. It is the opposite: the vendor's AGC
+                 * *lowers* the gain (9055 -> 4f3c -> 4645), the DC falls to about 3,194,400, and
+                 * the pulse appears - the second channel going from 3 counts to 68 within one
+                 * burst of the change.
+                 *
+                 * So saturation is judged by the DC level, which is unambiguous, rather than by
+                 * amplitude, which reads the same whether a channel is dark or clipped.
+                 */
+                double dc1 = 0, dc2 = 0;
                 int a1 = (int)(hi1 - lo1), a2 = (int)(hi2 - lo2);
                 int g1 = (gain >> 8) & 0xff, g2 = gain & 0xff;
-                if (a1 < 40 && g1 < 0xf0) g1 += 8;
-                else if (a1 > 400 && g1 > 0x10) g1 -= 8;
-                if (a2 < 40 && g2 < 0xf0) g2 += 8;
-                else if (a2 > 400 && g2 > 0x10) g2 -= 8;
-                gain = (unsigned short)((g1 << 8) | g2);
-                wr16(0x0136, 0x0000);
-                wr16(0x0118, gain);
+                int k4;
+                for (k4 = before; k4 < ns; k4++) { dc1 += ch1[k4]; dc2 += ch2[k4]; }
+                dc1 /= (ns - before);
+                dc2 /= (ns - before);
+
+                /* One-way: back off out of saturation and then stop.
+                 *
+                 * Bracketing the vendor's operating point was tried and is worse. One gain step
+                 * moves the DC by about 9500 counts, so any deadband narrow enough to hold that
+                 * point is narrower than a single step, and the loop oscillates - the usable
+                 * window fell from 3400 samples to 1200. This settles about 33,000 counts below
+                 * where the daemon sits, which costs some signal, but it settles. */
+                if (dc1 > 3200000.0 && g1 > 0x20) g1 -= 12;
+                else if (dc1 < 3150000.0 && a1 < 40 && g1 < 0xe0) g1 += 6;
+                if (dc2 > 3200000.0 && g2 > 0x20) g2 -= 12;
+                else if (dc2 < 3150000.0 && a2 < 40 && g2 < 0xe0) g2 += 6;
+
+                {
+                    unsigned short newgain = (unsigned short)((g1 << 8) | g2);
+                    if (newgain != gain) {
+                        /* Every gain change steps the DC by about 9500 counts - two orders of
+                         * magnitude more than the pulse - so the settling period is unusable and
+                         * has to be dropped rather than filtered. Analysis starts after the gain
+                         * has stopped moving; including the transient put the rate estimate at
+                         * the edge of its search range. */
+                        settled_at = ns;
+                        gain = newgain;
+                        wr16(0x0136, 0x0000);
+                        wr16(0x0118, gain);
+                    }
+                }
             }
         }
 
@@ -284,6 +323,15 @@ int main(int argc, char **argv)
      * at about 1 Hz, and a 65 bpm pulse is 1.08 Hz - so it was attenuating the pulse itself and
      * leaving the slow drift behind, which biases the autocorrelation toward long lags. That is
      * why three runs on a 65-70 bpm wearer returned 58, 46 and 42. */
+    {
+        /* Drop the settling period, plus a second for the baseline filter to fill. */
+        int skip = settled_at + (int)fs;
+        if (skip > 0 && ns - skip > (int)(fs * 12)) {
+            memmove(ch1, ch1 + skip, (ns - skip) * sizeof ch1[0]);
+            memmove(ch2, ch2 + skip, (ns - skip) * sizeof ch2[0]);
+            ns -= skip;
+        }
+    }
     detrend(d, ns, (int)(fs * 2));
     {
         /* Select by confidence, not by stillness. Picking the calmest windows sounds right and
