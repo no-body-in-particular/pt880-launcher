@@ -615,8 +615,24 @@ static int beatwise_ratio(const double *ppg, const unsigned int *a, const unsign
 
     /* Valleys, which is where a beat begins and ends. The detrended trace is used to find them
      * and the raw channels are measured at them. */
-    for (i = 0; i < n; i++) if (-ppg[i] > mx) mx = -ppg[i];
-    thr = mx * 0.3;
+    /* The median of the local maxima, not the largest of them.
+     *
+     * A fraction of the global maximum hands the threshold to whichever artefact happened to be
+     * biggest, and every real beat then falls below it - which is exactly the fault that made
+     * pulse_shape report beats=0 on a clean 53 bpm trace, fixed there and repeated here. Half
+     * the peaks lie above the median however extreme the outliers, so it cannot be dragged. */
+    {
+        static double tops[512];
+        int nt = 0;
+        for (i = 1; i < n - 1; i++) {
+            if (-ppg[i] >= -ppg[i-1] && -ppg[i] > -ppg[i+1] && -ppg[i] > 0 && nt < 512)
+                tops[nt++] = -ppg[i];
+        }
+        if (nt < 4) return 0;
+        qsort(tops, nt, sizeof tops[0], cmp_d);
+        mx = tops[nt / 2];
+    }
+    thr = mx * 0.4;
     for (i = 1; i < n - 1; i++) {
         if (!(-ppg[i] >= -ppg[i-1] && -ppg[i] > -ppg[i+1] && -ppg[i] > thr)) continue;
         if (nv > 0 && i - valley[nv-1] < T / 2) continue;
@@ -655,6 +671,112 @@ static int beatwise_ratio(const double *ppg, const unsigned int *a, const unsign
     qsort(rs, nb, sizeof rs[0], cmp_d);
     *out_r = rs[nb / 2];
     *out_beats = nb;
+    return 1;
+}
+
+/* How much the arm moved during the samples [from, from+len), or -1 if unknown.
+ *
+ * The accelerometer is recorded per burst and the optical samples per sample, so the two are
+ * mapped by position rather than by time: the same fraction through the measurement. Close
+ * enough to weight a window by, and it needs no clock either side. */
+static double window_motion(int from, int len, int total)
+{
+    int i, lo, hi, n = 0;
+    double sum = 0;
+
+    if (nmotion <= 0 || total <= 0) return -1.0;
+    lo = (int)((double) from / total * nmotion);
+    hi = (int)((double)(from + len) / total * nmotion);
+    if (hi <= lo) hi = lo + 1;
+    if (lo < 0) lo = 0;
+    if (hi > nmotion) hi = nmotion;
+
+    for (i = lo; i < hi; i++) if (burst_motion[i] >= 0) { sum += burst_motion[i]; n++; }
+    return n ? sum / n : -1.0;
+}
+
+/* A ratio that converges, the way the vendor's does.
+ *
+ * FUN_0001b7c0 carries a window-state object between calls and loops until a validity bit comes
+ * back set, and reports a confidence beside every answer - which is why this file records that
+ * the vendor's saturation climbs rather than arrives, and is often still climbing when it is
+ * read. Ours computed one figure from a whole record and had no notion of being partway there:
+ * it either answered or refused, and could not say how sure it was.
+ *
+ * So walk the windows in order and fold each into a running estimate weighted by how much that
+ * window deserves to be believed. Early windows move it a long way, later ones refine it, and
+ * the estimate is available at every point rather than only at the end. That is what convergence
+ * is; the vendor's looping until valid is the same shape with the loop written differently.
+ *
+ * Weight comes from the two things that make a window trustworthy: how many beats it found, and
+ * how still the arm was while it found them. A window with four beats and no movement is worth
+ * several with two and a swinging arm, and weighting is a gentler way of saying that than
+ * throwing the bad ones away - which is what the quality gates did, and why they discarded
+ * whole measurements over one bad second.
+ *
+ * The confidence returned is the weighted spread of the windows about the estimate, turned round
+ * so that agreement is high and disagreement is low, and scaled by how much weight accumulated
+ * at all. Three windows agreeing closely is not the same claim as twelve, and this says so.
+ */
+static int converge_ratio(const double *ppg, const unsigned int *a, const unsigned int *b,
+                          int n, double fs, double bpm, double motion_ref,
+                          double *out_r, double *out_conf, int *out_windows)
+{
+    int w = (int)(fs * 6.0), step, i, used = 0;
+    double est = 0, wsum = 0, vsum = 0;
+
+    *out_r = 0;
+    *out_conf = 0;
+    *out_windows = 0;
+    if (w < 16 || bpm < 30.0 || bpm > 210.0) return 0;
+    if (w > n) w = n;
+    step = w / 2;
+    if (step < 1) step = 1;
+
+    for (i = 0; i + w <= n; i += step) {
+        double r = 0, q;
+        int nb = 0;
+
+        if (!beatwise_ratio(ppg + i, a + i, b + i, w, fs, bpm, &r, &nb)) continue;
+        if (r <= 0.02 || r >= 6.0) continue;
+
+        /* What this window is worth. Beats first, because a ratio from three beats is three
+         * measurements and one from ten is ten; then discounted by movement, which is the other
+         * thing that makes a window lie. */
+        q = (double) nb;
+        if (motion_ref > 0) {
+            double m = window_motion(i, w, n);
+            if (m >= 0) q /= 1.0 + 2.0 * (m / motion_ref);
+        }
+        if (q <= 0) continue;
+
+        /* Fold it in. The estimate after k windows is the weighted mean of all of them, computed
+         * without keeping any, which is what carrying state between windows means. */
+        {
+            double wnew = wsum + q;
+            double delta = r - est;
+            est += (q / wnew) * delta;
+            vsum += q * delta * (r - est);      /* weighted running variance, Welford's form */
+            wsum = wnew;
+        }
+        used++;
+    }
+
+    if (used < 2 || wsum <= 0) return 0;
+
+    *out_r = est;
+    *out_windows = used;
+
+    /* Confidence, on the vendor's scale of nought to a hundred so the two can be read against
+     * each other. Agreement is most of it; having enough windows to agree about is the rest. */
+    {
+        double sd = (vsum > 0) ? sqrt(vsum / wsum) : 0.0;
+        double rel = (est > 0) ? sd / est : 1.0;
+        double agree = 1.0 / (1.0 + 8.0 * rel);        /* 1 when identical, falling with spread */
+        double enough = wsum / (wsum + 12.0);          /* weight still buying confidence at 12 */
+        double c = 100.0 * agree * enough;
+        *out_conf = c < 0 ? 0 : (c > 100 ? 100 : c);
+    }
     return 1;
 }
 
@@ -1159,6 +1281,20 @@ int main(int argc, char **argv)
                 detrend(dwb, ns, (int)(rfs * 2.0));
                 beatwise_ratio(dwb, ch1, ch2, ns, rfs, rbpm, &rbeat, &nbeat);
                 printf("rbeat=%.3f nbeat=%d ", rbeat, nbeat);
+                {
+                    /* And the same thing again, converged window by window with a confidence
+                     * attached - the shape the vendor's routine has, where an answer is
+                     * available partway through and says how sure it is. */
+                    double rconv = 0, conf = 0, mref = 0, mw = 0;
+                    int nwin = 0;
+                    motion_summary(&mref, &mw);
+                    if (converge_ratio(dwb, ch1, ch2, ns, rfs, rbpm,
+                                       mref > 0 ? mref : 0.0, &rconv, &conf, &nwin)) {
+                        printf("rconv=%.3f conf=%.0f nwin=%d ", rconv, conf, nwin);
+                    } else {
+                        printf("rconv=0 conf=0 nwin=0 ");
+                    }
+                }
             }
             printf("rmatch=%.3f mbeats=%d "
                    "r=%.3f rmed=%.3f spread=%.3f windows=%d acr=%.3f at=%.0f dc1=%.0f dc2=%.0f"
