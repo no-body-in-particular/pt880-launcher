@@ -40,6 +40,7 @@ static int fd = -1;
 static void on_alarm(int s) { (void)s; }        /* no SA_RESTART: unblocks a stuck wait */
 
 #include "seq.h"
+#include "seq_hr.h"
 
 static int wr(unsigned char *p, int n)
 { struct msg m; struct rdwr r; m.addr=ADDR; m.flags=0; m.len=n; m.buf=p; r.msgs=&m; r.n=1;
@@ -192,10 +193,21 @@ int main(int argc, char **argv)
 
     usleep(300000);
 
-    for (i = 0; i < NSEQ; i++) {
-        if (SEQ[i].op == 0)      wr16(SEQ[i].reg, SEQ[i].val);
-        else if (SEQ[i].op == 1) wr8(SEQ[i].reg, (unsigned char)SEQ[i].val);
-        else                     rd16(SEQ[i].reg, &v);
+    /* Replay the sequence for the mode being asked for. These are not interchangeable: the
+     * green start differs from the red one in 26 registers, and replaying the red sequence in
+     * what was meant to be heart-rate mode is why the LED stayed red however the mode ioctl was
+     * ordered. */
+    {
+        int nseq = want_spo2 ? NSEQ : NSEQ_HR;
+        for (i = 0; i < nseq; i++) {
+            unsigned char op = want_spo2 ? SEQ[i].op  : SEQ_HR[i].op;
+            unsigned short rg = want_spo2 ? SEQ[i].reg : SEQ_HR[i].reg;
+            unsigned short vl = want_spo2 ? SEQ[i].val : SEQ_HR[i].val;
+            if (op == 0)      wr16(rg, vl);
+            else if (op == 1) wr8(rg, (unsigned char)vl);
+            else              rd16(rg, &v);
+        }
+        gain = want_spo2 ? 0x9055 : 0x1f69;     /* whichever that sequence applied */
     }
 
     /* Set the mode AFTER the register sequence, not before.
@@ -297,7 +309,16 @@ int main(int argc, char **argv)
                 dc2 /= (ns - before);
                 (void)hi1; (void)lo1; (void)hi2; (void)lo2;
 
-                if (dc1 > 3200000.0 && gain > 0x1000)
+                /* Key on both channels, not just the first.
+                 *
+                 * Stopping as soon as ch1 is in range leaves ch2 dark, because the two sit about
+                 * 47,600 counts apart under one shared gain. Keeping on until neither is above
+                 * the threshold is what a ratio of ratios needs - one run reached it by accident
+                 * (ac1=986 ac2=652 at gain 7e4b) where the others stopped early at 9055 with ch2
+                 * flat at 3 counts. In SpO2 mode go for both; for heart rate ch1 alone is enough
+                 * and driving further only costs signal. */
+                if (gain > 0x1000 &&
+                    (dc1 > 3200000.0 || (want_spo2 && dc2 > 3200000.0)))
                     newgain = (unsigned short)(gain - (gain >> 3));   /* back off about 12% */
 
                 if (newgain != gain) {
