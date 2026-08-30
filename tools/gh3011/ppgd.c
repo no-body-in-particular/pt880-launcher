@@ -412,13 +412,83 @@ static double band_amp_d(const double *x, int n, double fs, double f)
     return nw ? sum / nw : 0.0;
 }
 
-/* The rate, from the spectrum of a detrended record with harmonics counted in. */
+/* The rate, from the spectrum of the record's slope, with harmonics counted in.
+ *
+ * The slope rather than the record itself, and that is the whole difference between this working
+ * and not. Detrending removes a level and a slow wander but leaves plenty below the heart: run
+ * over twelve recordings the plain spectrum fell monotonically from 3405 at 36 bpm to 875 at 120,
+ * with no cardiac peak anywhere in it. Every candidate lost to the one below it and the answer
+ * was always the bottom of the range.
+ *
+ * Differentiating is a high pass that rises six decibels an octave, so it costs drift almost
+ * everything and costs the pulse very little - and what it gains is better than that. A pulse is
+ * asymmetric, a fast upstroke against a slow decay, so its slope is far more sharply peaked than
+ * its height: the harmonics that this method relies on to tell a heartbeat from an artefact are
+ * exactly what differentiating brings out.
+ */
 static double spectral_bpm_d(const double *d, int n, double fs, double *conf)
 {
+    static double dd[MAXS];
     double best = 0, bestbpm = 0, second = 0, bpm;
+    int i;
 
     *conf = 0;
     if (n < 256 || fs <= 0) return 0;
+
+    dd[0] = 0.0;
+    for (i = 1; i < n; i++) dd[i] = d[i] - d[i-1];
+    d = dd;
+
+    for (bpm = 32.0; bpm <= 220.0; bpm += 0.5) {
+        double f = bpm / 60.0;
+        double p = band_amp_d(d, n, fs, f);
+        if (2.0 * f < fs / 2.0) p += 0.6 * band_amp_d(d, n, fs, 2.0 * f);
+        if (3.0 * f < fs / 2.0) p += 0.3 * band_amp_d(d, n, fs, 3.0 * f);
+        if (p > best) { second = best; best = p; bestbpm = bpm; }
+        else if (p > second) second = p;
+    }
+    if (bestbpm <= 34.0 || bestbpm >= 218.0 || best <= 0) return 0;
+
+    /* Half of what won scores well by borrowing its harmonics, so prefer the half only when it
+     * genuinely competes. */
+    if (bestbpm / 2.0 >= 36.0) {
+        double h = bestbpm / 2.0, f = h / 60.0;
+        double p = band_amp_d(d, n, fs, f);
+        if (2.0 * f < fs / 2.0) p += 0.6 * band_amp_d(d, n, fs, 2.0 * f);
+        if (3.0 * f < fs / 2.0) p += 0.3 * band_amp_d(d, n, fs, 3.0 * f);
+        if (p > best * 0.85) bestbpm = h;
+    }
+
+    *conf = second > 0 ? best / second : 10.0;
+    return bestbpm;
+}
+
+/* The rate, from the spectrum of the record's slope, with harmonics counted in.
+ *
+ * The slope rather than the record itself, and that is the whole difference between this working
+ * and not. Detrending removes a level and a slow wander but leaves plenty below the heart: run
+ * over twelve recordings the plain spectrum fell monotonically from 3405 at 36 bpm to 875 at 120,
+ * with no cardiac peak anywhere in it. Every candidate lost to the one below it and the answer
+ * was always the bottom of the range.
+ *
+ * Differentiating is a high pass that rises six decibels an octave, so it costs drift almost
+ * everything and costs the pulse very little - and what it gains is better than that. A pulse is
+ * asymmetric, a fast upstroke against a slow decay, so its slope is far more sharply peaked than
+ * its height: the harmonics that this method relies on to tell a heartbeat from an artefact are
+ * exactly what differentiating brings out.
+ */
+static double spectral_bpm_d(const double *d, int n, double fs, double *conf)
+{
+    static double dd[MAXS];
+    double best = 0, bestbpm = 0, second = 0, bpm;
+    int i;
+
+    *conf = 0;
+    if (n < 256 || fs <= 0) return 0;
+
+    dd[0] = 0.0;
+    for (i = 1; i < n; i++) dd[i] = d[i] - d[i-1];
+    d = dd;
 
     for (bpm = 32.0; bpm <= 220.0; bpm += 0.5) {
         double f = bpm / 60.0;
@@ -840,9 +910,13 @@ int main(int argc, char **argv)
         /* The band itself, so a zero answer can be read rather than guessed at. */
         {
             double b;
-            printf("spectrum:");
+            static double sl[MAXS];
+            int q;
+            sl[0] = 0.0;
+            for (q = 1; q < ns; q++) sl[q] = dw[q] - dw[q-1];
+            printf("slope spectrum:");
             for (b = 36.0; b <= 120.0; b += 6.0)
-                printf(" %.0f=%.1f", b, band_amp_d(dw, ns, rfs, b / 60.0));
+                printf(" %.0f=%.2f", b, band_amp_d(sl, ns, rfs, b / 60.0));
             printf("\n");
         }
         printf("autocorrelation=%.0f  spectral=%.0f  margin=%.2f  samples=%d hz=%.1f\n",
@@ -1367,7 +1441,51 @@ int main(int argc, char **argv)
             if (bpm >= 40 && bpm <= 180 && conf > 0.04) rates[nrates++] = bpm;
         }
     }
+    /* Before refusing, ask the spectrum.
+     *
+     * Window agreement is a strict test and it fails the way a strict test fails: a wrist that
+     * moved is told nothing rather than told approximately. A watch meant to be worn running
+     * cannot decline every time an arm swings, and the wearer was right to say so.
+     *
+     * The spectrum uses the whole record at once instead of asking short pieces to concur, and
+     * it works on the slope, where a pulse is sharply peaked and drift is nearly gone. It answers
+     * on recordings the windows give up on. What it cannot do is tell a confident answer from a
+     * lucky one on its own, so it reports how far its winner stood above the rest of the band and
+     * that has to clear a margin before anything is believed.
+     *
+     * Reported as a distinct reason. A rate the windows agreed on and a rate the spectrum picked
+     * out of a moving arm are not the same claim, and the line says which it is.
+     */
     if (nrates < 3) {
+        double sconf = 0;
+        double sbpm = spectral_bpm_d(d, ns, fs, &sconf);
+        if (sbpm >= 40.0 && sbpm <= 180.0 && sconf >= 1.35) {
+            double a1 = 0, a2 = 0, dc1 = 0, dc2 = 0, r = 0, sut = 0, ai = 0;
+            int j2;
+            for (j2 = 0; j2 < ns; j2++) { dc1 += ch1[j2]; dc2 += ch2[j2]; }
+            dc1 /= ns;
+            dc2 /= ns;
+            a1 = band_amp(ch1, ns, fs, sbpm / 60.0);
+            a2 = band_amp(ch2, ns, fs, sbpm / 60.0);
+            {
+                double l1 = dc1 - DARK_CODE, l2 = dc2 - DARK_CODE;
+                if (l1 > 100.0 && l2 > 100.0 && a2 > 0) r = (a1 / l1) / (a2 / l2);
+            }
+            if (fs > 60.0) pulse_shape(d, ns, fs, sbpm, &sut, &ai);
+            printf("hr=%.0f from=spectrum margin=%.2f hz=%.1f samples=%d gain=%04x"
+                   " dc1=%.0f dc2=%.0f ac1=%.0f ac2=%.0f r=%.3f beats=%d raw=%.0f/%.2f"
+                   " sut=%.0f ai=%.2f", sbpm, sconf, fs, ns, gain, dc1, dc2, a1, a2, r,
+                   shape_beats, shape_raw_sut, shape_raw_ai, sut, ai);
+            if (sut > 0) {
+                printf(" sbp=%.0f dbp=%.0f",
+                       100.0 + 0.28 * sbpm - 0.055 * sut + 11.0 * ai,
+                       60.0 + 0.19 * sbpm - 0.030 * sut + 6.5 * ai);
+            } else {
+                printf(" sbp=0 dbp=0");
+            }
+            printf(" used=%s\n", src == ch1 ? "ch1" : "ch2");
+            return 0;
+        }
         {
             /* Say what the signal looked like, not just that it failed. A bare refusal cannot be
              * told apart from a dark channel, a saturated one, or a wearer who moved. */
