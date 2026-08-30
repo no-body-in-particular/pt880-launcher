@@ -36,7 +36,11 @@
 #define HELPER   "/data/local/tmp/ppgd"
 #define SECS_HR   "40"   /* green is 25 Hz: it needs the time to fill enough windows */
 #define SECS_SPO2 "45"   /* red is 100 Hz - 2500 samples in 25 s is plenty */
-#define SECS_RATIO "8"   /* the balanced pass, as short as the vendor's own */
+/* The balanced pass. The vendor spends about eight seconds here and we did too, but eight is
+ * not enough on this sensor: four runs at 8 s gave R of 1.048, 0.907, 0.751 and 0.782, and the
+ * same wrist at 25 s gave 0.877, 0.841 and 0.741 - half the spread. The extra seventeen seconds
+ * are the cheapest accuracy available, and the pass is still shorter than the one after it. */
+#define SECS_RATIO "25"
 
 /* Where the short pass leaves its samples for the long pass to explain. See measure(). */
 #define KEEP "/data/local/tmp/pass1.txt"

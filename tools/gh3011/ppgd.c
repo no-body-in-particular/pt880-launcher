@@ -219,6 +219,55 @@ static double band_amp(const unsigned int *x, int n, double fs, double f)
  * makes a failed run still worth something when the question being asked is "is this channel
  * carrying any signal at all", as it is while chasing the LED current behind the red channel.
  */
+/* R over a record, as the median of the sub-windows it splits into.
+ *
+ * One ratio over one pass takes whatever happened during it. Eight seconds of a resting wrist
+ * gave channel 1 amplitudes of 13, 16, 46 and 105 counts on consecutive runs - a factor of eight
+ * from contact and small movements, not from anything in the blood - and a single R inherits all
+ * of it. Measured that way R came back between 0.26 and 1.0 on a wearer who never moved.
+ *
+ * Splitting the pass and taking the middle answer fixes the part of that which is transient. A
+ * few seconds of a shifting cuff or a swallow moves one or two windows and leaves the median
+ * where it was, where an average would carry it. The spread between windows is returned too,
+ * because it says whether the measurement held still enough to be worth anything - a median of
+ * six windows that disagree wildly is not a better number than no number.
+ *
+ * Six-second windows, half overlapping: long enough for band_amp to resolve the pulse, short
+ * enough that a 25 second pass yields seven of them.
+ */
+static int ratio_windows(const unsigned int *a, const unsigned int *b, int n, double fs,
+                         double bpm, double *rmed, double *rspread)
+{
+    static double rs[64];
+    int w = (int)(fs * 6.0), step, i, k, nr = 0;
+
+    *rmed = 0;
+    *rspread = 0;
+    if (w < 16 || bpm < 30.0 || bpm > 210.0) return 0;
+    if (w > n) w = n;
+    step = w / 2;
+    if (step < 1) step = 1;
+
+    for (i = 0; i + w <= n && nr < 64; i += step) {
+        double d1 = 0, d2 = 0, l1, l2, x1, x2;
+        for (k = i; k < i + w; k++) { d1 += a[k]; d2 += b[k]; }
+        d1 /= w;
+        d2 /= w;
+        l1 = d1 - DARK_CODE;
+        l2 = d2 - DARK_CODE;
+        if (l1 <= 100.0 || l2 <= 100.0) continue;
+        x1 = band_amp(a + i, w, fs, bpm / 60.0);
+        x2 = band_amp(b + i, w, fs, bpm / 60.0);
+        if (x1 <= 0 || x2 <= 0) continue;
+        rs[nr++] = (x1 / l1) / (x2 / l2);
+    }
+    if (nr < 3) return 0;
+    qsort(rs, nr, sizeof rs[0], cmp_d);
+    *rmed = rs[nr / 2];
+    *rspread = rs[(nr * 3) / 4] - rs[nr / 4];      /* the middle half, not the extremes */
+    return nr;
+}
+
 static double best_amp(const unsigned int *x, int n, double fs)
 {
     double best = 0.0, bpm, a;
@@ -559,9 +608,15 @@ int main(int argc, char **argv)
         l2 = d2 - DARK_CODE;
         a1 = band_amp(ch1, ns, rfs, rbpm / 60.0);
         a2 = band_amp(ch2, ns, rfs, rbpm / 60.0);
-        if (l1 > 100.0 && l2 > 100.0 && a2 > 0) r = (a1 / l1) / (a2 / l2);
-        printf("r=%.3f at=%.0f dc1=%.0f dc2=%.0f ac1=%.1f ac2=%.1f samples=%d hz=%.1f redone=1\n",
-               r, rbpm, d1, d2, a1, a2, ns, rfs);
+        {
+            double rmed = 0, rsp = 0;
+            int nw = ratio_windows(ch1, ch2, ns, rfs, rbpm, &rmed, &rsp);
+            if (nw >= 3) r = rmed;
+            else if (l1 > 100.0 && l2 > 100.0 && a2 > 0) r = (a1 / l1) / (a2 / l2);
+            printf("r=%.3f spread=%.3f windows=%d at=%.0f dc1=%.0f dc2=%.0f"
+                   " ac1=%.1f ac2=%.1f samples=%d hz=%.1f redone=1\n",
+                   r, rsp, nw, rbpm, d1, d2, a1, a2, ns, rfs);
+        }
         return 0;
     }
 
