@@ -76,6 +76,38 @@ static int ns;
 
 /* Subtract a one-second baseline and invert: this is a reflective sensor, so the count falls at
  * systole and the trace is upside down as read. */
+/* Which channel actually carries the pulse varies from run to run.
+ *
+ * One shared gain moves both channels together and they sit about 47,600 counts apart, so
+ * whichever one the gain brings into range, the other is dark. Measured across runs: once
+ * ch1=3,199,027 with 100 counts of pulse while ch2 sat dark at 3,210,576 with 4; the next run
+ * ch2=3,197,361 with 70 counts while ch1 was dark at 3,149,730 with 8.
+ *
+ * Analysing ch1 unconditionally therefore reads a heart rate out of the dark channel's noise
+ * whenever the gain lands the other way, which is the likeliest source of the low bias against
+ * the vendor. Pick the channel with the larger pulsatile amplitude instead.
+ */
+static const unsigned int *pick_channel(int n)
+{
+    int i, blk = n / 8, k;
+    double best1 = 0, best2 = 0;
+    if (blk < 20) blk = n;
+    for (i = 0; i + blk <= n; i += blk) {
+        unsigned int lo1 = ch1[i], hi1 = ch1[i], lo2 = ch2[i], hi2 = ch2[i];
+        for (k = i; k < i + blk; k++) {
+            if (ch1[k] < lo1) lo1 = ch1[k];
+            if (ch1[k] > hi1) hi1 = ch1[k];
+            if (ch2[k] < lo2) lo2 = ch2[k];
+            if (ch2[k] > hi2) hi2 = ch2[k];
+        }
+        best1 += hi1 - lo1;
+        best2 += hi2 - lo2;
+    }
+    return best2 > best1 ? ch2 : ch1;
+}
+
+static const unsigned int *src = ch1;
+
 static void detrend(double *out, int n, int w)
 {
     static double tmp[MAXS];
@@ -85,8 +117,8 @@ static void detrend(double *out, int n, int w)
         double s = 0;
         if (a < 0) a = 0;
         if (b > n) b = n;
-        for (k = a; k < b; k++) { s += ch1[k]; cnt++; }
-        tmp[i] = s / cnt - (double)ch1[i];
+        for (k = a; k < b; k++) { s += src[k]; cnt++; }
+        tmp[i] = s / cnt - (double)src[i];
     }
     /* A light smooth. Without it the sample-to-sample noise rides on top of a pulse of a few
      * tens of counts and drags the autocorrelation confidence below any sensible threshold -
@@ -121,6 +153,11 @@ static double period_bpm(const double *seg, int n, double fs, double *conf)
         if (s > best) { best = s; blag = lag; }
     }
     if (!blag) return 0;
+    /* A win at either end of the search range is not a peak, it is the correlation still rising
+     * or falling as it runs out of room. Those produce a confident-looking nonsense - 146 bpm,
+     * the shortest lag searched, with every window agreeing on it exactly so the agreement check
+     * passes. Reject the boundary rather than report it. */
+    if (blag <= lo + 1 || blag >= hi - 2) return 0;
     *conf = best / (energy / n);
     return 60.0 * fs / blag;
 }
@@ -153,24 +190,28 @@ int main(int argc, char **argv)
     if (ioctl(fd, PWR, 1) < 0) { printf("hr=0 reason=power_failed\n"); return 1; }
     ioctl(fd, IRQ, 1);
 
-    /* Set the driver mode before the register sequence. The SpO2 and heart-rate starts are
-     * byte-identical - 242 operations, not one differing write - so what selects one LED or two
-     * is not in the registers at all: it is this ioctl. Leaving it unset inherits whatever the
-     * last measurement used, which is how one run read 52 and the next 59 with no code change.
-     * Mode 4 is green only and leaves the second channel flat at 5 counts; mode 5 drives red and
-     * IR, which is what a ratio of ratios needs. */
-    {
-        unsigned int w[6];
-        memset(w, 0, sizeof w);
-        w[0] = want_spo2 ? 5 : 4;
-        ioctl(fd, MODE, w);
-    }
     usleep(300000);
 
     for (i = 0; i < NSEQ; i++) {
         if (SEQ[i].op == 0)      wr16(SEQ[i].reg, SEQ[i].val);
         else if (SEQ[i].op == 1) wr8(SEQ[i].reg, (unsigned char)SEQ[i].val);
         else                     rd16(SEQ[i].reg, &v);
+    }
+
+    /* Set the mode AFTER the register sequence, not before.
+     *
+     * The sequence is 242 operations replayed from a capture, and it configures the LEDs itself -
+     * both captures it came from were SpO2 runs, reporting spo2 alongside the rate, so what it
+     * replays is a red+IR configuration. Setting the mode first and then replaying it put the
+     * chip straight back into red, which the wearer could see: the LED stayed red in what was
+     * meant to be heart-rate mode.
+     */
+    {
+        unsigned int w[6];
+        memset(w, 0, sizeof w);
+        w[0] = want_spo2 ? 5 : 4;
+        ioctl(fd, MODE, w);
+        usleep(200000);
     }
 
     gettimeofday(&t0, 0);
@@ -326,6 +367,7 @@ int main(int argc, char **argv)
             ns -= skip;
         }
     }
+    src = pick_channel(ns);
     detrend(d, ns, (int)(fs * 2));
     {
         /* Select by confidence, not by stillness. Picking the calmest windows sounds right and
@@ -427,7 +469,8 @@ int main(int argc, char **argv)
             if (dc1 > 0 && dc2 > 0 && a2 > 0) r = (a1 / dc1) / (a2 / dc2);
             printf("hr=%.0f spread=%.0f hz=%.1f samples=%d windows=%d gain=%04x"
                    " ac1=%.0f ac2=%.0f dc1=%.0f dc2=%.0f r=%.3f\n",
-                   med, spread, fs, ns, nrates, gain, a1, a2, dc1, dc2, r);
+                   med, spread, fs, ns, nrates, gain, a1, a2, dc1, dc2, r,
+                   src == ch2 ? "ch2" : "ch1");
         }
     }
     return 0;
