@@ -38,6 +38,9 @@
 #define SECS_SPO2 "45"   /* red is 100 Hz - 2500 samples in 25 s is plenty */
 #define SECS_RATIO "8"   /* the balanced pass, as short as the vendor's own */
 
+/* Where the short pass leaves its samples for the long pass to explain. See measure(). */
+#define KEEP "/data/local/tmp/pass1.txt"
+
 
 #define TEMP_ENABLE "/sys/devices/virtual/input/input6/enable"
 #define TEMP_VALUE  "/sys/devices/virtual/input/input6/value"
@@ -146,7 +149,7 @@ static void measure(const char *mode, char *out, size_t outsz)
     if (strcmp(mode, "spo2") == 0) {
         char rline[256];
         rline[0] = 0;
-        snprintf(cmd, sizeof cmd, "%s %s \"\" ratio 2>/dev/null", HELPER, SECS_RATIO);
+        snprintf(cmd, sizeof cmd, "%s %s %s ratio 2>/dev/null", HELPER, SECS_RATIO, KEEP);
         p = popen(cmd, "r");
         if (p) {
             char line[512];
@@ -187,6 +190,34 @@ static void measure(const char *mode, char *out, size_t outsz)
     }
 
     if (!out[0]) snprintf(out, outsz, "hr=0 reason=helper_gave_nothing\n");
+
+    /* Now that the rate is known, read the short pass again at it.
+     *
+     * The eight seconds could not settle a rate of their own - four consecutive runs on a
+     * resting wrist put it at 41, 45, 49 and 59 bpm - and a ratio measured at the wrong
+     * frequency is a ratio measured on noise. The long pass settles it properly by window
+     * agreement, so the samples kept from the short one are read back at that. No extra sensor
+     * time: the same eight seconds, understood once there is something to understand them with.
+     */
+    {
+        const char *at = strstr(out, "hr=");
+        int bpm = at ? atoi(at + 3) : 0;
+        if (bpm >= 30 && bpm <= 210) {
+            char rcmd[320], line[512];
+            snprintf(rcmd, sizeof rcmd, "%s 0 %s redo %d 2>/dev/null", HELPER, KEEP, bpm);
+            p = popen(rcmd, "r");
+            if (p) {
+                while (fgets(line, sizeof line, p)) {
+                    if (strstr(line, "redone=1")) {
+                        size_t n2 = strlen(line);
+                        while (n2 > 0 && (line[n2-1] == 0x0a || line[n2-1] == 0x0d)) line[--n2] = 0;
+                        snprintf(ratio_out, ratio_sz, " pass1[%s]", line);
+                    }
+                }
+                pclose(p);
+            }
+        }
+    }
 
     /* The short pass rides along on the same line. */
     if (ratio_out[0]) {

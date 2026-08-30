@@ -428,7 +428,14 @@ int main(int argc, char **argv)
     int settled_at = 0;             /* first sample after the gain stopped moving */
     struct timeval tprev;
     const char *csvpath = argc > 2 ? argv[2] : NULL;
-    int want_spo2 = (argc > 3 && (argv[3][0] == 's' || argv[3][0] == 'r'));
+    /* Match the whole word. "redo" and "ratio" both start with an r, so testing the first
+     * letter sent every redo down the ratio path, where it tried to measure for zero seconds
+     * and returned nothing - and the ratio on the reply stayed the guess it was meant to
+     * replace. */
+    const char *mode = argc > 3 ? argv[3] : "";
+    int want_ratio = (strcmp(mode, "ratio") == 0);
+    int want_redo  = (strcmp(mode, "redo") == 0);
+    int want_spo2  = (strcmp(mode, "spo2") == 0 || want_ratio || want_redo);
     /*
      * The ratio pass: short, balanced, and after nothing but R.
      *
@@ -449,7 +456,53 @@ int main(int argc, char **argv)
      * point - taking each channel's own best would let them lock onto different things and the
      * ratio would compare two unrelated numbers.
      */
-    int want_ratio = (argc > 3 && argv[3][0] == 'r');
+    /*
+     * Re-read a kept ratio pass at a rate measured afterwards.
+     *
+     * The short pass cannot settle a heart rate: eight seconds of a wandering pulse gave 41, 45,
+     * 49 and 59 bpm on four consecutive runs of a resting wrist, and R measured at the wrong
+     * frequency is R measured on noise. The long pass that follows settles the rate properly by
+     * window agreement, but by then the balanced samples are gone.
+     *
+     * So keep them. The short pass writes what it collected, the long pass finds the rate, and
+     * then this reads the samples back and measures both channels at the rate that was actually
+     * there. Nothing is re-measured on the wearer and no extra sensor time is spent - it is the
+     * same eight seconds, read once the answer is known.
+     */
+
+    if (want_redo) {
+        /* ppgd 0 <file> redo <bpm> */
+        FILE *rf = argc > 2 ? fopen(argv[2], "r") : NULL;
+        double rfs = 0, rbpm = argc > 4 ? atof(argv[4]) : 0;
+        double d1 = 0, d2 = 0, l1, l2, a1 = 0, a2 = 0, r = 0;
+        unsigned int v1, v2;
+        int k;
+
+        if (!rf) { printf("r=0 reason=no_kept_pass\n"); return 1; }
+        if (fscanf(rf, "%lf", &rfs) != 1) { fclose(rf); printf("r=0 reason=bad_kept_pass\n"); return 1; }
+        ns = 0;
+        while (ns < MAXS && fscanf(rf, "%u %u", &v1, &v2) == 2) {
+            ch1[ns] = v1;
+            ch2[ns] = v2;
+            ns++;
+        }
+        fclose(rf);
+        if (ns < 200 || rfs <= 0 || rbpm < 30.0 || rbpm > 210.0) {
+            printf("r=0 reason=kept_pass_unusable samples=%d hz=%.1f bpm=%.0f\n", ns, rfs, rbpm);
+            return 1;
+        }
+        for (k = 0; k < ns; k++) { d1 += ch1[k]; d2 += ch2[k]; }
+        d1 /= ns;
+        d2 /= ns;
+        l1 = d1 - DARK_CODE;
+        l2 = d2 - DARK_CODE;
+        a1 = band_amp(ch1, ns, rfs, rbpm / 60.0);
+        a2 = band_amp(ch2, ns, rfs, rbpm / 60.0);
+        if (l1 > 100.0 && l2 > 100.0 && a2 > 0) r = (a1 / l1) / (a2 / l2);
+        printf("r=%.3f at=%.0f dc1=%.0f dc2=%.0f ac1=%.1f ac2=%.1f samples=%d hz=%.1f redone=1\n",
+               r, rbpm, d1, d2, a1, a2, ns, rfs);
+        return 0;
+    }
 
     setvbuf(stdout, NULL, _IONBF, 0);
     signal(SIGTERM, bail); signal(SIGINT, bail); signal(SIGSEGV, bail);
@@ -741,6 +794,18 @@ int main(int argc, char **argv)
             a2 = band_amp(ch2 + skip, n, fs, bestf / 60.0);
         }
         if (l1 > 100.0 && l2 > 100.0 && a2 > 0) r = (a1 / l1) / (a2 / l2);
+
+        /* Keep the samples so the rate the long pass settles can be applied to them. The
+         * frequency guessed here is only a fallback for when that never arrives. */
+        if (csvpath && csvpath[0]) {
+            FILE *kf = fopen(csvpath, "w");
+            if (kf) {
+                int q;
+                fprintf(kf, "%.4f\n", fs);
+                for (q = skip; q < ns; q++) fprintf(kf, "%u %u\n", ch1[q], ch2[q]);
+                fclose(kf);
+            }
+        }
 
         printf("r=%.3f at=%.0f dc1=%.0f dc2=%.0f ac1=%.1f ac2=%.1f samples=%d hz=%.1f\n",
                r, bestf, d1, d2, a1, a2, ns, fs);
