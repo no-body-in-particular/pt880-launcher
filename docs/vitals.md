@@ -551,3 +551,40 @@ file records elsewhere that it climbs rather than arrives, that the driver's cop
 converging when a reading is taken, and that raising the window helps it. A capture long enough
 to see a rate is not necessarily long enough to see a saturation, and every capture so far has
 shown `spo2 0` beside a perfectly good `hb_result`.
+
+## How the vendor computes a saturation
+
+Its own strings name the call, and Ghidra reads the rest. `FUN_0001b7c0` is what the daemon calls
+just before logging `spo2 calc, gs_len=%d, result=...`, and inside it:
+
+    FUN_00016c04(samples, len, shift)          preprocess the buffer
+    handle = FUN_000186ac()                    window state, carried between calls
+    scale  = FUN_00016668(handle, len)
+    do {
+        FUN_000168f0(handle, i, samples, len, scale, shift, feat, ...)   per-window features
+        valid = FUN_00023500(feat, out)                                  the computation
+        FUN_00019c28(feat, status)
+        if (valid & 1) { *result = out[0]; *level = out.level; }
+    } while (more windows)
+
+That is a real signal-processing pipeline: a preprocessing pass, a windowing state object carried
+across calls, per-window feature extraction into a forty-byte structure, and a routine that turns
+those features into a percentage and a confidence, looping until a validity bit comes back set.
+
+It is worth stating plainly because the same treatment of the blood pressure found the opposite.
+`FUN_0002cde8` contains no pressure model at all - a cascade of hand-written thresholds ratcheting
+a value upward from a fixed set, which is why this project stopped publishing the vendor's
+pressure. The saturation is not that. Whatever else is true of it, somebody implemented an
+algorithm.
+
+What follows from that is discouraging for copying it. There is no ratio-of-ratios and a curve to
+lift; the arithmetic that matters is four functions down, operating on structures whose fields are
+unnamed, with state threaded between windows. Reimplementing it from decompiled ARM is a project
+in itself, and the result would be a reimplementation of a proprietary algorithm rather than an
+understanding of one.
+
+The useful conclusion is narrower and holds regardless: the vendor gets a saturation because
+Goodix wrote a good algorithm, not because the hardware hands one over. Our own channel 1 carries
+two counts of pulse where channel 2 carries sixty, and no algorithm recovers a ratio from that -
+which is why the work that matters is `0x0180` and the balance between the channels, not the
+arithmetic applied afterwards.
