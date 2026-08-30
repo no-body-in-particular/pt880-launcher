@@ -292,6 +292,14 @@ static void measure(const char *mode, char *out, size_t outsz)
     if (strcmp(mode, "spo2") == 0) {
         char rline[256];
         rline[0] = 0;
+        /* Clear it first, or a failed pass leaves the last one's samples to be read again.
+         *
+         * The re-read takes whatever is at KEEP, and nothing said whose it was. Two consecutive
+         * measurements reported a ratio of 1.899 with a spread of 0.259 and amplitudes matching
+         * to three decimals - not a steady wearer, the same eight seconds counted twice. Any
+         * apparent agreement between neighbouring measurements has to be suspected wherever this
+         * could have happened. */
+        unlink(KEEP);
         snprintf(cmd, sizeof cmd, "%s %s %s ratio 2>/dev/null", HELPER, SECS_RATIO, KEEP);
         p = popen(cmd, "r");
         if (p) {
