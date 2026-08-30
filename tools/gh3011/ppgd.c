@@ -583,6 +583,81 @@ static double spectral_bpm_d(const double *d, int n, double fs, double *conf)
 }
 
 
+/* The ratio of ratios, taken beat by beat the way the open implementations do it.
+ *
+ * Ours has always divided by a DC that is the mean of the whole record. Maxim's reference
+ * algorithm - the one in SparkFun_MAX3010x_Sensor_Library, which computes the same quantity for
+ * the same purpose - does something better: for each beat it takes the two valleys either side,
+ * interpolates the baseline linearly between them, and subtracts that. The difference is drift.
+ * A mean over forty seconds is the right baseline for no particular beat; a line drawn between
+ * this beat's own feet is the right baseline for this one.
+ *
+ * That matters here more than it does for them. R on this sensor wandered from 0.32 to 0.98 over
+ * eight hours on a motionless wrist, and a baseline that follows the wander cannot pass it on.
+ *
+ * The rest follows them too: a ratio per beat rather than one for the record, then the median.
+ * One beat where the arm twitched moves a mean and cannot move a median.
+ */
+static int beatwise_ratio(const double *ppg, const unsigned int *a, const unsigned int *b,
+                          int n, double fs, double bpm, double *out_r, int *out_beats)
+{
+    enum { MAXBEATS = 128 };
+    static double rs[MAXBEATS];
+    int T, i, k, nb = 0, nv = 0;
+    static int valley[MAXBEATS + 2];
+    double mx = 0, thr;
+
+    *out_r = 0;
+    *out_beats = 0;
+    if (bpm < 30.0 || bpm > 210.0 || n < 64 || fs <= 0) return 0;
+    T = (int)(fs * 60.0 / bpm);
+    if (T < 8) return 0;
+
+    /* Valleys, which is where a beat begins and ends. The detrended trace is used to find them
+     * and the raw channels are measured at them. */
+    for (i = 0; i < n; i++) if (-ppg[i] > mx) mx = -ppg[i];
+    thr = mx * 0.3;
+    for (i = 1; i < n - 1; i++) {
+        if (!(-ppg[i] >= -ppg[i-1] && -ppg[i] > -ppg[i+1] && -ppg[i] > thr)) continue;
+        if (nv > 0 && i - valley[nv-1] < T / 2) continue;
+        if (nv < MAXBEATS + 1) valley[nv++] = i;
+    }
+    if (nv < 3) return 0;
+
+    for (k = 0; k + 1 < nv && nb < MAXBEATS; k++) {
+        int lo = valley[k], hi = valley[k+1], top = lo, j;
+        double span = (double)(hi - lo);
+        double a_dc, b_dc, a_ac, b_ac, la, lb;
+
+        if (span < 4) continue;
+        /* The peak of this beat, on whichever channel carries more. */
+        for (j = lo; j <= hi; j++) if (b[j] > b[top]) top = j;
+
+        /* The baseline under that peak, interpolated between the two feet. */
+        {
+            double t = (double)(top - lo) / span;
+            a_dc = a[lo] + (a[hi] - (double)a[lo]) * t;
+            b_dc = b[lo] + (b[hi] - (double)b[lo]) * t;
+        }
+        a_ac = (double)a[top] - a_dc;
+        b_ac = (double)b[top] - b_dc;
+
+        /* Against the light each channel received, not the raw code: both sit on a fixed
+         * zero-light pedestal that is no part of the signal. */
+        la = a_dc - DARK_CODE;
+        lb = b_dc - DARK_CODE;
+        if (la < 100.0 || lb < 100.0 || a_ac <= 0 || b_ac <= 0) continue;
+
+        rs[nb++] = (a_ac / la) / (b_ac / lb);
+    }
+    if (nb < 3) return 0;
+
+    qsort(rs, nb, sizeof rs[0], cmp_d);
+    *out_r = rs[nb / 2];
+    *out_beats = nb;
+    return 1;
+}
+
 static double best_amp(const unsigned int *x, int n, double fs)
 {
     double best = 0.0, bpm, a;
@@ -1073,6 +1148,17 @@ int main(int argc, char **argv)
                     rmatch = (m1 / l1) / (m2 / l2);
                 }
                 mbeats = nb;
+            }
+            {
+                /* And the same thing the open implementations compute: a ratio per beat against
+                 * a baseline drawn between that beat's own feet, then the median. */
+                static double dwb[MAXS];
+                double rbeat = 0;
+                int nbeat = 0;
+                src = pick_channel(ns);
+                detrend(dwb, ns, (int)(rfs * 2.0));
+                beatwise_ratio(dwb, ch1, ch2, ns, rfs, rbpm, &rbeat, &nbeat);
+                printf("rbeat=%.3f nbeat=%d ", rbeat, nbeat);
             }
             printf("rmatch=%.3f mbeats=%d "
                    "r=%.3f rmed=%.3f spread=%.3f windows=%d acr=%.3f at=%.0f dc1=%.0f dc2=%.0f"

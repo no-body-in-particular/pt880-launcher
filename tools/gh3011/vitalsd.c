@@ -168,6 +168,55 @@ static void ring_add(double r)
     if (ring_n < RING) ring_n++;
 }
 
+/* Saturation, as a movement away from this sensor's own recent baseline.
+ *
+ * An absolute figure is not available and the reason is now understood rather than suspected. R
+ * drifted from 0.32 to 0.98 over eight hours on a wrist that never moved and a watch nobody
+ * touched - a threefold change in the ratio the whole method rests on. Anchoring that to a
+ * saturation gives a number that is wrong by several points within a day, whichever hour is
+ * chosen to anchor it.
+ *
+ * But the drift is slow and desaturation is not. An apnoea lasts tens of seconds; the instrument
+ * takes hours to wander that far. So the slow part can be treated as the baseline and subtracted,
+ * which is exactly what it deserves: a running median of the recent ratios is what the sensor
+ * currently calls normal for this wrist, and the distance below it is what carries information.
+ *
+ * The published figure is therefore an assumption plus a measurement: 97 for a healthy adult at
+ * rest, plus the textbook slope of 25 points per unit of R applied to the deviation. A fall is
+ * real and worth acting on. The absolute number is not a measurement of anyone's saturation and
+ * docs/vitals.md says so at greater length.
+ *
+ * BASE_MIN is what makes it honest. Fewer than that and there is no baseline yet, so nothing is
+ * reported rather than a deviation from one measurement.
+ */
+#define BASE_MIN 5
+#define SPO2_ASSUMED_REST 97.0
+#define SPO2_SLOPE 25.0
+
+/* The baseline, and whether there is enough of one to use. */
+static int spo2_from_baseline(double r, double *out)
+{
+    double tmp[RING];
+    int i, n = ring_n;
+
+    *out = 0;
+    if (n < BASE_MIN || r <= 0) return 0;
+    for (i = 0; i < n; i++) tmp[i] = ring[i];
+    qsort(tmp, n, sizeof tmp[0], cmp_dbl);
+    {
+        double base = tmp[n / 2];
+        double v;
+        if (base <= 0) return 0;
+        v = SPO2_ASSUMED_REST - SPO2_SLOPE * (r - base);
+        /* Above the assumed rest is the baseline moving, not the wearer improving: a healthy
+         * adult at rest has nowhere up to go. Clamped rather than reported. */
+        if (v > 100.0) v = 100.0;
+        if (v < 70.0) return 0;      /* further than this from baseline is the sensor, not blood */
+        *out = v;
+        return 1;
+    }
+}
+
 /* The middle of what has been seen, and how far the middle half of it spreads. */
 static int ring_view(double *med, double *spread)
 {
@@ -429,6 +478,16 @@ static void measure(const char *mode, char *out, size_t outsz)
             size_t at2 = strlen(ratio_out);
             snprintf(ratio_out + at2, ratio_sz - at2, " rstable=%.3f rspread=%.3f rn=%d",
                      med, sp, n3);
+        }
+
+        /* Only a pass that cleared both gates gets to move the reading, and only once there is
+         * a baseline to move it against. */
+        if (rm > 0.05 && rm < 5.0 && beats >= 8 && rsp >= 0 && rsp < 0.35) {
+            double sat = 0;
+            if (spo2_from_baseline(rm, &sat)) {
+                size_t at3 = strlen(ratio_out);
+                snprintf(ratio_out + at3, ratio_sz - at3, " spo2rel=%.0f", sat);
+            }
         }
     }
 
