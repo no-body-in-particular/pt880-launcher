@@ -420,3 +420,36 @@ That places the vendor's algorithm in userspace, in the daemon, where the earlie
 callable entry point already put it: the HAL exports nothing, `libICJniUtils` exports nothing, and
 the daemon is stripped to three `getopt` symbols. The eight second cycle is Goodix's algorithm
 being better than ours, not the hardware handing over an answer. There is no shortcut to take.
+
+## What the vendor actually does for SpO2, and what that costs
+
+The strings in `gh3011_service` answer it. It is Goodix's own example code calling Goodix's own
+library:
+
+    example code v0.1.6 (For hbd_ctrl lib v0.5.6.0 and later)
+    hbd ctrl version: %s     spo2 version: %s     hba version: %s
+    spo2 calc, gs_len=%d, result=%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d
+    GH_3011 spo2_result : %d , lvl %d , hb %d, lvl%d , wearing %d
+    gh_dev_report_key %d, weared %d ,ppg %d ,spo2 %d ,ret %d
+    packages/apps/IC/gh30x-service/gh3011/libs/main/gh_sensor_romaii_hook.c
+
+So the vendor is not computing a saturation either. It hands twelve results back from `hbd_ctrl`,
+a proprietary library statically linked into that binary, and reports the one it wants along with
+a confidence level. `gh_dev_report_key` is the call that writes the `REL_RX` events this file
+records - which is why listening on `/dev/input/event1` while our own code drives the sensor
+hears nothing at all.
+
+The obvious idea is to run their daemon for a saturation and ours for everything else. It does not
+work as stated. Started on its own it produces no output and no log lines of any kind, because it
+is not a program that measures - `GH30xService::init`, `GH30xService::start MeasureType` and
+`GH30x_CMD_Handler 0x%04x %d param %d` describe a service waiting to be told. The vendor app
+drives it, and a measurement only happens when something asks.
+
+That leaves the honest options as they were. The vendor path can be restored whole - the launcher
+still has `VendorVitals` and the binary is kept as `gh3011_service.real` - and it would bring back
+a saturation with a real algorithm behind it. What it costs is the chip: two drivers cannot hold
+one sensor, so that is a saturation instead of our heart rate and pressure rather than alongside
+them. Alternating between the two per cycle is possible and has not been tried.
+
+The remaining route to a saturation of our own runs through `hbd_ctrl` itself, which is in that
+binary and is exactly the kind of thing Ghidra found `FUN_0002cde8` in.
