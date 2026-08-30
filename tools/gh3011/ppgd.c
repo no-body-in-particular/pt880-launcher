@@ -474,7 +474,16 @@ int main(int argc, char **argv)
         }
     }
     if (nrates < 3) {
-        printf("hr=0 reason=no_agreement windows=%d samples=%d hz=%.1f\n", nrates, ns, fs);
+        {
+            /* Say what the signal looked like, not just that it failed. A bare refusal cannot be
+             * told apart from a dark channel, a saturated one, or a wearer who moved. */
+            double lo = d[0], hi = d[0];
+            int q;
+            for (q = 0; q < ns; q++) { if (d[q] < lo) lo = d[q]; if (d[q] > hi) hi = d[q]; }
+            printf("hr=0 reason=no_agreement windows=%d samples=%d hz=%.1f gain=%04x"
+                   " swing=%.0f used=%s\n",
+                   nrates, ns, fs, gain, hi - lo, src == ch2 ? "ch2" : "ch1");
+        }
         return 1;
     }
     qsort(rates, nrates, sizeof rates[0], cmp_d);
