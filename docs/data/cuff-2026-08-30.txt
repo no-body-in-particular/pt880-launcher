@@ -1,5 +1,5 @@
-Cuff readings, 30 August 2026, quiet afternoon, wearer resting between them.
-Taken on an upper-arm meter while the watch was on the other wrist.
+Cuff readings, 30 August 2026, quiet afternoon, wearer resting throughout.
+Upper-arm meter, watch on the other wrist.
 
   systolic  diastolic  pulse
   110       66         -
@@ -9,23 +9,35 @@ Taken on an upper-arm meter while the watch was on the other wrist.
   113       70         -
   113       67         50
   112       68         50
+  111       68         50
+  107       68         -
+  109       67         -
+  110       70         -
+  110       69         -
 
-The 88 is the cuff disagreeing with itself: its other six diastolics lie between
-66 and 71. A cuff diastolic is the least repeatable number either device makes,
-so it is left out of the mean and left in the record.
+The 88 is the cuff disagreeing with itself: its other eleven diastolics lie
+between 66 and 71. A cuff diastolic is the least repeatable number either device
+produces, so it is left out of the mean and left in the record.
 
-What this was compared against - the four resting measurements ppgd produced in
-the same period, at 47 to 51 bpm:
+What it was compared against - seven resting measurements from ppgd at 47 to 52
+bpm, all restated at the original 105/66 intercepts so they sit on one scale:
 
-  117/74   118/75   113/73   111/71
+  117/74   118/75   113/73   111/71   115/74   119/76   120/76
 
-Two further measurements, 118/77 at 95 bpm and 129/83 at 112 bpm, are excluded:
+The last three of those were taken in the same minutes as cuff readings rather
+than merely the same afternoon. As they printed, with -3/-4 applied at the time:
+
+  ours  112/70   116/72   117/72
+  cuff  111/68   107/68   109/67   110/70   110/69
+
+Two further measurements are excluded, 118/77 at 95 bpm and 129/83 at 112 bpm:
 a pulse that high says the wearer was moving, whatever the pressure printed.
 
               ours     cuff     difference
-  systolic    114.8    111.6    +3.2 mmHg
-  diastolic    73.3     68.8    +4.4 mmHg
+  systolic    116.1    110.7    +5.5 mmHg
+  diastolic    74.1     68.6    +5.5 mmHg
 
-Nothing here is paired. No measurement was taken at the same moment as a cuff
-reading, so this sets one afternoon's middle against the same afternoon's
-middle. It is enough to move an offset and not enough to fit a coefficient.
+So the intercepts move by five and six, and nothing else moves. Seven points
+against twelve places an offset; it does not fit a slope. An offset found on one
+wearer on one afternoon is exactly that, and the coefficients it sits on top of
+are still the unfitted ones taken from the literature.

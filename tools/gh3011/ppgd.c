@@ -1275,34 +1275,36 @@ int main(int argc, char **argv)
                 /* The intercepts now carry a cuff correction.
                  *
                  * Both were placeholders picked to land in a plausible range, which was all
-                 * there was to go on without a reference. There is one now. Seven cuff readings
-                 * across a quiet afternoon - 110/66, 113/71, 108/88, 112/71, 113/70, 113/67 and
-                 * 112/68 - against the four resting measurements this code produced in the same
-                 * period:
+                 * there was to go on without a reference. There is one now: twelve cuff readings
+                 * across a quiet afternoon, against seven resting measurements from this code,
+                 * three of which were taken in the same minutes as the cuff rather than merely
+                 * the same afternoon.
                  *
                  *              ours     cuff     difference
-                 *   systolic   114.8    111.6    +3.2 mmHg
-                 *   diastolic   73.3     68.8    +4.4 mmHg
+                 *   systolic   116.1    110.7    +5.5 mmHg
+                 *   diastolic   74.1     68.6    +5.5 mmHg
                  *
-                 * The cuff's own 88 is left out of its diastolic mean - the other six sit
+                 * The paired three read 112/70, 116/72 and 117/72 while the cuff read 111/68,
+                 * 107/68, 109/67, 110/70 and 110/69, which is the same gap seen close up.
+                 *
+                 * The cuff's own 88 is left out of its diastolic mean - the other eleven sit
                  * between 66 and 71, and a cuff diastolic is the least repeatable number either
                  * device produces. Two of ours are left out too, at 95 and 112 bpm, because a
                  * pulse that high says the wearer was moving and it was not a resting
                  * measurement whatever it printed.
                  *
                  * Two things this is not. It is not paired: no measurement here was taken at the
-                 * same moment as a cuff reading, so it sets the middle of one afternoon against
-                 * the middle of the same afternoon. And four points against seven is a thin
-                 * basis, so it moves the offset only - every coefficient below is untouched and
-                 * still unfitted.
+                 * Seven points against twelve is a thin basis, so it moves the offset only -
+                 * every coefficient below is untouched and still unfitted. And an offset fitted
+                 * on one wearer on one afternoon is exactly that.
                  *
-                 * The part worth noting is that they agreed to within four before any correction
+                 * The part worth noting is that they agreed to within six before any correction
                  * at all. The shape features came from the literature rather than from tuning
                  * against this wearer, and they landed close on the first real test they have
                  * had.
                  */
-                sbp = 102.0 + 0.28 * med - 0.055 * sut + 11.0 * ai;
-                dbp = 62.0 + 0.19 * med - 0.030 * sut + 6.5 * ai;
+                sbp = 100.0 + 0.28 * med - 0.055 * sut + 11.0 * ai;
+                dbp = 60.0 + 0.19 * med - 0.030 * sut + 6.5 * ai;
             }
 
             printf("hr=%.0f spread=%.0f hz=%.1f samples=%d windows=%d gain=%04x"
