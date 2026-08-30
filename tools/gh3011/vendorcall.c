@@ -27,6 +27,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <dlfcn.h>
+#include <sys/mman.h>
+#include <unistd.h>
 
 #define VENDOR "/system/bin/gh3011_service.real"
 #define SPO2_OFFSET 0x1b7c0
@@ -85,6 +87,47 @@ int main(int argc, char **argv)
     base = base_of("gh3011_service.real");
     printf("dlopen accepted it; load base 0x%lx\n", base);
     if (!base) { printf("no mapping found, so the offset cannot be applied\n"); dlclose(h); return 1; }
+
+    /* Satisfy the two things the routine reads before it will run, without running the daemon.
+     *
+     * Ghidra resolves both, and neither is what the first guess assumed:
+     *
+     *     ldr r2,[0x1b92c] -> 0x3ccd4 holds 0x44030 ; ldr r3,[r2] -> 0x44030
+     *     ldr r3,[0x1b930] -> 0x3ce24 holds 0x3ec4a ; ldrb r1,[r3] -> 0x3ec4a
+     *
+     * The mode pointer is already valid - it points into .bss at 0x3ec4a, and the byte there is
+     * zero, which is why the routine would return without doing anything. That is a guard, not a
+     * crash.
+     *
+     * The crash is the stack protector. __stack_chk_guard lives in .bss at 0x44030 and its
+     * relocation is not applied when an executable is dlopened rather than executed, so the slot
+     * holds zero and the function dereferences null on its second instruction. Nothing to do with
+     * the algorithm at all.
+     *
+     * Both are ordinary memory once the image is mapped. Give the guard something to read and set
+     * the mode byte to 1, and the routine has what it was waiting for - no service object, no
+     * constructor, and none of the daemon.
+     */
+    {
+        unsigned long *guard = (unsigned long *)(base + 0x44030);
+        unsigned char *mode_byte = (unsigned char *)(base + 0x3ec4a);
+        static unsigned long cookie = 0xdeadbeef;
+
+        /* Writable first. The read succeeded and the write did not, which is RELRO: the linker
+         * marks these pages read-only once relocations are done, and an image brought in by
+         * dlopen gets the same treatment. mprotect undoes it for the two pages we need. */
+        long pagesz = sysconf(_SC_PAGESIZE);
+        void *gp = (void *)((unsigned long) guard & ~(pagesz - 1));
+        void *mp = (void *)((unsigned long) mode_byte & ~(pagesz - 1));
+        if (mprotect(gp, pagesz, PROT_READ | PROT_WRITE) != 0) printf("  mprotect(guard) failed\n");
+        if (mprotect(mp, pagesz, PROT_READ | PROT_WRITE) != 0) printf("  mprotect(mode) failed\n");
+
+        printf("stack guard slot at %p held 0x%lx\n", (void *) guard, *guard);
+        if (!*guard) { *guard = (unsigned long) &cookie; printf("  pointed it at a cookie\n"); }
+        printf("mode byte at %p held %u\n", (void *) mode_byte, *mode_byte);
+        *mode_byte = 1;
+        printf("  set it to 1\n\n");
+    }
 
     /* Their own initialisation first, when asked for by a third argument.
      *
