@@ -324,9 +324,25 @@ public class TrackerService extends Service {
                     // its windows disagree, which is what a moving wrist looks like - so the
                     // vendor path stays as the fallback, and is still the only source of SpO2
                     // and of a pressure.
-                    // Ask for the red mode: it carries the SpO2 ratio and runs at 100 Hz, which
-                    // is the only rate that can resolve a pulse shape - green's 25 Hz puts barely
-                    // four samples in a systolic upstroke.
+                    // Green first, for the rate.
+                    //
+                    // This asked for red first, because red samples at 100 Hz and green at 25,
+                    // and a systolic upstroke is barely four samples at 25 Hz - so red was the
+                    // only mode that could resolve a pulse shape. That reasoning is sound about
+                    // the pressure and wrong about the rate, and the rate is what this watch is
+                    // asked for most.
+                    //
+                    // Green is what every fitness tracker uses and the physics is not close.
+                    // Haemoglobin absorbs green strongly, so the pulsatile signal is large:
+                    // measured here green swings 200 to 900 counts where red manages 1 to 80.
+                    // Green also penetrates only as far as the surface capillaries, while red
+                    // and infrared reach deeper tissue - which is what makes them useful for a
+                    // saturation and exactly what makes them worse when the arm is moving,
+                    // because deep tissue moves and shallow capillaries move less.
+                    //
+                    // A rate needs 25 Hz and no more: 200 bpm is 3.3 Hz, and the sampling
+                    // theorem asks for a fraction of what green already gives. Only the pulse
+                    // shape behind the pressure needs 100, so only that asks for red.
                     // Ask the thermometer before lighting anything. Off the wrist every path
                     // below fails anyway - ours on no_agreement, the vendor's on its own wear
                     // detector - but they take a minute or more between them to get there with
@@ -337,10 +353,19 @@ public class TrackerService extends Service {
                         return;
                     }
 
-                    VendorVitals.Reading r = OwnVitals.measure(TrackerService.this, true);
-                    if (r == null) {
-                        // Green next: a much stronger pulse, and the rate is all it is for.
-                        r = OwnVitals.measure(TrackerService.this, false);
+                    VendorVitals.Reading r = OwnVitals.measure(TrackerService.this, false);
+                    if (r == null || r.systolic <= 0) {
+                        // Red second, for what green cannot give: the pulse shape the pressure
+                        // comes from, and the ratio a saturation would come from. Skipped
+                        // entirely when green already produced a pressure, so a moving wrist
+                        // costs one pass rather than two.
+                        VendorVitals.Reading red = OwnVitals.measure(TrackerService.this, true);
+                        if (red != null && (r == null || red.systolic > 0)) {
+                            // Keep green's rate when it found one: it is the better measurement
+                            // of the two and red only ran for the shape.
+                            if (r != null && r.heartRate > 0) red.heartRate = r.heartRate;
+                            r = red;
+                        }
                     }
                     if (r == null) {
                         r = VendorVitals.measure(TrackerService.this, VITALS_TIMEOUT_MS);
