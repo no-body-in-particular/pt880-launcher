@@ -328,3 +328,35 @@ it. That matches the LED staying visibly red through mode 4 earlier in this file
 
 So the only lever on the balance remains `0x0180`, and it trades one channel against the other
 rather than raising either.
+
+## The gates work within a session and not between them
+
+Ten logged passes split into six that agreed and four that did not, and two measurements separate
+them exactly: the window spread of one pass, and whether the matched filter and the bin estimate
+agree about the same amplitude. Kept passes ran 0.583 to 0.729 with a median of 0.667; the four
+rejected were 0.190, 1.531, 2.044 and 2.739.
+
+Validated on a fresh session it does not hold. The same gates, the same wrist, nobody moved:
+
+    session 1, gated:  0.583  0.625  0.664  0.669  0.682  0.729     median 0.667
+    session 2, gated:  0.825  1.060
+
+Between sessions R moved by a quarter to a half. At roughly 25 saturation points per unit of R,
+that is a swing of several percent in what it claims to measure - and R is precisely the quantity
+that is not supposed to do this. Dividing AC by DC on each channel exists to cancel how much light
+happens to be getting in, which is what changes when a watch sits differently on an arm. It is not
+cancelling.
+
+That points at the DC term rather than the AC one. The likeliest cause is light reaching the
+detector that no LED put there: ambient leaking under the case adds to DC without adding to AC, it
+varies with how the band sits, and it corrupts the normalisation exactly this way. Most PPG front
+ends sample a slot with the LED off to measure and subtract it, and there is a third slot here
+whose purpose has never been established.
+
+Testing that needs a reading with the LEDs dark, and zeroing the current byte of the slot
+registers stops the FIFO rather than darkening it - the same touchiness these registers showed
+when a third channel was forced. So it stands as the most likely explanation and not as a
+established one.
+
+**Nothing is published.** Six passes agreeing to eleven percent is the closest this has come, and
+it did not survive the wrist being worn again.
