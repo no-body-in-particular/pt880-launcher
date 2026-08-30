@@ -29,7 +29,8 @@
 #define IRQ  0x40044707u    /* GH_IOC_ENABLE_IRQ                                  */
 #define WAIT 0x00004701u    /* blocks until the FIFO reaches the 0x0044 watermark */
 #define XFER 0xc0084704u    /* i2c passthrough                                    */
-#define MODE 0x40184709u    /* _IOW(G,9,24): 4 = green only, 5 = red + IR         */
+#define MODE 0x40184709u
+#define ACCEL 0x825a470au     /* _IOR('G', 10, 602): u16 count, then int16 x,y,z triples */    /* _IOW(G,9,24): 4 = green only, 5 = red + IR         */
 #define ADDR 0x14
 #define MAXS 12000
 
@@ -80,6 +81,91 @@ static int rdn(unsigned short g, unsigned char *o, int n)
 }
 static int rd16(unsigned short g, unsigned short *v)
 { unsigned char b[2]; if (rdn(g,b,2)<0) return -1; *v=(unsigned short)((b[0]<<8)|b[1]); return 0; }
+
+static int cmp_d(const void *a, const void *b)
+{ double x = *(const double*)a, y = *(const double*)b; return x < y ? -1 : (x > y); }
+
+/* How much the arm moved during each burst, in the order the bursts arrived.
+ *
+ * The vendor daemon reads this FIFO four hundred and twenty times against six hundred and fifty
+ * two interrupt waits - inside its measurement loop, not beside it - and ours never read it at
+ * all. That is the difference between being able to subtract the arm's movement from the optical
+ * trace and having nothing to subtract with, and it is the likeliest reason its rate survives a
+ * moving wrist where ours declines to answer at all.
+ *
+ * The layout was read off the device rather than guessed: a little-endian count, then that many
+ * int16 triples. At rest consecutive triples differ by one or two counts and their magnitude sits
+ * near 2190, which is gravity; a moving arm swings them by hundreds.
+ *
+ * What is kept is the spread of the magnitude within the burst, not its mean, because the mean is
+ * gravity and gravity is always there.
+ */
+#define MAXBURST 512
+static double burst_motion[MAXBURST];
+static int nmotion;
+
+/* The arm's movement as one continuous series, for use as a noise reference. */
+#define MAXACC 24000
+static double accel_mag[MAXACC];
+static int naccel;
+
+static void note_motion(void)
+{
+    unsigned char b[608];
+    int n, i;
+    double lo = 1e18, hi = -1e18;
+
+    if (nmotion >= MAXBURST) return;
+    memset(b, 0, sizeof b);
+    if (ioctl(fd, ACCEL, b) < 0) { burst_motion[nmotion++] = -1.0; return; }
+
+    n = b[0] | (b[1] << 8);
+    if (n <= 0 || n > 100) { burst_motion[nmotion++] = -1.0; return; }
+
+    for (i = 0; i < n; i++) {
+        const unsigned char *q = b + 2 + i * 6;
+        double x = (short)(q[0] | (q[1] << 8));
+        double y = (short)(q[2] | (q[3] << 8));
+        double z = (short)(q[4] | (q[5] << 8));
+        double m = sqrt(x * x + y * y + z * z);
+        if (m < lo) lo = m;
+        if (m > hi) hi = m;
+    }
+    burst_motion[nmotion++] = (hi >= lo) ? hi - lo : -1.0;
+
+    /* And keep the magnitudes themselves, end to end across the measurement.
+     *
+     * A per-burst number says whether the arm moved; the series says at what rate it moved,
+     * which is the part that matters. An arm swinging at 100 a minute puts a peak in the optical
+     * trace at 100 a minute, and nothing in a single optical channel can tell that from a heart
+     * beating at 100. The accelerometer can, because the swing is in it and the heartbeat is
+     * not. That is the whole idea behind the published wrist-PPG methods - TROIKA and the ones
+     * after it - and it is why the vendor reads this FIFO inside its measurement loop.
+     */
+    for (i = 0; i < n && naccel < MAXACC; i++) {
+        const unsigned char *q = b + 2 + i * 6;
+        double x = (short)(q[0] | (q[1] << 8));
+        double y = (short)(q[2] | (q[3] << 8));
+        double z = (short)(q[4] | (q[5] << 8));
+        accel_mag[naccel++] = sqrt(x * x + y * y + z * z);
+    }
+}
+
+/* The middle of what the arm did across the whole measurement, and the worst of it. Reported so
+ * a refusal can be blamed on the wearer moving or acquitted of it. */
+static void motion_summary(double *med, double *worst)
+{
+    static double t[MAXBURST];
+    int i, n = 0;
+
+    *med = -1.0;
+    *worst = -1.0;
+    for (i = 0; i < nmotion; i++) if (burst_motion[i] >= 0) t[n++] = burst_motion[i];
+    if (!n) return;
+    qsort(t, n, sizeof t[0], cmp_d);
+    *med = t[n / 2];
+    *worst = t[n - 1];
+}
 
 static void stop_chip(void)
 {
@@ -160,8 +246,6 @@ static void detrend(double *out, int n, int w)
  * between two channels measured the same way, so the factor between "amplitude of the
  * fundamental" and "peak-to-peak swing" cancels and does not need to be right in absolute terms.
  */
-static int cmp_d(const void *a, const void *b)
-{ double x = *(const double*)a, y = *(const double*)b; return x < y ? -1 : (x > y); }
 
 static double bin_amp(const unsigned int *x, int n, double dc, double fs, double f)
 {
@@ -439,11 +523,46 @@ static double spectral_bpm_d(const double *d, int n, double fs, double *conf)
     for (i = 1; i < n; i++) dd[i] = d[i] - d[i-1];
     d = dd;
 
+    /* The accelerometer's own rate, sampled over the same measurement.
+     *
+     * Its sample rate is not the optical one - the FIFO delivers its own number of samples per
+     * burst - so it is derived from the two counts rather than assumed. Getting this wrong would
+     * put the movement peak at the wrong frequency and mask the wrong part of the spectrum,
+     * which is worse than not masking at all.
+     */
+    double afs = (naccel > 64 && n > 0) ? fs * (double) naccel / (double) n : 0.0;
+    double aref = 0.0;
+
+    if (afs > 1.0) {
+        /* How strong the movement is at its worst, for scaling the penalty below. */
+        double q;
+        for (q = 32.0; q <= 220.0; q += 2.0) {
+            double a = band_amp_d(accel_mag, naccel, afs, q / 60.0);
+            if (a > aref) aref = a;
+        }
+    }
+
     for (bpm = 32.0; bpm <= 220.0; bpm += 0.5) {
         double f = bpm / 60.0;
         double p = band_amp_d(d, n, fs, f);
         if (2.0 * f < fs / 2.0) p += 0.6 * band_amp_d(d, n, fs, 2.0 * f);
         if (3.0 * f < fs / 2.0) p += 0.3 * band_amp_d(d, n, fs, 3.0 * f);
+
+        /* Discount candidates the arm is also doing.
+         *
+         * A frequency present in both the optical trace and the accelerometer is movement
+         * showing up in the light, not blood: an arm swinging at that rate modulates the
+         * contact and the path length and produces a peak indistinguishable from a pulse in one
+         * optical channel alone. Scaled by how strong the movement is overall, so a still
+         * measurement is left entirely alone - which matters, because most of them are still and
+         * this must not cost anything there.
+         */
+        if (afs > 1.0 && aref > 0.0) {
+            double a = band_amp_d(accel_mag, naccel, afs, f);
+            if (2.0 * f < afs / 2.0) a += 0.6 * band_amp_d(accel_mag, naccel, afs, 2.0 * f);
+            p /= 1.0 + 2.0 * (a / aref);
+        }
+
         if (p > best) { second = best; best = p; bestbpm = bpm; }
         else if (p > second) second = p;
     }
@@ -1206,6 +1325,7 @@ int main(int argc, char **argv)
                 burst_hz[nburst++] = got / gap;
             tprev = tb;
         }
+        note_motion();          /* what the arm did during this burst */
         rounds++;
         if (timeouts > 4) break;                  /* the chip is not producing bursts */
     }
@@ -1393,6 +1513,13 @@ int main(int argc, char **argv)
                     e1 = best_amp(ch1 + qs, qn, fs);
                     e2 = best_amp(ch2 + qs, qn, fs);
                 }
+                {
+                    /* What the arm was doing, so a refusal can be blamed on movement or
+                     * acquitted of it. Until now a no_agreement said nothing about which. */
+                    double mm = -1, mw = -1;
+                    motion_summary(&mm, &mw);
+                    printf("motion=%.0f/%.0f ", mm, mw);
+                }
                 printf("dc1=%.0f dc2=%.0f amp1=%.1f amp2=%.1f ", q1, q2, e1, e2);
             }
             printf("hr=0 reason=no_agreement windows=%d samples=%d hz=%.1f gain=%04x"
@@ -1507,6 +1634,8 @@ int main(int argc, char **argv)
              * channel is not infrared at all and R lands between 1.5 and 3.5, meaning nothing.
              */
             double spo2 = 0, sut = 0, ai = 0, sbp = 0, dbp = 0;
+            double mot_med = -1, mot_worst = -1;
+            motion_summary(&mot_med, &mot_worst);
 
             /* No percentage. R is printed because it is a real measurement and worth watching;
              * turning it into a saturation is what there is no basis for.
@@ -1576,9 +1705,9 @@ int main(int argc, char **argv)
             }
 
             printf("hr=%.0f spread=%.0f hz=%.1f samples=%d windows=%d gain=%04x"
-                   " dc1=%.0f dc2=%.0f ac1=%.0f ac2=%.0f r=%.3f spo2=%.0f beats=%d raw=%.0f/%.2f sut=%.0f ai=%.2f"
+                   " dc1=%.0f dc2=%.0f ac1=%.0f ac2=%.0f r=%.3f spo2=%.0f beats=%d raw=%.0f/%.2f sut=%.0f ai=%.2f motion=%.0f/%.0f"
                    " sbp=%.0f dbp=%.0f used=%s\n",
-                   med, spread, fs, ns, nrates, gain, dc1, dc2, a1, a2, r, spo2, shape_beats, shape_raw_sut, shape_raw_ai, sut, ai, sbp, dbp,
+                   med, spread, fs, ns, nrates, gain, dc1, dc2, a1, a2, r, spo2, shape_beats, shape_raw_sut, shape_raw_ai, sut, ai, mot_med, mot_worst, sbp, dbp,
                    src == ch2 ? "ch2" : "ch1");
         }
     }
