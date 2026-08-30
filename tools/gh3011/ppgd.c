@@ -29,6 +29,7 @@
 #define IRQ  0x40044707u    /* GH_IOC_ENABLE_IRQ                                  */
 #define WAIT 0x00004701u    /* blocks until the FIFO reaches the 0x0044 watermark */
 #define XFER 0xc0084704u    /* i2c passthrough                                    */
+#define MODE 0x40184709u    /* _IOW(G,9,24): 4 = green only, 5 = red + IR         */
 #define ADDR 0x14
 #define MAXS 12000
 
@@ -70,7 +71,7 @@ static void stop_chip(void)
 }
 static void bail(int s) { (void)s; stop_chip(); _exit(2); }
 
-static unsigned int ch1[MAXS];
+static unsigned int ch1[MAXS], ch2[MAXS];
 static int ns;
 
 /* Subtract a one-second baseline and invert: this is a reflective sensor, so the count falls at
@@ -139,6 +140,7 @@ int main(int argc, char **argv)
     int nburst = 0;
     struct timeval tprev;
     const char *csvpath = argc > 2 ? argv[2] : NULL;
+    int want_spo2 = (argc > 3 && argv[3][0] == 's');
 
     setvbuf(stdout, NULL, _IONBF, 0);
     signal(SIGTERM, bail); signal(SIGINT, bail); signal(SIGSEGV, bail);
@@ -148,6 +150,19 @@ int main(int argc, char **argv)
 
     if (ioctl(fd, PWR, 1) < 0) { printf("hr=0 reason=power_failed\n"); return 1; }
     ioctl(fd, IRQ, 1);
+
+    /* Set the driver mode before the register sequence. The SpO2 and heart-rate starts are
+     * byte-identical - 242 operations, not one differing write - so what selects one LED or two
+     * is not in the registers at all: it is this ioctl. Leaving it unset inherits whatever the
+     * last measurement used, which is how one run read 52 and the next 59 with no code change.
+     * Mode 4 is green only and leaves the second channel flat at 5 counts; mode 5 drives red and
+     * IR, which is what a ratio of ratios needs. */
+    {
+        unsigned int w[6];
+        memset(w, 0, sizeof w);
+        w[0] = want_spo2 ? 5 : 4;
+        ioctl(fd, MODE, w);
+    }
     usleep(300000);
 
     for (i = 0; i < NSEQ; i++) {
@@ -184,7 +199,8 @@ int main(int argc, char **argv)
             if (rdn(0xaaaa, buf, want) < 0) { left = 0; break; }
             for (k = 0; k + 5 < want && ns < MAXS; k += 6) {
                 unsigned int c1 = ((unsigned)buf[k]<<16)|(buf[k+1]<<8)|buf[k+2];
-                if (c1) ch1[ns++] = c1;
+                unsigned int c2 = ((unsigned)buf[k+3]<<16)|(buf[k+4]<<8)|buf[k+5];
+                if (c1) { ch1[ns] = c1; ch2[ns] = c2; ns++; }
             }
             left -= want;
         }
