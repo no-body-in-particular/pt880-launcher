@@ -76,7 +76,17 @@ public class SmsControl extends BroadcastReceiver {
     private static final String ACTION_SMS = "android.provider.Telephony.SMS_RECEIVED";
 
     /** Commands that could give the watch away, and so need the allowlist, not just a password. */
-    private static final String[] PRIVILEGED = {"host", "ip", "imei"};
+    private static final String[] PRIVILEGED = {"host", "ip", "imei", "setpw"};
+
+    /**
+     * Where the password lives when the preference has never been written.
+     *
+     * The preference is the real home, but it can only be set from something already running on
+     * the watch -- and the day this channel is actually needed is the day nothing else works.
+     * A persisted system property can be armed once over adb and survives a factory-flat
+     * battery, so the recovery path does not depend on the recovery path.
+     */
+    private static final String PW_PROPERTY = "persist.watchlauncher.smspw";
 
     @Override
     public void onReceive(Context context, Intent intent) {
@@ -239,6 +249,21 @@ public class SmsControl extends BroadcastReceiver {
         if ("reboot".equals(cmd.name))    return shell(c, "reboot", "rebooting");
         if ("poweroff".equals(cmd.name))  return shell(c, "reboot -p", "powering off");
         if ("status".equals(cmd.name))    return status(c);
+        if ("net".equals(cmd.name))       return net(c);
+        if ("wifi".equals(cmd.name))      return wifi(c, cmd.arg);
+
+        // Changing the password needs the allowlist, so a stolen password cannot be used to
+        // lock the owner out by replacing it.
+        if ("setpw".equals(cmd.name)) {
+            if (cmd.arg == null || cmd.arg.trim().length() < 4) return "setpw: too short";
+            try {
+                c.getSharedPreferences("tracker", Context.MODE_PRIVATE).edit()
+                        .putString("sms_password", cmd.arg.trim()).commit();
+            } catch (Throwable t) {
+                return "setpw failed";
+            }
+            return "password changed";
+        }
 
         if ("host".equals(cmd.name) || "ip".equals(cmd.name)) {
             if (cmd.arg == null || cmd.arg.length() == 0) return "host: no address";
@@ -293,6 +318,135 @@ public class SmsControl extends BroadcastReceiver {
             return "failed: " + t;
         } finally {
             try { sh.close(); } catch (Throwable ignored) { }
+        }
+    }
+
+    /**
+     * Where the watch is on the network, which is the question you cannot ask any other way.
+     *
+     * A watch that has dropped off wifi is invisible: no adb, no scan, nothing to connect to.
+     * The cellular side is still up, so this reports the address over the one channel that
+     * still works, and says whether adb is even listening once you have it.
+     */
+    private String net(Context c) {
+        StringBuilder b = new StringBuilder();
+        String ip = null;
+        try {
+            android.net.wifi.WifiManager wm =
+                    (android.net.wifi.WifiManager) c.getSystemService(Context.WIFI_SERVICE);
+            b.append("wifi ").append(wm.isWifiEnabled() ? "on" : "off");
+            android.net.wifi.WifiInfo i = wm.getConnectionInfo();
+            if (i != null) {
+                String ssid = i.getSSID();
+                if (ssid != null && ssid.length() > 0) {
+                    b.append(", ssid ").append(ssid.replace("\"", ""));
+                }
+                int a = i.getIpAddress();
+                if (a != 0) {
+                    ip = String.format(Locale.US, "%d.%d.%d.%d",
+                            a & 0xff, (a >> 8) & 0xff, (a >> 16) & 0xff, (a >> 24) & 0xff);
+                }
+            }
+        } catch (Throwable t) {
+            b.append("wifi unknown");
+        }
+
+        // The WifiInfo address is empty on some builds even when the interface is up, so fall
+        // back to the interface list -- which also covers a usb or cellular route.
+        if (ip == null) ip = firstAddress();
+        b.append(ip == null ? ", no address" : ", ip " + ip);
+
+        String port = prop("service.adb.tcp.port");
+        if (port.length() == 0) port = prop("persist.adb.tcp.port");
+        b.append(port.length() > 0 ? ", adb on " + port : ", adb tcp off");
+        return b.toString();
+    }
+
+    private static String firstAddress() {
+        try {
+            java.util.Enumeration<java.net.NetworkInterface> ifs =
+                    java.net.NetworkInterface.getNetworkInterfaces();
+            while (ifs != null && ifs.hasMoreElements()) {
+                java.net.NetworkInterface ni = ifs.nextElement();
+                if (ni.isLoopback() || !ni.isUp()) continue;
+                java.util.Enumeration<java.net.InetAddress> as = ni.getInetAddresses();
+                while (as.hasMoreElements()) {
+                    java.net.InetAddress a = as.nextElement();
+                    if (!a.isLoopbackAddress() && a instanceof java.net.Inet4Address) {
+                        return ni.getName() + " " + a.getHostAddress();
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    /**
+     * Turn the radio on, or join a network.
+     *
+     * {@code wifi=on} is the command that matters: a watch whose wifi died needs the radio back,
+     * and that is not something anyone can do by texting the vendor firmware. Joining a named
+     * network needs the allowlist, because pointing the watch at a network of someone else's
+     * choosing is the same class of handover as {@code host=}.
+     */
+    private String wifi(Context c, String arg) {
+        android.net.wifi.WifiManager wm;
+        try {
+            wm = (android.net.wifi.WifiManager) c.getSystemService(Context.WIFI_SERVICE);
+            if (wm == null) return "no wifi service";
+        } catch (Throwable t) {
+            return "no wifi service";
+        }
+
+        if (arg == null || arg.length() == 0 || "on".equalsIgnoreCase(arg)) {
+            boolean ok = wm.setWifiEnabled(true);
+            return ok ? "wifi enabled, give it a moment" : "could not enable wifi";
+        }
+        if ("off".equalsIgnoreCase(arg)) {
+            return wm.setWifiEnabled(false) ? "wifi disabled" : "could not disable wifi";
+        }
+
+        if (allowlist(c).isEmpty()) return "joining a network needs an allowlist configured";
+
+        // wifi=SSID,password  -- the SSID may not contain a comma, which is the same
+        // restriction the rest of this protocol has.
+        String ssid = arg, pass = null;
+        int comma = arg.indexOf(',');
+        if (comma >= 0) {
+            ssid = arg.substring(0, comma).trim();
+            pass = arg.substring(comma + 1).trim();
+        }
+        if (ssid.length() == 0) return "wifi: no ssid";
+
+        try {
+            android.net.wifi.WifiConfiguration cfg = new android.net.wifi.WifiConfiguration();
+            cfg.SSID = "\"" + ssid + "\"";
+            if (pass == null || pass.length() == 0) {
+                cfg.allowedKeyManagement.set(android.net.wifi.WifiConfiguration.KeyMgmt.NONE);
+            } else {
+                cfg.preSharedKey = "\"" + pass + "\"";
+            }
+            wm.setWifiEnabled(true);
+            int id = wm.addNetwork(cfg);
+            if (id < 0) return "wifi: could not add " + ssid;
+            wm.enableNetwork(id, true);
+            wm.saveConfiguration();
+            return "joining " + ssid + "; text net# in a minute for the address";
+        } catch (Throwable t) {
+            Log.w(TAG, "wifi join failed", t);
+            return "wifi join failed";
+        }
+    }
+
+    /** A system property, or "" -- SystemProperties is hidden, so this goes through reflection. */
+    static String prop(String name) {
+        try {
+            Class<?> sp = Class.forName("android.os.SystemProperties");
+            Object v = sp.getMethod("get", String.class).invoke(null, name);
+            return v == null ? "" : v.toString();
+        } catch (Throwable t) {
+            return "";
         }
     }
 
