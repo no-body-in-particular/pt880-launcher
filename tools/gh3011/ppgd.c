@@ -242,39 +242,33 @@ int main(int argc, char **argv)
                  * So saturation is judged by the DC level, which is unambiguous, rather than by
                  * amplitude, which reads the same whether a channel is dark or clipped.
                  */
+                /* 0x0118 is a single 16-bit value, not two per-channel bytes. The daemon writes
+                 * it six bytes at a time - "W 01 18 4f 3c 00 00" is 0x0118=0x4f3c together with
+                 * 0x011a=0x0000 - and the configuration table lists them as separate registers.
+                 * Splitting it into halves produced values like 0x8419, which are nowhere on the
+                 * daemon's path. */
                 double dc1 = 0, dc2 = 0;
-                int a1 = (int)(hi1 - lo1), a2 = (int)(hi2 - lo2);
-                int g1 = (gain >> 8) & 0xff, g2 = gain & 0xff;
+                unsigned short newgain = gain;
                 int k4;
+
                 for (k4 = before; k4 < ns; k4++) { dc1 += ch1[k4]; dc2 += ch2[k4]; }
                 dc1 /= (ns - before);
                 dc2 /= (ns - before);
+                (void)hi1; (void)lo1; (void)hi2; (void)lo2;
 
-                /* One-way: back off out of saturation and then stop.
-                 *
-                 * Bracketing the vendor's operating point was tried and is worse. One gain step
-                 * moves the DC by about 9500 counts, so any deadband narrow enough to hold that
-                 * point is narrower than a single step, and the loop oscillates - the usable
-                 * window fell from 3400 samples to 1200. This settles about 33,000 counts below
-                 * where the daemon sits, which costs some signal, but it settles. */
-                if (dc1 > 3200000.0 && g1 > 0x20) g1 -= 12;
-                else if (dc1 < 3150000.0 && a1 < 40 && g1 < 0xe0) g1 += 6;
-                if (dc2 > 3200000.0 && g2 > 0x20) g2 -= 12;
-                else if (dc2 < 3150000.0 && a2 < 40 && g2 < 0xe0) g2 += 6;
+                if (dc1 > 3200000.0 && gain > 0x1000)
+                    newgain = (unsigned short)(gain - (gain >> 3));   /* back off about 12% */
 
-                {
-                    unsigned short newgain = (unsigned short)((g1 << 8) | g2);
-                    if (newgain != gain) {
-                        /* Every gain change steps the DC by about 9500 counts - two orders of
-                         * magnitude more than the pulse - so the settling period is unusable and
-                         * has to be dropped rather than filtered. Analysis starts after the gain
-                         * has stopped moving; including the transient put the rate estimate at
-                         * the edge of its search range. */
-                        settled_at = ns;
-                        gain = newgain;
-                        wr16(0x0136, 0x0000);
-                        wr16(0x0118, gain);
-                    }
+                if (newgain != gain) {
+                    /* Every gain change steps the DC by about 9500 counts, two orders of
+                     * magnitude more than the pulse, so the settling period is unusable and has
+                     * to be dropped rather than filtered. Analysis starts after the gain stops
+                     * moving; including the transient put the estimate at the edge of its
+                     * search range. */
+                    settled_at = ns;
+                    gain = newgain;
+                    wr16(0x0136, 0x0000);
+                    wr16(0x0118, gain);
                 }
             }
         }
@@ -404,8 +398,37 @@ int main(int argc, char **argv)
                    " hz=%.1f samples=%d\n", med, iqr, spread, nrates, fs, ns);
             return 1;
         }
-        printf("hr=%.0f spread=%.0f hz=%.1f samples=%d windows=%d rounds=%d timeouts=%d\n",
-               med, spread, fs, ns, nrates, rounds, timeouts);
+        {
+            /* Both channels' pulsatile amplitude, and the ratio of ratios.
+             *
+             * No percentage is printed. Turning R into a saturation needs a calibration for a
+             * reflective wrist sensor, and the textbook SpO2 = 110 - 25R is fitted for
+             * transmissive fingertip oximeters - applying it to this sensor gave 81% where the
+             * watch itself said 100%. What matters here is whether both channels are pulsatile
+             * at all, which is the precondition for any of it and is what the gain fix was for.
+             */
+            double a1 = 0, a2 = 0, dc1 = 0, dc2 = 0, r = 0;
+            int blk = (int)fs, nb = 0, j2, k2;
+            for (j2 = 0; j2 + blk < ns; j2 += blk) {
+                unsigned int lo1 = ch1[j2], hi1 = ch1[j2], lo2 = ch2[j2], hi2 = ch2[j2];
+                for (k2 = j2; k2 < j2 + blk; k2++) {
+                    if (ch1[k2] < lo1) lo1 = ch1[k2];
+                    if (ch1[k2] > hi1) hi1 = ch1[k2];
+                    if (ch2[k2] < lo2) lo2 = ch2[k2];
+                    if (ch2[k2] > hi2) hi2 = ch2[k2];
+                }
+                a1 += hi1 - lo1;
+                a2 += hi2 - lo2;
+                dc1 += ch1[j2];
+                dc2 += ch2[j2];
+                nb++;
+            }
+            if (nb) { a1 /= nb; a2 /= nb; dc1 /= nb; dc2 /= nb; }
+            if (dc1 > 0 && dc2 > 0 && a2 > 0) r = (a1 / dc1) / (a2 / dc2);
+            printf("hr=%.0f spread=%.0f hz=%.1f samples=%d windows=%d gain=%04x"
+                   " ac1=%.0f ac2=%.0f dc1=%.0f dc2=%.0f r=%.3f\n",
+                   med, spread, fs, ns, nrates, gain, a1, a2, dc1, dc2, r);
+        }
     }
     return 0;
 }
