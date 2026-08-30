@@ -129,6 +129,64 @@ static void logline(const char *mode, const char *line)
     fclose(f);
 }
 
+
+/* A running view of the ratio, across measurements rather than within one.
+ *
+ * Saturation does not move quickly. A healthy wearer at rest holds the same figure for hours, so
+ * combining the last several measurements is not smoothing away a signal - there is nothing there
+ * moving fast enough to smooth away. What it does remove is the part that changes between one
+ * measurement and the next, which on this sensor is most of what R does.
+ *
+ * The median, not the mean: a pass where the band slipped produces a wild value rather than a
+ * slightly wrong one, and the mean would carry it.
+ *
+ * Only passes that survived a quality check go in. A ratio measured on eight beats that the
+ * matched filter and the bin estimate disagree about by a factor of nine is not a worse
+ * measurement of saturation - it is not a measurement of saturation, and averaging more of them
+ * together makes a confident wrong answer rather than an honest empty one.
+ */
+#define RING 9
+
+static double ring[RING];
+static int ring_n = 0, ring_at = 0;
+
+static int cmp_dbl(const void *a, const void *b)
+{
+    double x = *(const double *)a, y = *(const double *)b;
+    return x < y ? -1 : (x > y);
+}
+
+static void ring_add(double r)
+{
+    ring[ring_at] = r;
+    ring_at = (ring_at + 1) % RING;
+    if (ring_n < RING) ring_n++;
+}
+
+/* The middle of what has been seen, and how far the middle half of it spreads. */
+static int ring_view(double *med, double *spread)
+{
+    double tmp[RING];
+    int i;
+
+    *med = 0;
+    *spread = 0;
+    if (ring_n < 3) return ring_n;
+    for (i = 0; i < ring_n; i++) tmp[i] = ring[i];
+    qsort(tmp, ring_n, sizeof tmp[0], cmp_dbl);
+    *med = tmp[ring_n / 2];
+    *spread = tmp[(ring_n * 3) / 4] - tmp[ring_n / 4];
+    return ring_n;
+}
+
+/* Read name=<number> out of a reply line, or -1. */
+static double field_of(const char *line, const char *name)
+{
+    const char *at = strstr(line, name);
+    if (!at) return -1.0;
+    return atof(at + strlen(name));
+}
+
 static int listenfd = -1;
 
 static void bye(int s)
@@ -254,6 +312,49 @@ static void measure(const char *mode, char *out, size_t outsz)
                 }
                 pclose(p);
             }
+        }
+    }
+
+    /* Judge the pass, then fold it into the running view.
+     *
+     * Two independent estimates of the same amplitude are available - the matched filter, which
+     * projects onto the beat, and the bin, which keeps only the fundamental. When they agree the
+     * pass held together; when they disagree by a factor, one of them is measuring noise and
+     * neither is worth keeping. That is a check no single estimator can perform on itself.
+     */
+    if (ratio_out[0]) {
+        double rm = field_of(ratio_out, "rmatch=");
+        double rb = field_of(ratio_out, " r=");
+        int beats = (int) field_of(ratio_out, "mbeats=");
+        double med = 0, sp = 0;
+        int n3;
+
+        /* Two gates, and between them they separated ten logged passes exactly.
+         *
+         * The window spread is how far the sub-windows of one pass disagreed. Above about a
+         * third the pass did not hold still, and the two passes that failed it were carrying
+         * two and six counts of pulse on channel 1 - not a worse ratio, no ratio at all.
+         *
+         * Agreement between the two estimators is the other. The matched filter and the bin
+         * measure the same amplitude by different routes, so when they part company by more
+         * than half again, one of them is measuring noise and there is no way to tell which
+         * from inside either. That is a check neither can perform on itself.
+         *
+         * On the ten passes those were fitted against, the six that survived had a median of
+         * 0.667 and lay between 0.583 and 0.729; the four rejected were 0.190, 1.531, 2.044 and
+         * 2.739. Ten is not many, and the thresholds are round numbers rather than fitted ones
+         * for that reason.
+         */
+        double rsp = field_of(ratio_out, "spread=");
+        if (rm > 0.05 && rm < 5.0 && beats >= 8 && rb > 0 && rsp >= 0 && rsp < 0.35) {
+            double hi = rm > rb ? rm : rb, lo = rm > rb ? rb : rm;
+            if (lo > 0 && hi / lo < 1.6) ring_add(rm);
+        }
+        n3 = ring_view(&med, &sp);
+        if (n3 >= 3) {
+            size_t at2 = strlen(ratio_out);
+            snprintf(ratio_out + at2, ratio_sz - at2, " rstable=%.3f rspread=%.3f rn=%d",
+                     med, sp, n3);
         }
     }
 
