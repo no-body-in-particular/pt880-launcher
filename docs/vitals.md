@@ -284,3 +284,47 @@ moved it - `0x0180`, and `0x0110`, which overshoots and puts channel 2 below cha
 So it stays an override - `ppgd 45 "" spo2 0180=0000` - and the work carries on from there. What
 it would take next is a way to raise channel 1 without lowering channel 2, which is a different
 register from either of these two, or none.
+
+## Can red and green run together? No, and here is what was tried
+
+The FIFO carries exactly two channels. `ppgd` had only ever assumed that - it reads the level,
+multiplies by three because a sample is 24 bits, and walks the bytes six at a time - so it was
+worth checking rather than believing. Printing consecutive 24-bit samples with no frame assumption
+and asking how well the run repeats settles it:
+
+    every 1 sample : mean step 12736
+    every 2 samples: mean step 15        <- the frame
+    every 3 samples: mean step 12733
+
+Two channels, alternating. Not three, and forcing a third by writing `0x012c=0x0007` - it holds
+`0x0003` in red mode and `0x0006` in green, which reads like a slot-enable mask - stops the FIFO
+producing anything at all.
+
+The three slot registers looked like the way in. `0x0130`, `0x0132` and `0x0134` hold
+`0x0346/0x0446/0x0546` in red mode against `0x0746/0x0346/0x0246` in green: a high byte that
+tracks the mode over a low byte that never changes, which is the shape of "this slot drives LED n
+at current 0x46". If it were, a slot set to green beside a slot set to red would put both
+wavelengths in the same two-channel FIFO - interleaved rather than simultaneous, but from the same
+beat, the same contact and the same moment, which is worth more than either alone.
+
+It is not. Moving the high byte around changes neither channel's light:
+
+    slots                       channel A       channel B
+    0346 / 0446 / 0546 (stock)    3,910          42,084
+    0746 / 0446 / 0546            3,955          42,572
+    0746 / 0446 / 0546 both set   4,041          44,602
+    0346 / 0746 / 0546            4,157          45,509
+
+The swings differ between those runs, but that is the pulse and the wrist, not the assignment.
+The light does not move, and the light is what a wavelength change would move.
+
+Two things are worth recording from the attempt. The slot registers read back `0x0000` after the
+captured sequence and hold their values after an explicit write followed by a commit
+(`0xdddd=0xc1`), so the sequence's writes land in a shadow that only a commit makes readable -
+which is why an earlier note here said only one slot was configured. And the mode ioctl on its own
+proves nothing while the red configuration table is being replayed over it: every mode from 2 to 7
+gives the same 1:10.5 light ratio, because the table sets the LEDs and the mode does not override
+it. That matches the LED staying visibly red through mode 4 earlier in this file.
+
+So the only lever on the balance remains `0x0180`, and it trades one channel against the other
+rather than raising either.
