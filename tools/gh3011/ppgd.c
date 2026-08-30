@@ -215,15 +215,26 @@ static void pulse_shape(const double *d, int n, double fs, double *sut, double *
                  * every pressure estimate built on it was nonsense. */
                 int refl = i + (int)(fs * 0.25);
                 if (amp > 0 && refl < n) {
-                    sum_sut += (i - foot) / fs * 1000.0;
-                    sum_ai  += (d[refl] - d[foot]) / amp;
-                    nf++;
+                    double a = (d[refl] - d[foot]) / amp;
+                    double up = (i - foot) / fs * 1000.0;
+                    /* Take only beats whose numbers are possible, rather than averaging
+                     * everything and hoping. A single beat where the reflected point lands in a
+                     * drift trough gives an augmentation index of -5, and one of those in twenty
+                     * drags the mean negative - which then fails the gate and throws away an
+                     * otherwise sound measurement. Filtering per beat keeps the good ones. */
+                    if (a > -0.2 && a < 1.5 && up > 80.0 && up < 320.0) {
+                        sum_sut += up;
+                        sum_ai  += a;
+                        nf++;
+                    }
                 }
             }
         }
         last = i;
     }
-    if (nf) { *sut = sum_sut / nf; *ai = sum_ai / nf; }
+    /* Four beats minimum: an average over one or two is not a shape, it is an
+     * anecdote. */
+    if (nf >= 4) { *sut = sum_sut / nf; *ai = sum_ai / nf; }
 }
 
 static int cmp_d(const void *a, const void *b)
@@ -593,7 +604,12 @@ int main(int argc, char **argv)
              * were found in the wrong order, and any pressure computed from that is arithmetic
              * on noise. Publishing it anyway would be the vendor firmware's own failure dressed
              * up, which is the thing this whole exercise exists to replace. */
-            if (sut > 80 && sut < 250 && ai > 0.0 && ai < 1.5) {
+            /* 300 ms, not 250. The gate exists to catch a misdetected foot, not to enforce a
+             * textbook range: this wearer has Ehlers-Danlos, so more compliant arteries and a
+             * slower upstroke are expected rather than suspicious. A 258 ms upstroke with a
+             * sound augmentation index was being thrown away, which is the gate deciding
+             * physiology instead of detection. */
+            if (sut > 80 && sut < 300 && ai > 0.0 && ai < 1.5) {
                 sbp = 105.0 + 0.28 * med - 0.055 * sut + 11.0 * ai;
                 dbp = 66.0 + 0.19 * med - 0.030 * sut + 6.5 * ai;
             }
