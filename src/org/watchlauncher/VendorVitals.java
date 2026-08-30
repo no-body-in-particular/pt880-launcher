@@ -197,10 +197,25 @@ public final class VendorVitals {
         public boolean fromOwn;
 
         public String toString() {
-            String s = "SpO2 " + oxygen + "%, " + heartRate + " bpm, "
-                    + systolic + "/" + diastolic;
-            if (temperature > 0) s = s + ", wrist " + temperature + "C";
-            return s;
+            // Only what was actually measured. Printing "SpO2 0%, 65 bpm, 0/0" reads as a
+            // measurement of zero rather than as the absence of one, and the whole point of
+            // suppressing a saturation we cannot measure is lost if the log still shows a
+            // number for it.
+            StringBuilder b = new StringBuilder();
+            if (heartRate > 0) b.append(heartRate).append(" bpm");
+            if (systolic > 0 && diastolic > 0) {
+                if (b.length() > 0) b.append(", ");
+                b.append(systolic).append('/').append(diastolic);
+            }
+            if (oxygen > 0) {
+                if (b.length() > 0) b.append(", ");
+                b.append("SpO2 ").append(oxygen).append('%');
+            }
+            if (temperature > 0) {
+                if (b.length() > 0) b.append(", ");
+                b.append("wrist ").append(temperature).append('C');
+            }
+            return b.length() > 0 ? b.toString() : "nothing measured";
         }
     }
 
