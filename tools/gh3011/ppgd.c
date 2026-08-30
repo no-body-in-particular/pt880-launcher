@@ -160,6 +160,9 @@ static void detrend(double *out, int n, int w)
  * between two channels measured the same way, so the factor between "amplitude of the
  * fundamental" and "peak-to-peak swing" cancels and does not need to be right in absolute terms.
  */
+static int cmp_d(const void *a, const void *b)
+{ double x = *(const double*)a, y = *(const double*)b; return x < y ? -1 : (x > y); }
+
 static double bin_amp(const unsigned int *x, int n, double dc, double fs, double f)
 {
     double w, c, s0, s1 = 0, s2 = 0, p;
@@ -273,6 +276,7 @@ static double period_bpm(const double *seg, int n, double fs, double *conf)
  * finds the trough after the *previous* beat and reports an upstroke of most of a second, which
  * no artery does. */
 static int shape_beats = 0;    /* beats in the last ensemble, for the report */
+static double shape_raw_sut = 0, shape_raw_ai = 0;   /* before the gate, for the report */
 
 static void pulse_shape(const double *d, int n, double fs, double bpm, double *sut, double *ai)
 {
@@ -309,8 +313,28 @@ static void pulse_shape(const double *d, int n, double fs, double bpm, double *s
     wlen = pre + post + 1;
     if (wlen > MAXW || wlen < 8) return;
 
-    for (i = 0; i < n; i++) if (d[i] > mx) mx = d[i];
-    thr = mx * 0.3;
+    /* A threshold the beats can actually clear.
+     *
+     * This was a fraction of the largest value in the record, which hands the decision to
+     * whichever artefact happened to be biggest: one arm movement puts the maximum an order of
+     * magnitude above any pulse, the bar goes with it, and every real beat is rejected. That is
+     * how a run with a clean 53 bpm and ninety counts of amplitude reported beats=0.
+     *
+     * The median of the local maxima cannot be dragged that way. Half the peaks lie above it
+     * however extreme the outliers are, so a handful of artefacts move it barely at all, and
+     * taking 40% of it keeps the smaller genuine beats without admitting the baseline.
+     */
+    {
+        static double tops[MAXB];
+        int nt = 0;
+        for (i = 1; i < n - 1; i++) {
+            if (d[i] >= d[i-1] && d[i] > d[i+1] && d[i] > 0 && nt < MAXB) tops[nt++] = d[i];
+        }
+        if (nt < 4) return;
+        qsort(tops, nt, sizeof tops[0], cmp_d);
+        mx = tops[nt / 2];
+        thr = mx * 0.4;
+    }
 
     /* Peaks, with a refractory gap of half a period so one beat cannot be counted twice. */
     for (i = 1; i < n - 1; i++) {
@@ -375,6 +399,41 @@ static void pulse_shape(const double *d, int n, double fs, double bpm, double *s
             if (ds <= 0 || de <= 0) continue;
             c = num / sqrt(ds * de);
             if (c < cut) continue;                 /* not this pulse: motion, or a missed beat */
+            /* Line each beat up with the ensemble before adding it.
+             *
+             * Peaks are detected to the nearest sample, and a peak is a broad, flat thing: the
+             * detected index wanders a few samples either side of where the beat really sits.
+             * Averaging on those indices smears the upstroke, so the average reads a slower rise
+             * than any of the beats in it - 321 ms where the same beats measured singly gave 240
+             * to 260, which then failed a gate that was right about the beats and wrong about
+             * the average.
+             *
+             * So slide each beat against the ensemble and add it where it fits best. The search
+             * is a twentieth of a cycle either way, which covers detection jitter and cannot
+             * reach the neighbouring beat.
+             */
+            {
+                int shift, bestsh = 0;
+                double bestc = -2.0;
+                int room = T / 20 + 1;
+                for (shift = -room; shift <= room; shift++) {
+                    double nu = 0, ds = 0, de = 0, cc;
+                    int idx = pk[k] - pre + shift;
+                    if (idx < 0 || idx + wlen > n) continue;
+                    for (j = 0; j < wlen; j++) {
+                        double x = (d[idx + j] - lo) / rng - sm, y = ens[j] - em;
+                        nu += x * y;
+                        ds += x * x;
+                        de += y * y;
+                    }
+                    if (ds <= 0 || de <= 0) continue;
+                    cc = nu / sqrt(ds * de);
+                    if (cc > bestc) { bestc = cc; bestsh = shift; }
+                }
+                if (pk[k] - pre + bestsh >= 0 && pk[k] - pre + bestsh + wlen <= n) {
+                    seg = d + pk[k] - pre + bestsh;
+                }
+            }
             for (j = 0; j < wlen; j++) acc[j] += (seg[j] - lo) / rng;
             used++;
         }
@@ -404,6 +463,10 @@ static void pulse_shape(const double *d, int n, double fs, double bpm, double *s
 
         /* The gate catches a misdetected foot, not an unusual wearer. 300 ms because this one has
          * Ehlers-Danlos: more compliant arteries and a slower upstroke are what that predicts. */
+        /* Kept whether or not the gate lets them through, so a rejected shape can be told
+         * apart from one that was never found. sut=0 with beats=7 says nothing about which. */
+        shape_raw_sut = up;
+        shape_raw_ai = a;
         if (up > 80.0 && up < 300.0 && a > -0.2 && a < 1.5) {
             *sut = up;
             *ai = a;
@@ -411,8 +474,6 @@ static void pulse_shape(const double *d, int n, double fs, double bpm, double *s
     }
 }
 
-static int cmp_d(const void *a, const void *b)
-{ double x = *(const double*)a, y = *(const double*)b; return x < y ? -1 : (x > y); }
 
 int main(int argc, char **argv)
 {
@@ -1027,9 +1088,9 @@ int main(int argc, char **argv)
             }
 
             printf("hr=%.0f spread=%.0f hz=%.1f samples=%d windows=%d gain=%04x"
-                   " dc1=%.0f dc2=%.0f ac1=%.0f ac2=%.0f r=%.3f spo2=%.0f beats=%d sut=%.0f ai=%.2f"
+                   " dc1=%.0f dc2=%.0f ac1=%.0f ac2=%.0f r=%.3f spo2=%.0f beats=%d raw=%.0f/%.2f sut=%.0f ai=%.2f"
                    " sbp=%.0f dbp=%.0f used=%s\n",
-                   med, spread, fs, ns, nrates, gain, dc1, dc2, a1, a2, r, spo2, shape_beats, sut, ai, sbp, dbp,
+                   med, spread, fs, ns, nrates, gain, dc1, dc2, a1, a2, r, spo2, shape_beats, shape_raw_sut, shape_raw_ai, sut, ai, sbp, dbp,
                    src == ch2 ? "ch2" : "ch1");
         }
     }
