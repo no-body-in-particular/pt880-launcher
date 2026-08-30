@@ -32,6 +32,8 @@
 #include <stddef.h>
 #include <fcntl.h>
 #include <time.h>
+#include <sys/stat.h>
+#include <dirent.h>
 
 #define SOCKNAME "watchvitals"      /* abstract: android.net.LocalSocket, ABSTRACT namespace */
 #define HELPER   "/data/local/tmp/ppgd"
@@ -45,6 +47,9 @@
 
 /* Where the short pass leaves its samples for the long pass to explain. See measure(). */
 #define KEEP "/data/local/tmp/pass1.txt"
+
+/* Roughly a day of measurements, at seventy kilobytes each. */
+#define KEEP_WAVES 200
 
 
 #define TEMP_ENABLE "/sys/devices/virtual/input/input6/enable"
@@ -187,6 +192,47 @@ static double field_of(const char *line, const char *name)
     return atof(at + strlen(name));
 }
 
+
+/* Drop the oldest waveforms once there are too many.
+ *
+ * Names are the timestamp they were written at, so lexical order is chronological and the sweep
+ * needs no stat() on anything - it counts what is there and removes from the front.
+ */
+static void sweep_waves(void)
+{
+    DIR *d = opendir("/sdcard/waves");
+    struct dirent *e;
+    static char names[512][32];
+    int n = 0, i;
+
+    if (!d) return;
+    while ((e = readdir(d)) && n < 512) {
+        if (e->d_name[0] == '.') continue;
+        snprintf(names[n], sizeof names[0], "%s", e->d_name);
+        n++;
+    }
+    closedir(d);
+    if (n <= KEEP_WAVES) return;
+
+    /* Insertion sort: n is small and bounded, and qsort on a 2-D array of char needs a
+     * comparator that knows the stride. */
+    for (i = 1; i < n; i++) {
+        char tmp[32];
+        int j = i - 1;
+        snprintf(tmp, sizeof tmp, "%s", names[i]);
+        while (j >= 0 && strcmp(names[j], tmp) > 0) {
+            snprintf(names[j+1], sizeof names[0], "%s", names[j]);
+            j--;
+        }
+        snprintf(names[j+1], sizeof names[0], "%s", tmp);
+    }
+    for (i = 0; i < n - KEEP_WAVES; i++) {
+        char path[160];
+        snprintf(path, sizeof path, "/sdcard/waves/%s", names[i]);
+        unlink(path);
+    }
+}
+
 static int listenfd = -1;
 
 static void bye(int s)
@@ -203,6 +249,7 @@ static void measure(const char *mode, char *out, size_t outsz)
 {
     char cmd[256];
     char ratio_out[192];
+    char wave_path[128];
     size_t ratio_sz = sizeof ratio_out;
     FILE *p;
 
@@ -269,8 +316,27 @@ static void measure(const char *mode, char *out, size_t outsz)
         }
     }
 
-    snprintf(cmd, sizeof cmd, "%s %s \"\" %s 2>/dev/null", HELPER,
-             strcmp(mode, "spo2") == 0 ? SECS_SPO2 : SECS_HR,
+    /* Keep the waveform of every long pass, named by the clock, so a change to the pulse
+     * shape can be tried against recordings instead of against the next few beats of a
+     * live wrist.
+     *
+     * Bounded, because a waveform is seventy kilobytes and a measurement happens every few
+     * minutes: left alone this fills a card in a fortnight. The oldest are dropped once there
+     * are more than KEEP_WAVES, which is enough to hold a night and a morning. */
+    {
+        time_t nowt = time(NULL);
+        struct tm *tmv = localtime(&nowt);
+        char wp[128];
+        mkdir("/sdcard/waves", 0777);
+        sweep_waves();
+        if (tmv && strftime(wp, sizeof wp, "/sdcard/waves/%Y%m%d-%H%M%S.txt", tmv) > 0) {
+            snprintf(wave_path, sizeof wave_path, "%s", wp);
+        } else {
+            snprintf(wave_path, sizeof wave_path, "/sdcard/waves/%ld.txt", (long)nowt);
+        }
+    }
+    snprintf(cmd, sizeof cmd, "%s %s %s %s 2>/dev/null", HELPER,
+             strcmp(mode, "spo2") == 0 ? SECS_SPO2 : SECS_HR, wave_path,
              strcmp(mode, "spo2") == 0 ? "spo2" : "hr");
     p = popen(cmd, "r");
     if (p) {

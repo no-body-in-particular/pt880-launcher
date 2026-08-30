@@ -372,6 +372,142 @@ static int matched_amps(const double *strong, const double *w1, const double *w2
     return used;
 }
 
+/* One frequency's amplitude in an already-detrended signal, windowed as band_amp is.
+ *
+ * The unsigned-int version takes a raw channel and removes each window's mean, which handles a
+ * level but not a slope. Over forty seconds the baseline wanders far more than the pulse moves,
+ * and what leaks into the low end of the search is larger than anything the heart contributes -
+ * so a spectrum run on the raw channel put its peak at the bottom of the range on every one of
+ * twelve recordings. Detrending first is the fix, and detrending is already done for everything
+ * else, so this only needs to accept the result.
+ */
+static double band_amp_d(const double *x, int n, double fs, double f)
+{
+    int w = (int)(fs * 6.0), step, i, k, nw = 0;
+    double sum = 0.0, mean, wsum, c, s0, s1, s2, om, p;
+
+    if (w < 16 || f <= 0.0 || f >= fs / 2.0) return 0.0;
+    if (w > n) w = n;
+    step = w / 2;
+    if (step < 1) step = 1;
+    om = 2.0 * 3.14159265358979323846 * f / fs;
+    c = 2.0 * cos(om);
+
+    for (i = 0; i + w <= n; i += step) {
+        mean = 0.0;
+        for (k = i; k < i + w; k++) mean += x[k];
+        mean /= w;
+        s1 = 0.0;
+        s2 = 0.0;
+        for (k = i; k < i + w; k++) {
+            s0 = (x[k] - mean) + c * s1 - s2;
+            s2 = s1;
+            s1 = s0;
+        }
+        p = s1 * s1 + s2 * s2 - c * s1 * s2;
+        wsum = p > 0.0 ? 2.0 * sqrt(p) / w : 0.0;
+        sum += wsum;
+        nw++;
+    }
+    return nw ? sum / nw : 0.0;
+}
+
+/* The rate, from the spectrum of a detrended record with harmonics counted in. */
+static double spectral_bpm_d(const double *d, int n, double fs, double *conf)
+{
+    double best = 0, bestbpm = 0, second = 0, bpm;
+
+    *conf = 0;
+    if (n < 256 || fs <= 0) return 0;
+
+    for (bpm = 32.0; bpm <= 220.0; bpm += 0.5) {
+        double f = bpm / 60.0;
+        double p = band_amp_d(d, n, fs, f);
+        if (2.0 * f < fs / 2.0) p += 0.6 * band_amp_d(d, n, fs, 2.0 * f);
+        if (3.0 * f < fs / 2.0) p += 0.3 * band_amp_d(d, n, fs, 3.0 * f);
+        if (p > best) { second = best; best = p; bestbpm = bpm; }
+        else if (p > second) second = p;
+    }
+    if (bestbpm <= 34.0 || bestbpm >= 218.0 || best <= 0) return 0;
+
+    /* Half of what won scores well by borrowing its harmonics, so prefer the half only when it
+     * genuinely competes. */
+    if (bestbpm / 2.0 >= 36.0) {
+        double h = bestbpm / 2.0, f = h / 60.0;
+        double p = band_amp_d(d, n, fs, f);
+        if (2.0 * f < fs / 2.0) p += 0.6 * band_amp_d(d, n, fs, 2.0 * f);
+        if (3.0 * f < fs / 2.0) p += 0.3 * band_amp_d(d, n, fs, 3.0 * f);
+        if (p > best * 0.85) bestbpm = h;
+    }
+
+    *conf = second > 0 ? best / second : 10.0;
+    return bestbpm;
+}
+
+/* The rate, from the spectrum of the whole record with harmonics counted in.
+ *
+ * The windowed autocorrelation this sits beside estimates a rate in each window and refuses
+ * unless the windows agree. That is safe and it is too conservative: motion makes windows
+ * disagree, so a wrist that moved is told nothing at all rather than told approximately. A watch
+ * meant to be worn running cannot decline every time the arm swings.
+ *
+ * A spectrum is steadier because it uses the whole record at once rather than asking several
+ * short pieces to concur. Harmonics are what make it discriminating: a pulse is not a sine wave,
+ * so it puts energy at its rate and again at twice and three times it, while a movement artefact
+ * generally does not line up that way. Adding a candidate to its own harmonics therefore lifts
+ * real rates above artefacts that happen to be larger at any single frequency.
+ *
+ * Half-rate errors are the classic failure of harmonic summing - f/2 scores well because its
+ * harmonics land on f - so a candidate only wins against its own double if it beats it clearly.
+ */
+static double spectral_bpm(const unsigned int *x, int n, double fs, double *conf)
+{
+    double best = 0, bestbpm = 0, second = 0, bpm, dc = 0;
+    int i;
+
+    *conf = 0;
+    if (n < 256 || fs <= 0) return 0;
+    for (i = 0; i < n; i++) dc += x[i];
+    dc /= n;
+
+    /* The search runs wider than the answer is allowed to be.
+     *
+     * A peak search returns its boundary whenever the truth lies outside, or whenever there is no
+     * peak at all - the edge wins by default because nothing beyond it competes. That is how the
+     * autocorrelation once reported 146 with every window agreeing, and the same trap caught this
+     * one: replayed over twelve recordings it answered 40 on six of them, the bottom of its
+     * range, on a wearer whose rate was 50 to 53 throughout.
+     *
+     * So it searches 32 to 220 and refuses anything that lands within two of either end. A rate
+     * outside 34 to 218 is not one this sensor should be believing anyway.
+     */
+    for (bpm = 32.0; bpm <= 220.0; bpm += 0.5) {
+        double f = bpm / 60.0;
+        double p = band_amp(x, n, fs, f);
+        if (2.0 * f < fs / 2.0) p += 0.6 * band_amp(x, n, fs, 2.0 * f);
+        if (3.0 * f < fs / 2.0) p += 0.3 * band_amp(x, n, fs, 3.0 * f);
+        if (p > best) { second = best; best = p; bestbpm = bpm; }
+        else if (p > second) second = p;
+    }
+    if (bestbpm <= 0 || best <= 0) return 0;
+    if (bestbpm <= 34.0 || bestbpm >= 218.0) return 0;      /* the edge, not an answer */
+
+    /* Guard the octave. If half of what won scores nearly as well, the true rate is the half:
+     * the harmonics of f/2 include f, so f can only win by borrowing them. */
+    if (bestbpm / 2.0 >= 36.0) {
+        double h = bestbpm / 2.0, f = h / 60.0;
+        double p = band_amp(x, n, fs, f);
+        if (2.0 * f < fs / 2.0) p += 0.6 * band_amp(x, n, fs, 2.0 * f);
+        if (3.0 * f < fs / 2.0) p += 0.3 * band_amp(x, n, fs, 3.0 * f);
+        if (p > best * 0.85) bestbpm = h;
+    }
+
+    /* How far the winner stands above the rest of the band, which is what says whether to
+     * believe it. */
+    *conf = second > 0 ? best / second : 10.0;
+    return bestbpm;
+}
+
 static double best_amp(const unsigned int *x, int n, double fs)
 {
     double best = 0.0, bpm, a;
@@ -599,12 +735,31 @@ static void pulse_shape(const double *d, int n, double fs, double bpm, double *s
 
     /* Measure once, on the average. The peak sits at pre by construction. */
     {
-        int foot = -1, refl;
-        double amp, a, up;
-        for (k = pre - 2; k > 0; k--) {
-            if (ens[k] <= ens[k-1] && ens[k] <= ens[k+1]) { foot = k; break; }
+        int foot = -1, refl, lo;
+        double amp, a, up, best = -1e18;
+
+        /* The foot is where the trace turns upward hardest, not the first dip going backwards.
+         *
+         * Scanning back for the first local minimum works on a clean beat and fails on a flat
+         * one: where the ensemble runs level for a while before the upstroke there is no local
+         * minimum to find, the scan carries on into the previous beat, and the upstroke comes out
+         * a whole beat too long. That is the bimodal split in the log - the good measurements
+         * gave 130 to 271 ms and the failures 311, 321, 351, 401, 492, 502, which are not slower
+         * upstrokes but upstrokes measured from the wrong place.
+         *
+         * Maximum second difference is the textbook definition and has no such failure: the
+         * sharpest upward turn is a real feature of the waveform whether or not the approach to
+         * it is flat. The search is limited to a third of a cycle before the peak, which is
+         * longer than any upstroke a heart produces and shorter than the distance to the
+         * previous beat.
+         */
+        lo = pre - (int)(T * 0.34);
+        if (lo < 1) lo = 1;
+        for (k = pre - 2; k > lo; k--) {
+            double d2 = ens[k-1] - 2.0 * ens[k] + ens[k+1];
+            if (d2 > best) { best = d2; foot = k; }
         }
-        if (foot < 0) foot = 0;
+        if (foot < 0) foot = lo;
         amp = ens[pre] - ens[foot];
         if (amp <= 0) return;
 
@@ -649,6 +804,101 @@ int main(int argc, char **argv)
     const char *mode = argc > 3 ? argv[3] : "";
     int want_ratio = (strcmp(mode, "ratio") == 0);
     int want_redo  = (strcmp(mode, "redo") == 0);
+    /*
+     * Re-measure the pulse shape of a waveform kept earlier: ppgd 0 <file> shape <bpm>
+     *
+     * The point is to be able to answer "does this change help" against recordings rather than
+     * against the next few beats of a live wrist. A detector that looks better on one fresh
+     * measurement has shown nothing; the same detector run over twenty kept waveforms, against
+     * what the old one made of them, has.
+     */
+    int want_shape = (strcmp(mode, "shape") == 0);
+    /* Run both rate estimators over a kept waveform and print what each made of it, so a change
+     * can be judged against recordings rather than against the next few beats of a live wrist:
+     * ppgd 0 <file> rate */
+    int want_rate = (strcmp(mode, "rate") == 0);
+
+    if (want_rate) {
+        FILE *rf = argc > 2 ? fopen(argv[2], "r") : NULL;
+        double rfs = 0, conf = 0, sp = 0, ac = 0;
+        static double dw[MAXS];
+        unsigned int v1, v2;
+
+        if (!rf) { printf("no such waveform\n"); return 1; }
+        if (fscanf(rf, "%lf", &rfs) != 1) { fclose(rf); printf("bad waveform\n"); return 1; }
+        ns = 0;
+        while (ns < MAXS && fscanf(rf, "%u %u", &v1, &v2) == 2) {
+            ch1[ns] = v1; ch2[ns] = v2; ns++;
+        }
+        fclose(rf);
+        if (ns < 400 || rfs <= 0) { printf("waveform too short: %d\n", ns); return 1; }
+
+        src = pick_channel(ns);
+        detrend(dw, ns, (int)(rfs * 2.0));
+        ac = period_bpm(dw, ns, rfs, &conf);
+        sp = spectral_bpm_d(dw, ns, rfs, &conf);
+        /* The band itself, so a zero answer can be read rather than guessed at. */
+        {
+            double b;
+            printf("spectrum:");
+            for (b = 36.0; b <= 120.0; b += 6.0)
+                printf(" %.0f=%.1f", b, band_amp_d(dw, ns, rfs, b / 60.0));
+            printf("\n");
+        }
+        printf("autocorrelation=%.0f  spectral=%.0f  margin=%.2f  samples=%d hz=%.1f\n",
+               ac, sp, conf, ns, rfs);
+        return 0;
+    }
+
+    if (want_shape) {
+        FILE *sf = argc > 2 ? fopen(argv[2], "r") : NULL;
+        double sfs = 0, sbpm = argc > 4 ? atof(argv[4]) : 0, sut = 0, ai = 0;
+        static double dw[MAXS];
+        unsigned int v1, v2;
+
+        if (!sf) { printf("no such waveform\n"); return 1; }
+        if (fscanf(sf, "%lf", &sfs) != 1) { fclose(sf); printf("bad waveform\n"); return 1; }
+        ns = 0;
+        while (ns < MAXS && fscanf(sf, "%u %u", &v1, &v2) == 2) {
+            ch1[ns] = v1;
+            ch2[ns] = v2;
+            ns++;
+        }
+        fclose(sf);
+        if (ns < 400 || sfs <= 0) { printf("waveform too short: %d samples\n", ns); return 1; }
+
+        /* Whichever channel carries more pulse, as the live path chooses it. */
+        /* Drop the first two seconds, as the live path drops its settling period. Without that
+         * the gain transient dominates everything and the replay finds no rate at all where the
+         * measurement it came from found one - which is a difference between the replay and the
+         * thing being replayed, and makes the whole exercise worthless. */
+        {
+            int skip2 = (int)(sfs * 2.0);
+            if (skip2 > 0 && ns > skip2 + 400) {
+                int q;
+                for (q = 0; q + skip2 < ns; q++) { ch1[q] = ch1[q+skip2]; ch2[q] = ch2[q+skip2]; }
+                ns -= skip2;
+            }
+        }
+        src = pick_channel(ns);
+        detrend(dw, ns, (int)(sfs * 2.0));
+        if (sbpm < 30.0 || sbpm > 210.0) {
+            double conf = 0;
+            /* The spectrum rather than the autocorrelation: it answers on recordings the
+             * autocorrelation refuses, which is most of the interesting ones. */
+            sbpm = spectral_bpm_d(dw, ns, sfs, &conf);
+        }
+        pulse_shape(dw, ns, sfs, sbpm, &sut, &ai);
+        printf("bpm=%.0f beats=%d raw=%.0f/%.2f sut=%.0f ai=%.2f", sbpm, shape_beats,
+               shape_raw_sut, shape_raw_ai, sut, ai);
+        if (sut > 0) {
+            printf(" sbp=%.0f dbp=%.0f",
+                   100.0 + 0.28 * sbpm - 0.055 * sut + 11.0 * ai,
+                   60.0 + 0.19 * sbpm - 0.030 * sut + 6.5 * ai);
+        }
+        printf(" samples=%d hz=%.1f\n", ns, sfs);
+        return 0;
+    }
     int want_spo2  = (strcmp(mode, "spo2") == 0 || want_ratio || want_redo);
     /*
      * The ratio pass: short, balanced, and after nothing but R.
@@ -1063,9 +1313,23 @@ int main(int argc, char **argv)
     }
 
 
-    if (csvpath) {
+    /* Keep the waveform, both channels and the rate it was sampled at.
+     *
+     * This used to write channel 1 alone with no header, which is enough to look at and not
+     * enough to re-measure: every later question about the pulse shape - was the foot found in
+     * the right place, does a change to the detector help or hurt - needs the same input the
+     * measurement had. Without that, a change can only be judged by running it on the wearer
+     * again and hoping the next few beats resemble the last few, which is not a test.
+     *
+     * Same layout as the ratio pass keeps, so one replay mode reads either.
+     */
+    if (csvpath && csvpath[0]) {
         FILE *f = fopen(csvpath, "w");
-        if (f) { for (i = 0; i < ns; i++) fprintf(f, "%u\n", ch1[i]); fclose(f); }
+        if (f) {
+            fprintf(f, "%.4f\n", fs);
+            for (i = 0; i < ns; i++) fprintf(f, "%u %u\n", ch1[i], ch2[i]);
+            fclose(f);
+        }
     }
 
     /* A two-second baseline, not one. Subtracting a one-second moving average is a high-pass
