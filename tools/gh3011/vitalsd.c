@@ -36,6 +36,7 @@
 #define HELPER   "/data/local/tmp/ppgd"
 #define SECS_HR   "40"   /* green is 25 Hz: it needs the time to fill enough windows */
 #define SECS_SPO2 "45"   /* red is 100 Hz - 2500 samples in 25 s is plenty */
+#define SECS_RATIO "8"   /* the balanced pass, as short as the vendor's own */
 
 
 #define TEMP_ENABLE "/sys/devices/virtual/input/input6/enable"
@@ -102,7 +103,11 @@ static void bye(int s)
 static void measure(const char *mode, char *out, size_t outsz)
 {
     char cmd[256];
+    char ratio_out[192];
+    size_t ratio_sz = sizeof ratio_out;
     FILE *p;
+
+    ratio_out[0] = 0;
 
     int t;
 
@@ -126,6 +131,45 @@ static void measure(const char *mode, char *out, size_t outsz)
      * is exactly what happened the first time. The vendor binary is disabled by virtue of being
      * replaced; there is nothing left to stop. */
 
+    /* Two passes, the way the vendor firmware does it: a short one for the saturation and a
+     * long one for the rate and the pressure.
+     *
+     * They want opposite configurations, which is why one pass cannot serve both. The ratio
+     * needs channel 1 carrying signal, and that means zeroing 0x0180 to lift it from two counts
+     * of pulse to thirty - but the same change drops channel 2 from 190-260 counts to 34-95, and
+     * channel 2 is where the pulse shape behind the pressure comes from. Six measurements in the
+     * balanced state found no usable beats at all.
+     *
+     * So the short pass runs balanced and reports only R, and the long pass runs as before. The
+     * ratio costs eight seconds on top of the forty, which is what the vendor spends too.
+     */
+    if (strcmp(mode, "spo2") == 0) {
+        char rline[256];
+        rline[0] = 0;
+        snprintf(cmd, sizeof cmd, "%s %s \"\" ratio 2>/dev/null", HELPER, SECS_RATIO);
+        p = popen(cmd, "r");
+        if (p) {
+            char line[512];
+            while (fgets(line, sizeof line, p)) {
+                if (strstr(line, "r=")) {
+                    strncpy(rline, line, sizeof rline - 1);
+                    rline[sizeof rline - 1] = 0;
+                }
+            }
+            pclose(p);
+        }
+        /* Carried on the reply so the ratio can be watched while it is being made to behave.
+         * No saturation is derived from it: across four consecutive resting passes it came back
+         * 1.40, 0.84, 0.84 and 1.13, and the frequency it was measured at wandered between 41
+         * and 59 bpm, which is eight seconds being too short to lock a rate rather than anything
+         * about the wearer. See docs/vitals.md. */
+        if (rline[0]) {
+            size_t at = strlen(rline);
+            while (at > 0 && (rline[at-1] == 0x0a || rline[at-1] == 0x0d)) rline[--at] = 0;
+            snprintf(ratio_out, ratio_sz, " pass1[%s]", rline);
+        }
+    }
+
     snprintf(cmd, sizeof cmd, "%s %s \"\" %s 2>/dev/null", HELPER,
              strcmp(mode, "spo2") == 0 ? SECS_SPO2 : SECS_HR,
              strcmp(mode, "spo2") == 0 ? "spo2" : "hr");
@@ -143,6 +187,13 @@ static void measure(const char *mode, char *out, size_t outsz)
     }
 
     if (!out[0]) snprintf(out, outsz, "hr=0 reason=helper_gave_nothing\n");
+
+    /* The short pass rides along on the same line. */
+    if (ratio_out[0]) {
+        size_t at = strlen(out);
+        while (at > 0 && (out[at-1] == 0x0a || out[at-1] == 0x0d)) out[--at] = 0;
+        snprintf(out + at, outsz - at, "%s\n", ratio_out);
+    }
 
     /* Carry the temperature on the same line. It is a wrist and not a body - a few degrees above
      * the room and well below its owner, which is how the vendor once filed 21 C as a body

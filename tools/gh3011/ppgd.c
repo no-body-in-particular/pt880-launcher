@@ -428,7 +428,28 @@ int main(int argc, char **argv)
     int settled_at = 0;             /* first sample after the gain stopped moving */
     struct timeval tprev;
     const char *csvpath = argc > 2 ? argv[2] : NULL;
-    int want_spo2 = (argc > 3 && argv[3][0] == 's');
+    int want_spo2 = (argc > 3 && (argv[3][0] == 's' || argv[3][0] == 'r'));
+    /*
+     * The ratio pass: short, balanced, and after nothing but R.
+     *
+     * The vendor firmware measures in two passes - about eight seconds for the saturation, then
+     * thirty or forty for the rate and the pressure - and the reason is visible in our own
+     * numbers. The two want opposite configurations. R needs both channels carrying signal, which
+     * means zeroing 0x0180 to bring channel 1 up from two counts of pulse to thirty; the pressure
+     * needs channel 2 at full strength, and that same change drops it from 190-260 counts to
+     * 34-95, where the pulse shape cannot be found at all.
+     *
+     * So do what the vendor does. This pass balances the channels and reports the ratio, and the
+     * long pass that follows runs unbalanced for the rate and the shape. Neither has to be
+     * compromised for the other.
+     *
+     * Eight seconds is too short to settle a heart rate by window agreement, and this does not
+     * try: the amplitude is taken at the strongest cardiac frequency found on the better channel
+     * and then measured at that same frequency on both. One frequency for both channels is the
+     * point - taking each channel's own best would let them lock onto different things and the
+     * ratio would compare two unrelated numbers.
+     */
+    int want_ratio = (argc > 3 && argv[3][0] == 'r');
 
     setvbuf(stdout, NULL, _IONBF, 0);
     signal(SIGTERM, bail); signal(SIGINT, bail); signal(SIGSEGV, bail);
@@ -456,7 +477,14 @@ int main(int argc, char **argv)
             else              rd16(rg, &v);
         }
 
-        /* On 0x0180, and why it is not applied here.
+        /* Balance the channels, for the ratio pass only. See the long note below on why this is
+         * wrong for the pass that measures a pressure. */
+        if (want_ratio) {
+            wr16(0x0180, 0x0000);
+            wr8(0xdddd, 0xc1);
+        }
+
+        /* On 0x0180, and why it is not applied to the long pass.
          *
          * The captured sequence leaves 0x0180 at 0x004d, and under that the two channels receive
          * wildly different amounts of light: 4,200 counts against 53,000, a factor of twelve.
@@ -672,7 +700,7 @@ int main(int argc, char **argv)
     elapsed = (t1.tv_sec-t0.tv_sec) + (t1.tv_usec-t0.tv_usec)/1e6;
     stop_chip();
 
-    if (ns < 600 || elapsed <= 0) {
+    if ((ns < 600 && !want_ratio) || ns < 200 || elapsed <= 0) {
         printf("hr=0 reason=too_few_samples samples=%d rounds=%d timeouts=%d\n",
                ns, rounds, timeouts);
         return 1;
@@ -685,6 +713,40 @@ int main(int argc, char **argv)
     } else {
         fs = ns / elapsed;
     }
+
+    /* The ratio pass answers here and goes no further: no window agreement, no pulse shape,
+     * nothing that needs a settled rate. */
+    if (want_ratio) {
+        double d1 = 0, d2 = 0, l1, l2, a1 = 0, a2 = 0, r = 0, bpm, best = 0, bestf = 0;
+        int k, skip = settled_at + (int) fs;
+        int n = ns - skip;
+
+        if (n < 200 || fs <= 0) {
+            printf("r=0 reason=too_short samples=%d\n", ns);
+            return 1;
+        }
+        for (k = skip; k < ns; k++) { d1 += ch1[k]; d2 += ch2[k]; }
+        d1 /= n;
+        d2 /= n;
+        l1 = d1 - DARK_CODE;
+        l2 = d2 - DARK_CODE;
+
+        /* One frequency, chosen on whichever channel carries more, then applied to both. */
+        for (bpm = 40.0; bpm <= 180.0; bpm += 1.0) {
+            double q = band_amp(l2 > l1 ? ch2 + skip : ch1 + skip, n, fs, bpm / 60.0);
+            if (q > best) { best = q; bestf = bpm; }
+        }
+        if (bestf > 0) {
+            a1 = band_amp(ch1 + skip, n, fs, bestf / 60.0);
+            a2 = band_amp(ch2 + skip, n, fs, bestf / 60.0);
+        }
+        if (l1 > 100.0 && l2 > 100.0 && a2 > 0) r = (a1 / l1) / (a2 / l2);
+
+        printf("r=%.3f at=%.0f dc1=%.0f dc2=%.0f ac1=%.1f ac2=%.1f samples=%d hz=%.1f\n",
+               r, bestf, d1, d2, a1, a2, ns, fs);
+        return 0;
+    }
+
 
     if (csvpath) {
         FILE *f = fopen(csvpath, "w");
