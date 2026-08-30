@@ -284,6 +284,11 @@ public class TrackerService extends Service {
      */
     private static final long MEASURE_STUCK_MS = 5 * 60 * 1000;
 
+    /** How often the red pass runs, in cycles. Green carries the rate on every one of them. */
+    private static final int RED_EVERY = 4;
+
+    private int redCycle = 0;
+
     private void measureVitalsAsync(boolean asked) {
         if (measuring) {
             // Unless it has been running so long that it is not running at all.
@@ -354,15 +359,26 @@ public class TrackerService extends Service {
                     }
 
                     VendorVitals.Reading r = OwnVitals.measure(TrackerService.this, false);
-                    if (r == null || r.systolic <= 0) {
-                        // Red second, for what green cannot give: the pulse shape the pressure
-                        // comes from, and the ratio a saturation would come from. Skipped
-                        // entirely when green already produced a pressure, so a moving wrist
-                        // costs one pass rather than two.
+
+                    // Red only every fourth cycle, and only for what green cannot give.
+                    //
+                    // The condition here was "run red if green produced no pressure", which
+                    // reads sensibly and is useless: green samples at 25 Hz and can never
+                    // produce a pressure, so red ran every cycle exactly as before. Putting
+                    // green first changed which rate was published and nothing at all about how
+                    // long the red LED was lit.
+                    //
+                    // It is the expensive pass by a distance - a red request is two passes,
+                    // twenty-five seconds balanced for the ratio and forty-five for the shape,
+                    // against green's thirty - so running it a quarter as often is most of the
+                    // sensor time back. A pressure every fortieth minute is enough for something
+                    // that moves as slowly as blood pressure does, and the rate, which is what
+                    // this watch is asked for, still comes every cycle from green.
+                    boolean wantShape = (redCycle++ % RED_EVERY) == 0;
+                    if (wantShape || r == null) {
                         VendorVitals.Reading red = OwnVitals.measure(TrackerService.this, true);
-                        if (red != null && (r == null || red.systolic > 0)) {
-                            // Keep green's rate when it found one: it is the better measurement
-                            // of the two and red only ran for the shape.
+                        if (red != null) {
+                            // Green's rate wins where both found one: red ran for the shape.
                             if (r != null && r.heartRate > 0) red.heartRate = r.heartRate;
                             r = red;
                         }
