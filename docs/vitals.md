@@ -527,3 +527,27 @@ is a hundred three-axis samples. Nothing else about it needs discovering.
 What this capture does not contain is a saturation. The vendor never entered SpO2 mode during it -
 `spo2 0` on every line - so which `MeasureType` selects it, and what `hbd_ctrl` does with the two
 channels once there, is still unseen. The capture is kept as docs/data/vendor-tap-2026-08-30.txt.
+
+## Asking the vendor daemon for a saturation, and being refused
+
+The obvious way to request one is the mode ioctl. `setmode.c` says the daemon reads the mode with
+`_IOWR('G',8,4)` and configures the chip to match, and mode 5 is red and infrared - so setting it
+while the vendor daemon runs should ask for a saturation. It does not:
+
+    set mode 5 -> rc=0
+    driver reports mode 4
+
+The write succeeds and the mode is 4 a moment later. That is the daemon overriding it, and the
+capture already showed it doing so four hundred and twenty-two times in one session - `set mode`
+is something it issues, not something it obeys. A client cannot choose the measurement this way.
+
+Which leaves the binder interface. `com.ic.work.SensorDataService` takes a `MeasureType`, and that
+is what selects a saturation; `VendorVitals` in the launcher already speaks it, which is how the
+original system got one. So a capture of the vendor computing SpO2 needs the vendor app asking for
+it, not us poking the driver underneath.
+
+Worth remembering alongside this: the saturation is the slow half of a vendor measurement. This
+file records elsewhere that it climbs rather than arrives, that the driver's copy is often still
+converging when a reading is taken, and that raising the window helps it. A capture long enough
+to see a rate is not necessarily long enough to see a saturation, and every capture so far has
+shown `spo2 0` beside a perfectly good `hb_result`.
