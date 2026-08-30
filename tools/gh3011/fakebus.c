@@ -38,6 +38,7 @@
 #define READ_CB      OFF(0x3e994)   /* the register-read callback it goes through */
 #define BUS_HANDLE   OFF(0x3d53c)   /* first argument handed to that callback */
 #define FRAME_WIDTH  OFF(0x3ec4e)   /* samples per frame; divided by, so zero is fatal */
+#define CFG_PTR      OFF(0x3f688)   /* -> a struct whose byte 8 counts 0x18-byte config entries */
 
 typedef void (*spo2_fn)(void *, int, unsigned, unsigned char *, unsigned char *,
                         unsigned char *, unsigned char *, unsigned char *,
@@ -239,6 +240,67 @@ int main(int argc, char **argv)
             printf("frame width was %u", *fw);
             *fw = 2;
             printf(", now %u\n", *fw);
+        }
+        {
+            /* Give their allocator a heap, which is the thing gating everything downstream.
+             *
+             * FUN_000267e0 is a buddy allocator and its first line returns null when the heap
+             * control pointer is unset - which is why the config pointer could not be allocated,
+             * and why every path after it found null. Reconstructing that control block by hand
+             * would be guesswork, but the initialiser is right there and takes a buffer:
+             *
+             *     int FUN_00026770(void *pool, int size)
+             *
+             * It stores the pointer, threads the free lists through the front of the pool, and
+             * returns 0. Nothing hidden, nothing about the sensor - just memory. So hand it some
+             * of ours and the rest of the algorithm can allocate as it expects to.
+             */
+            typedef int (*heap_init_fn)(void *, int);
+            heap_init_fn heap_init = (heap_init_fn)(void *)((base + OFF(0x26770)) | 1);
+            static unsigned char pool[64 * 1024];
+            int rc = heap_init(pool, (int) sizeof pool);
+            printf("heap init(%u bytes) returned %d%s\n",
+                   (unsigned)(sizeof pool), rc, rc == 0 ? "" : "  (refused)");
+        }
+
+        {
+            /* The config table the dispatcher walks.
+             *
+             * FUN_00032948 does *(byte *)(*ptr + 8) and multiplies it by 0x18, which is the size
+             * of the entries FUN_00023500 iterates - so the byte at offset 8 is how many there
+             * are, and the pointer itself is null because start-up allocates it. One entry is
+             * enough to get the loop running once; the rest of the struct can stay zero until
+             * something reads it and says otherwise.
+             */
+            void **cfg = (void **)(base + CFG_PTR);
+            static unsigned char cfg_obj[256];
+            make_writable(cfg);
+            printf("config pointer was %p", *cfg);
+            if (!*cfg) {
+                cfg_obj[8] = 1;
+                *cfg = cfg_obj;
+                printf(", now %p with one entry", *cfg);
+            }
+            printf("\n");
+        }
+        {
+            /* Somewhere for the answer to be written.
+             *
+             * The dispatcher ends by memcpying 0x1c bytes out of **(0x3ceb0), which is the result
+             * buffer start-up allocates. Null, so the copy reads from address zero. The outer
+             * pointer is fine - it is a real .data slot - and only the inner one is missing, so
+             * only that needs filling.
+             */
+            void **outer = *(void ***)(base + OFF(0x3ceb0));
+            static unsigned char resbuf[64];
+            if (outer) {
+                make_writable(outer);
+                printf("result buffer was %p", *outer);
+                if (!*outer) { *outer = resbuf; printf(", now %p", *outer); }
+                printf("\n");
+            } else {
+                printf("result slot itself is null\n");
+            }
         }
         printf("mode byte was %u", *mode_byte);
         *mode_byte = 1;
