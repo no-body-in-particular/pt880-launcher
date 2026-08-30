@@ -66,6 +66,7 @@ final class OwnVitals {
         }
 
         VendorVitals.Reading r = new VendorVitals.Reading();
+        r.fromOwn = true;
         r.heartRate = bpm;
 
         int ox = field(line, "spo2=");

@@ -272,59 +272,133 @@ static double period_bpm(const double *seg, int n, double fs, double *conf)
  * The foot is looked for only in the 350 ms before a peak: searching the whole preceding interval
  * finds the trough after the *previous* beat and reports an upstroke of most of a second, which
  * no artery does. */
-static void pulse_shape(const double *d, int n, double fs, double *sut, double *ai)
+static int shape_beats = 0;    /* beats in the last ensemble, for the report */
+
+static void pulse_shape(const double *d, int n, double fs, double bpm, double *sut, double *ai)
 {
-    int i, last = -1, nf = 0;
-    double mx = 0, thr, sum_sut = 0, sum_ai = 0;
+    /* Shape measured on an ensemble-averaged beat rather than on each beat separately.
+     *
+     * A single wrist beat carries too little signal to measure a reflected wave on. Most of the
+     * effort here used to go into discarding bad ones - a beat whose reflected point landed in a
+     * drift trough scored an augmentation index of -5 - and even after filtering, a third of
+     * measurements had too few survivors left to report anything at all.
+     *
+     * Averaging inverts that. Beats are aligned on their peaks and scaled to a common height, so
+     * one strong beat cannot outvote three ordinary ones, and then averaged: noise that is not
+     * time-locked to the pulse falls away while the pulse itself survives. The foot, the upstroke
+     * and the reflected wave are measured once, on that.
+     *
+     * Beats are still dropped, but on an honest criterion - how well each matches the ensemble -
+     * rather than on whether the number it produced was one we wanted to see.
+     */
+    enum { MAXB = 256, MAXW = 512 };
+    static int pk[MAXB];
+    static double ens[MAXW], acc[MAXW];
+    int npk = 0, i, j, k, T, pre, post, wlen, used;
+    double mx = 0, thr;
 
     *sut = 0;
     *ai = 0;
+    shape_beats = 0;
+    if (bpm < 30.0 || bpm > 210.0 || n < 64) return;
+
+    T = (int)(fs * 60.0 / bpm);
+    if (T < 8) return;
+    pre  = (int)(T * 0.45);
+    post = (int)(T * 0.75);
+    wlen = pre + post + 1;
+    if (wlen > MAXW || wlen < 8) return;
+
     for (i = 0; i < n; i++) if (d[i] > mx) mx = d[i];
     thr = mx * 0.3;
 
+    /* Peaks, with a refractory gap of half a period so one beat cannot be counted twice. */
     for (i = 1; i < n - 1; i++) {
         if (!(d[i] >= d[i-1] && d[i] > d[i+1] && d[i] > thr)) continue;
-        if (last >= 0 && i - last < (int)(fs * 0.4)) continue;
-        if (last >= 0) {
-            /* The foot is the last local minimum before the peak, not the lowest point in some
-             * window before it. Taking the window minimum finds wherever the trace happens to
-             * bottom out - often the very start of the search - and reported upstrokes of 341 ms
-             * where a real one is 80 to 250. */
-            int foot = -1, k, lo = i - (int)(fs * 0.5);
-            if (lo < last) lo = last;
-            for (k = i - 2; k > lo; k--) {
-                if (d[k] <= d[k-1] && d[k] <= d[k+1]) { foot = k; break; }
-            }
-            if (foot < 0) foot = lo;
-            {
-                double amp = d[i] - d[foot];
-                /* The augmentation index compares the reflected wave with the systolic peak, and
-                 * the reflected wave arrives a couple of hundred milliseconds *after* the peak.
-                 * An earlier version sampled the midpoint between beats, which lands in the
-                 * trough and produced negative values - impossible on a real beat, and the reason
-                 * every pressure estimate built on it was nonsense. */
-                int refl = i + (int)(fs * 0.25);
-                if (amp > 0 && refl < n) {
-                    double a = (d[refl] - d[foot]) / amp;
-                    double up = (i - foot) / fs * 1000.0;
-                    /* Take only beats whose numbers are possible, rather than averaging
-                     * everything and hoping. A single beat where the reflected point lands in a
-                     * drift trough gives an augmentation index of -5, and one of those in twenty
-                     * drags the mean negative - which then fails the gate and throws away an
-                     * otherwise sound measurement. Filtering per beat keeps the good ones. */
-                    if (a > -0.2 && a < 1.5 && up > 80.0 && up < 320.0) {
-                        sum_sut += up;
-                        sum_ai  += a;
-                        nf++;
-                    }
-                }
-            }
-        }
-        last = i;
+        if (npk > 0 && i - pk[npk-1] < T / 2) continue;
+        if (i - pre < 0 || i + post >= n) continue;
+        if (npk < MAXB) pk[npk++] = i;
     }
-    /* Four beats minimum: an average over one or two is not a shape, it is an
-     * anecdote. */
-    if (nf >= 4) { *sut = sum_sut / nf; *ai = sum_ai / nf; }
+    if (npk < 4) return;
+
+    /* First pass: every beat, each normalised to its own range. */
+    for (j = 0; j < wlen; j++) acc[j] = 0.0;
+    used = 0;
+    for (k = 0; k < npk; k++) {
+        const double *seg = d + pk[k] - pre;
+        double lo = seg[0], hi = seg[0], rng;
+        for (j = 1; j < wlen; j++) {
+            if (seg[j] < lo) lo = seg[j];
+            if (seg[j] > hi) hi = seg[j];
+        }
+        rng = hi - lo;
+        if (rng <= 0) continue;
+        for (j = 0; j < wlen; j++) acc[j] += (seg[j] - lo) / rng;
+        used++;
+    }
+    if (used < 4) return;
+    for (j = 0; j < wlen; j++) ens[j] = acc[j] / used;
+
+    /* Second pass: keep only the beats that look like the ensemble, and rebuild it from those.
+     * Correlation, not amplitude - a beat can be small and still be the right shape. */
+    for (j = 0; j < wlen; j++) acc[j] = 0.0;
+    used = 0;
+    {
+        double em = 0;
+        for (j = 0; j < wlen; j++) em += ens[j];
+        em /= wlen;
+        for (k = 0; k < npk; k++) {
+            const double *seg = d + pk[k] - pre;
+            double lo = seg[0], hi = seg[0], rng, sm = 0, num = 0, ds = 0, de = 0, c;
+            for (j = 1; j < wlen; j++) {
+                if (seg[j] < lo) lo = seg[j];
+                if (seg[j] > hi) hi = seg[j];
+            }
+            rng = hi - lo;
+            if (rng <= 0) continue;
+            for (j = 0; j < wlen; j++) sm += (seg[j] - lo) / rng;
+            sm /= wlen;
+            for (j = 0; j < wlen; j++) {
+                double a = (seg[j] - lo) / rng - sm, b = ens[j] - em;
+                num += a * b;
+                ds  += a * a;
+                de  += b * b;
+            }
+            if (ds <= 0 || de <= 0) continue;
+            c = num / sqrt(ds * de);
+            if (c < 0.8) continue;                 /* not this pulse: motion, or a missed beat */
+            for (j = 0; j < wlen; j++) acc[j] += (seg[j] - lo) / rng;
+            used++;
+        }
+    }
+    if (used < 4) return;
+    for (j = 0; j < wlen; j++) ens[j] = acc[j] / used;
+    shape_beats = used;
+
+    /* Measure once, on the average. The peak sits at pre by construction. */
+    {
+        int foot = -1, refl;
+        double amp, a, up;
+        for (k = pre - 2; k > 0; k--) {
+            if (ens[k] <= ens[k-1] && ens[k] <= ens[k+1]) { foot = k; break; }
+        }
+        if (foot < 0) foot = 0;
+        amp = ens[pre] - ens[foot];
+        if (amp <= 0) return;
+
+        refl = pre + (int)(fs * 0.25);
+        if (refl >= wlen) refl = wlen - 1;
+
+        up = (pre - foot) / fs * 1000.0;
+        a  = (ens[refl] - ens[foot]) / amp;
+
+        /* The gate catches a misdetected foot, not an unusual wearer. 300 ms because this one has
+         * Ehlers-Danlos: more compliant arteries and a slower upstroke are what that predicts. */
+        if (up > 80.0 && up < 300.0 && a > -0.2 && a < 1.5) {
+            *sut = up;
+            *ai = a;
+        }
+    }
 }
 
 static int cmp_d(const void *a, const void *b)
@@ -750,11 +824,19 @@ int main(int argc, char **argv)
              */
             double spo2 = 0, sut = 0, ai = 0, sbp = 0, dbp = 0;
 
-            if (want_spo2 && a1 > 5 && a2 > 5 && r > 0.05 && r < 3.0) {
-                spo2 = 98.0 - 25.0 * (r - R_REST);
-                if (spo2 > 100.0) spo2 = 100.0;
-                if (spo2 < 70.0) spo2 = 70.0;
-            }
+            /* No percentage. R is printed because it is a real measurement and worth watching;
+             * turning it into a saturation is what there is no basis for.
+             *
+             * Three consecutive resting runs gave R of 2.10, 2.38 and 4.75, and a fourth gave
+             * 0.824 - that spread is channel 1's two counts of pulsatile amplitude being divided
+             * by itself, not anyone's saturation moving. With R_REST as the anchor the 0.824 run
+             * printed 86%, which is both alarming and meaningless: a healthy wearer at rest, told
+             * they are hypoxic by a number with no measurement behind it.
+             *
+             * This stays off until channel 1 receives enough light to carry a pulse - see
+             * docs/vitals.md. The vendor's fabricated pressures are the reason this project
+             * exists; printing a fabricated saturation instead would be no better. */
+            (void)R_REST;
 
             /* Pressure from pulse shape and rate. The coefficients are placeholders, not a
              * calibration - see docs/vitals.md. Reported so a trend is visible and so a cuff can
@@ -762,7 +844,7 @@ int main(int argc, char **argv)
             /* Only at the red mode's 100 Hz. At the green mode's 25 Hz one sample is
              * 40 ms, so a 150 ms upstroke is under four samples and the shape cannot
              * be resolved - which is why green reported 316 ms upstrokes. */
-            if (fs > 60.0) pulse_shape(d, ns, fs, &sut, &ai);
+            if (fs > 60.0) pulse_shape(d, ns, fs, med, &sut, &ai);
             /* Only when the shape is physiological. A real systolic upstroke is 80-250 ms and
              * the augmentation index is positive - a negative one means the foot and the peak
              * were found in the wrong order, and any pressure computed from that is arithmetic
@@ -779,9 +861,9 @@ int main(int argc, char **argv)
             }
 
             printf("hr=%.0f spread=%.0f hz=%.1f samples=%d windows=%d gain=%04x"
-                   " dc1=%.0f dc2=%.0f ac1=%.0f ac2=%.0f r=%.3f spo2=%.0f sut=%.0f ai=%.2f"
+                   " dc1=%.0f dc2=%.0f ac1=%.0f ac2=%.0f r=%.3f spo2=%.0f beats=%d sut=%.0f ai=%.2f"
                    " sbp=%.0f dbp=%.0f used=%s\n",
-                   med, spread, fs, ns, nrates, gain, dc1, dc2, a1, a2, r, spo2, sut, ai, sbp, dbp,
+                   med, spread, fs, ns, nrates, gain, dc1, dc2, a1, a2, r, spo2, shape_beats, sut, ai, sbp, dbp,
                    src == ch2 ? "ch2" : "ch1");
         }
     }

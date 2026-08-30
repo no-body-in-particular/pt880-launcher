@@ -187,6 +187,14 @@ public final class VendorVitals {
          * other needs an ambient reading this watch does not have.
          */
         public double temperature;
+        /**
+         * True when our own daemon produced this, false when the vendor service did.
+         *
+         * The two have different silences. The vendor answering with a pulse and nothing else
+         * means it is wedged; ours doing the same is normal, because it reports a pressure only
+         * when the pulse shape supports one and reports no saturation at all.
+         */
+        public boolean fromOwn;
 
         public String toString() {
             String s = "SpO2 " + oxygen + "%, " + heartRate + " bpm, "

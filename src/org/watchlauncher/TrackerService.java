@@ -341,7 +341,14 @@ public class TrackerService extends Service {
 
                     // A reading with a pulse but neither a pressure nor an SpO2 is the wedge:
                     // the driver answered and the service did not. See serviceSilent.
-                    if (r.systolic <= 0 && r.oxygen <= 0 && r.heartRate > 0) {
+                    //
+                    // Only the vendor's silence means that. Ours looks identical and is normal:
+                    // we report a pressure only when the pulse shape supports one, and we report
+                    // no saturation at all while channel 1 carries two counts of signal. Left
+                    // unqualified this fired every third measurement and force-stopped
+                    // com.ic.work each time, which is a running system being restarted for
+                    // behaving exactly as designed.
+                    if (!r.fromOwn && r.systolic <= 0 && r.oxygen <= 0 && r.heartRate > 0) {
                         if (++serviceSilent >= SILENT_WEDGE) {
                             Log.w(TAG, "the service has given neither a pressure nor an SpO2 for "
                                     + serviceSilent + " measurements while the driver kept "
