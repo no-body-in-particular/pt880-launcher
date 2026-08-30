@@ -340,11 +340,19 @@ static void pulse_shape(const double *d, int n, double fs, double bpm, double *s
     for (j = 0; j < wlen; j++) ens[j] = acc[j] / used;
 
     /* Second pass: keep only the beats that look like the ensemble, and rebuild it from those.
-     * Correlation, not amplitude - a beat can be small and still be the right shape. */
-    for (j = 0; j < wlen; j++) acc[j] = 0.0;
-    used = 0;
+     * Correlation, not amplitude - a beat can be small and still be the right shape.
+     *
+     * Two thresholds, tried in order. 0.8 is what a clean recording should meet, but a wrist is
+     * not a clean recording, and demanding it of every beat left too few survivors to average -
+     * which is a measurement thrown away for being imperfect rather than for being wrong. If
+     * fewer than four beats clear 0.8, the same test runs again at 0.5, and only then does it
+     * give up. */
     {
+        double cut;
+        for (cut = 0.8; cut >= 0.5; cut -= 0.3) {
         double em = 0;
+        for (j = 0; j < wlen; j++) acc[j] = 0.0;
+        used = 0;
         for (j = 0; j < wlen; j++) em += ens[j];
         em /= wlen;
         for (k = 0; k < npk; k++) {
@@ -366,9 +374,11 @@ static void pulse_shape(const double *d, int n, double fs, double bpm, double *s
             }
             if (ds <= 0 || de <= 0) continue;
             c = num / sqrt(ds * de);
-            if (c < 0.8) continue;                 /* not this pulse: motion, or a missed beat */
+            if (c < cut) continue;                 /* not this pulse: motion, or a missed beat */
             for (j = 0; j < wlen; j++) acc[j] += (seg[j] - lo) / rng;
             used++;
+        }
+        if (used >= 4) break;
         }
     }
     if (used < 4) return;
