@@ -298,8 +298,16 @@ public class TrackerService extends Service {
         new Thread(new Runnable() {
             public void run() {
                 try {
-                    VendorVitals.Reading r =
-                            VendorVitals.measure(TrackerService.this, VITALS_TIMEOUT_MS);
+                    // Our own measurement first. It drives the chip directly and owes nothing
+                    // to gh3011_service; checked against the vendor on the same wrist minutes
+                    // apart, 47/50/52 against its 49. It returns null rather than guessing when
+                    // its windows disagree, which is what a moving wrist looks like - so the
+                    // vendor path stays as the fallback, and is still the only source of SpO2
+                    // and of a pressure.
+                    VendorVitals.Reading r = OwnVitals.measure(TrackerService.this);
+                    if (r == null) {
+                        r = VendorVitals.measure(TrackerService.this, VITALS_TIMEOUT_MS);
+                    }
                     if (r == null) {
                         vitalsMisses++;
                         // Nothing from the service. The platform sensor is not a fallback: it

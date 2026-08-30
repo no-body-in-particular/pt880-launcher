@@ -138,6 +138,7 @@ static void detrend(double *out, int n, int w)
  * recording; autocorrelation survives it, and the confidence says whether to believe the answer. */
 static double period_bpm(const double *seg, int n, double fs, double *conf)
 {
+    static double corr[512];
     double mean = 0, energy = 0, best = 0;
     int i, lag, blag = 0, lo = (int)(fs * 0.42), hi = (int)(fs * 1.45);
     /* The upper limit matters: extending the search to 1.6 s lets the first subharmonic of a
@@ -147,10 +148,12 @@ static double period_bpm(const double *seg, int n, double fs, double *conf)
     mean /= n;
     for (i = 0; i < n; i++) energy += (seg[i]-mean) * (seg[i]-mean);
     if (energy <= 0 || hi >= n) return 0;
+    if (hi - lo >= 512) hi = lo + 511;
     for (lag = lo; lag < hi; lag++) {
         double s = 0;
         for (i = 0; i + lag < n; i++) s += (seg[i]-mean) * (seg[i+lag]-mean);
         s /= (n - lag);
+        corr[lag - lo] = s;
         if (s > best) { best = s; blag = lag; }
     }
     if (!blag) return 0;
@@ -160,7 +163,55 @@ static double period_bpm(const double *seg, int n, double fs, double *conf)
      * passes. Reject the boundary rather than report it. */
     if (blag <= lo + 1 || blag >= hi - 2) return 0;
     *conf = best / (energy / n);
-    return 60.0 * fs / blag;
+    {
+        /* Interpolate the peak between lag steps. In green mode the sensor runs at 25 Hz, so one
+         * lag step is 40 ms and the rate quantises to about 1.7 bpm near a resting pulse - large
+         * enough to show up as disagreement between windows that actually agree. Fitting the
+         * peak's neighbours recovers the position between samples. */
+        double y0 = corr[blag - lo - 1], y1 = corr[blag - lo], y2 = corr[blag - lo + 1];
+        double den = y0 - 2 * y1 + y2;
+        double adj = den != 0.0 ? 0.5 * (y0 - y2) / den : 0.0;
+        if (adj < -0.5 || adj > 0.5) adj = 0.0;
+        return 60.0 * fs / (blag + adj);
+    }
+}
+
+/* Shape of the average beat: how fast it rises, and how much reflected wave rides on it.
+ *
+ * These are what a pressure estimate keys on - stiffer arteries rise faster and reflect more.
+ * The foot is looked for only in the 350 ms before a peak: searching the whole preceding interval
+ * finds the trough after the *previous* beat and reports an upstroke of most of a second, which
+ * no artery does. */
+static void pulse_shape(const double *d, int n, double fs, double *sut, double *ai)
+{
+    int i, last = -1, nf = 0;
+    double mx = 0, thr, sum_sut = 0, sum_ai = 0;
+
+    *sut = 0;
+    *ai = 0;
+    for (i = 0; i < n; i++) if (d[i] > mx) mx = d[i];
+    thr = mx * 0.3;
+
+    for (i = 1; i < n - 1; i++) {
+        if (!(d[i] >= d[i-1] && d[i] > d[i+1] && d[i] > thr)) continue;
+        if (last >= 0 && i - last < (int)(fs * 0.4)) continue;
+        if (last >= 0) {
+            int foot, k, lo = i - (int)(fs * 0.35);
+            double amp;
+            if (lo < last) lo = last;
+            foot = lo;
+            for (k = lo; k < i; k++) if (d[k] < d[foot]) foot = k;
+            amp = d[i] - d[foot];
+            if (amp > 0) {
+                double mid = d[(i + last) / 2];
+                sum_sut += (i - foot) / fs * 1000.0;
+                sum_ai  += (mid - d[foot]) / amp;
+                nf++;
+            }
+        }
+        last = i;
+    }
+    if (nf) { *sut = sum_sut / nf; *ai = sum_ai / nf; }
 }
 
 static int cmp_d(const void *a, const void *b)
@@ -488,9 +539,40 @@ int main(int argc, char **argv)
             }
             if (nb) { a1 /= nb; a2 /= nb; dc1 /= nb; dc2 /= nb; }
             if (dc1 > 0 && dc2 > 0 && a2 > 0) r = (a1 / dc1) / (a2 / dc2);
+            /* SpO2, anchored on the vendor rather than a textbook.
+             *
+             * The usual SpO2 = 110 - 25R is fitted for transmissive fingertip oximeters and gives
+             * 81% here where the watch itself says 100. The vendor's own capture provides a real
+             * anchor instead: its two channels ran at 73 and 69 counts on a DC of about
+             * 3,194,500 - an R of 1.06 - while it reported 99%. So hold that point and let R move
+             * around it.
+             *
+             * One anchor fixes the offset, not the slope, so this tracks a change in R rather
+             * than measuring saturation outright. It is only reported when both channels are
+             * genuinely pulsatile: in green mode the second channel is not infrared and R lands
+             * between 1.5 and 3.5, which means nothing at all.
+             */
+            double spo2 = 0, sut = 0, ai = 0, sbp = 0, dbp = 0;
+
+            if (want_spo2 && a1 > 20 && a2 > 20 && r > 0.4 && r < 2.5) {
+                spo2 = 100.0 - 25.0 * (r - 1.06);
+                if (spo2 > 100.0) spo2 = 100.0;
+                if (spo2 < 70.0) spo2 = 70.0;
+            }
+
+            /* Pressure from pulse shape and rate. The coefficients are placeholders, not a
+             * calibration - see docs/vitals.md. Reported so a trend is visible and so a cuff can
+             * be fitted against it later; it is not a measurement of anyone's pressure yet. */
+            pulse_shape(d, ns, fs, &sut, &ai);
+            if (sut > 60 && sut < 400) {
+                sbp = 105.0 + 0.28 * med - 0.055 * sut + 11.0 * ai;
+                dbp = 66.0 + 0.19 * med - 0.030 * sut + 6.5 * ai;
+            }
+
             printf("hr=%.0f spread=%.0f hz=%.1f samples=%d windows=%d gain=%04x"
-                   " ac1=%.0f ac2=%.0f dc1=%.0f dc2=%.0f r=%.3f\n",
-                   med, spread, fs, ns, nrates, gain, a1, a2, dc1, dc2, r,
+                   " ac1=%.0f ac2=%.0f r=%.3f spo2=%.0f sut=%.0f ai=%.2f"
+                   " sbp=%.0f dbp=%.0f used=%s\n",
+                   med, spread, fs, ns, nrates, gain, a1, a2, r, spo2, sut, ai, sbp, dbp,
                    src == ch2 ? "ch2" : "ch1");
         }
     }
