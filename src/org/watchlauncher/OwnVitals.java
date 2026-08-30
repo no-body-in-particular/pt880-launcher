@@ -49,8 +49,21 @@ final class OwnVitals {
     /** Abstract-namespace socket published by vitalsd. */
     private static final String SOCKET = "watchvitals";
 
-    /** The daemon answers when the measurement is done, so this has to outlast it. */
-    private static final int TIMEOUT_MS = 70000;
+    /**
+     * The daemon answers when the measurement is done, so this has to outlast it.
+     *
+     * Two minutes because the red request is now two passes: 25 seconds balanced for the ratio,
+     * then 45 for the rate and the pressure, plus the re-read and the chip settling between them
+     * - about eighty seconds in total. It was seventy, set when the whole thing was one 45 second
+     * pass, and lengthening the measurement without lengthening this meant every reading timed
+     * out just before it was ready.
+     */
+    private static final int TIMEOUT_MS = 120000;
+
+    /** The thermometer answers in about a second and needs no measurement, so it gets its own
+     *  patience. Waiting two minutes to be told nobody is wearing the watch is the opposite of
+     *  what the check is for. */
+    private static final int WEAR_TIMEOUT_MS = 15000;
 
     private OwnVitals() { }
 
@@ -88,12 +101,25 @@ final class OwnVitals {
         return r;
     }
 
-    /** Send one request to vitalsd and return its reply, or null. */
     private static String ask(String request) {
+        return ask(request, TIMEOUT_MS);
+    }
+
+    /** Send one request to vitalsd and return its reply, or null. */
+    private static String ask(String request, int timeoutMs) {
         LocalSocket s = new LocalSocket();
         try {
+            // The timeout goes on before the connect, not after it.
+            //
+            // vitalsd serves one request at a time behind a backlog of four, so a connect made
+            // while it is busy waits rather than failing. Setting the timeout afterwards meant
+            // the connect itself had none, and a thread that blocked there blocked forever -
+            // taking the measuring flag with it, which is only cleared in a finally that never
+            // ran. One stuck thread then stopped every later cycle: three hours of readings
+            // went missing that way.
+            s.setSoTimeout(timeoutMs);
             s.connect(new LocalSocketAddress(SOCKET, LocalSocketAddress.Namespace.ABSTRACT));
-            s.setSoTimeout(TIMEOUT_MS);
+            s.setSoTimeout(timeoutMs);
 
             OutputStream out = s.getOutputStream();
             out.write((request + "\n").getBytes("UTF-8"));
@@ -126,7 +152,7 @@ final class OwnVitals {
      * than assume either way.
      */
     static int worn(Context ctx) {
-        String line = ask("wear");
+        String line = ask("wear", WEAR_TIMEOUT_MS);
         if (line == null) return -1;
         return field(line, "worn=");
     }

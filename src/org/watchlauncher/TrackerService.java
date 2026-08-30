@@ -277,10 +277,30 @@ public class TrackerService extends Service {
      */
     private static final long MEASURE_FLOOR_MS = 150 * 1000;
 
+    /**
+     * Longer than any measurement can legitimately take, and shorter than a wasted afternoon.
+     *
+     * A red measurement is about eighty seconds; five minutes is comfortably past that.
+     */
+    private static final long MEASURE_STUCK_MS = 5 * 60 * 1000;
+
     private void measureVitalsAsync(boolean asked) {
         if (measuring) {
-            Log.i(TAG, "a measurement is already running; not starting another");
-            return;
+            // Unless it has been running so long that it is not running at all.
+            //
+            // measuring is cleared in a finally, which covers a measurement that throws but not
+            // one that hangs - and a thread blocked on a socket never reaches the finally. The
+            // flag then stays true for the life of the process and no cycle ever measures again.
+            // That is exactly what happened: one stuck thread, three hours of nothing, and a
+            // service that looked healthy the whole time because it was still running.
+            long busy = SystemClock.elapsedRealtime() - lastMeasureAt;
+            if (busy < MEASURE_STUCK_MS) {
+                Log.i(TAG, "a measurement is already running; not starting another");
+                return;
+            }
+            Log.w(TAG, "the last measurement has been running " + (busy / 1000)
+                    + "s, which it cannot be; treating it as lost and measuring again");
+            measuring = false;
         }
         long since = SystemClock.elapsedRealtime() - lastMeasureAt;
         if (lastMeasureAt > 0 && since < MEASURE_FLOOR_MS) {
