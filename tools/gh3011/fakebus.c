@@ -25,6 +25,8 @@
 #include <dlfcn.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <signal.h>
+#include <ucontext.h>
 
 #define VENDOR "/system/bin/gh3011_service.real"
 
@@ -35,6 +37,7 @@
 #define MODE_BYTE    OFF(0x3ec4a)   /* must read 1 or 7 or it returns at once */
 #define READ_CB      OFF(0x3e994)   /* the register-read callback it goes through */
 #define BUS_HANDLE   OFF(0x3d53c)   /* first argument handed to that callback */
+#define FRAME_WIDTH  OFF(0x3ec4e)   /* samples per frame; divided by, so zero is fatal */
 
 typedef void (*spo2_fn)(void *, int, unsigned, unsigned char *, unsigned char *,
                         unsigned char *, unsigned char *, unsigned char *,
@@ -91,6 +94,47 @@ static int fake_read(void *handle, unsigned char *addr, int alen,
     if (reg == 0x0028) { out[0] = 0x00; if (olen > 1) out[1] = 0x31; return 0; }  /* chip id */
 
     return 0;
+}
+
+/* Report where it died rather than decompiling towards it.
+ *
+ * Chasing this function by function is slow and each step only finds the next registered pointer.
+ * The fault itself says which address was touched and which instruction touched it, and the
+ * instruction minus the load base is the offset to look up - which turns an afternoon of
+ * decompiling into one lookup.
+ */
+static unsigned long g_base;
+
+static void on_segv(int sig, siginfo_t *si, void *uc)
+{
+    ucontext_t *u = (ucontext_t *) uc;
+    unsigned long pc = 0;
+
+    (void) sig;
+#ifdef __arm__
+    pc = (unsigned long) u->uc_mcontext.arm_pc;
+    /* The link register is the caller, and when the fault address equals the pc - a jump into
+     * nowhere rather than a bad read - the caller is the only thing that identifies which
+     * unregistered callback was called. */
+    {
+        unsigned long lr = (unsigned long) u->uc_mcontext.arm_lr;
+        fprintf(stderr, "  called from lr 0x%lx", lr);
+        if (g_base && lr > g_base && lr - g_base < 0x40000) {
+            fprintf(stderr, " = Ghidra 0x%lx", lr - g_base + GHIDRA_BASE);
+        }
+        fprintf(stderr, "\n");
+    }
+#endif
+    fprintf(stderr, "\nfaulted touching %p\n", si ? si->si_addr : 0);
+    if (pc) {
+        fprintf(stderr, "  at pc 0x%lx", pc);
+        if (g_base && pc > g_base) {
+            fprintf(stderr, "  = offset 0x%lx in the image, so Ghidra address 0x%lx",
+                    pc - g_base, pc - g_base + GHIDRA_BASE);
+        }
+        fprintf(stderr, "\n");
+    }
+    _exit(3);
 }
 
 static unsigned long base_of(const char *needle)
@@ -150,6 +194,16 @@ int main(int argc, char **argv)
     if (!base) { printf("no mapping\n"); return 1; }
     printf("mapped at 0x%lx\n", base);
 
+    g_base = base;
+    {
+        struct sigaction sa;
+        memset(&sa, 0, sizeof sa);
+        sa.sa_sigaction = on_segv;
+        sa.sa_flags = SA_SIGINFO;
+        sigaction(SIGSEGV, &sa, NULL);
+        sigaction(SIGBUS, &sa, NULL);
+    }
+
     {
         const unsigned char *raw = (const unsigned char *) base;
         printf("prologue at the routine: %02x %02x (want f0 b5)\n",
@@ -175,6 +229,17 @@ int main(int argc, char **argv)
         if (!*handle) { *handle = dummy_handle; printf(", now %p", *handle); }
         printf("\n");
 
+        {
+            /* The frame width, four bytes along from the mode in the same config block. The
+             * algorithm divides the FIFO level by it, so zero is a division by zero rather than
+             * a wrong answer - which is exactly the exception this raised once it was finally
+             * running as Thumb code. Two, because the FIFO interleaves two channels. */
+            unsigned char *fw = (unsigned char *)(base + FRAME_WIDTH);
+            make_writable(fw);
+            printf("frame width was %u", *fw);
+            *fw = 2;
+            printf(", now %u\n", *fw);
+        }
         printf("mode byte was %u", *mode_byte);
         *mode_byte = 1;
         printf(", now %u\n\n", *mode_byte);
@@ -185,7 +250,13 @@ int main(int argc, char **argv)
         mixed[i * 2 + 1] = wave2[i];
     }
 
-    fn = (spo2_fn)(void *)(base + SPO2_FN);
+    /* The low bit says Thumb.
+     *
+     * This code is Thumb - its first instruction is f0 b5, a Thumb push - and on ARM a function
+     * pointer carries that in bit 0. Calling an even address switches the core to ARM mode, where
+     * the same bytes decode as something else entirely and run until they fault. That is what the
+     * jump to nowhere was: not a missing callback, just a pointer built without its mode bit. */
+    fn = (spo2_fn)(void *)((base + SPO2_FN) | 1);
     printf("calling the vendor routine with our samples...\n");
     memset(scratch, 0, sizeof scratch);
     fn(mixed, wave_n, (unsigned) mode, &result, &level, &status, &a, &b, &c, scratch, &e);
