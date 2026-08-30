@@ -386,6 +386,7 @@ roads and renders tiles on demand; the watch caches what it is given and then
 needs no network at all.
 
 ```
+server/mapd/       the daemon that serves all of this; see its own README
 coredump.ws/map/
   import.php    a Geofabrik roads shapefile -> a country's road store
   tile.php      z/x/y -> a 4-bit greyscale PNG, rendered and cached

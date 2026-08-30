@@ -1,0 +1,36 @@
+#!/sbin/openrc-run
+# The map service: tiles, road vectors and routing graphs for the watch.
+#
+# Runs behind hiawatha rather than beside it - hiawatha terminates TLS and
+# reverse proxies /map/ to this. The watch's TLS is BouncyCastle speaking to
+# hiawatha's exact configuration, which took long enough to get working on a
+# 2013 device that it is not worth risking to save a hop.
+#
+# Runs as the web server's user so the tile cache it writes is the same cache
+# hiawatha can read, and so a stray path cannot be written anywhere else.
+
+name="mapd"
+description="Map tiles and routing graphs for the PT880 watch"
+
+command="/usr/local/bin/mapd"
+command_user="hiawatha:hiawatha"
+command_background="yes"
+pidfile="/run/mapd.pid"
+output_log="/var/log/mapd.log"
+error_log="/var/log/mapd.log"
+
+export MAP_ROOT="${MAP_ROOT:-/var/www/hiawatha/map}"
+export MAP_ADDR="${MAP_ADDR:-127.0.0.1:8088}"
+# Where /route.php goes for a country whose graph is not on the watch. The
+# default is the public OSRM demo server; set this to your own instance.
+export MAP_OSRM="${MAP_OSRM:-https://router.project-osrm.org}"
+
+depend() {
+    need net
+    before hiawatha
+}
+
+start_pre() {
+    checkpath --directory --owner hiawatha:hiawatha --mode 0755 "$MAP_ROOT/tiles"
+    checkpath --file --owner hiawatha:hiawatha --mode 0644 /var/log/mapd.log
+}

@@ -1,0 +1,21 @@
+[package]
+name = "mapd"
+version = "1.0.0"
+edition = "2021"
+description = "Map tiles, road vectors and routing graphs for the PT880 watch"
+
+[dependencies]
+tiny_http = "0.12"          # one thread per request, no async runtime to reason about
+rusqlite = { version = "0.32", features = ["bundled"] }
+png = "0.17"
+flate2 = "1"
+ureq = { version = "2", features = ["json"] }
+serde_json = "1"
+rayon = "1"                 # 256 tiles per block, 8 cores
+memmap2 = "0.9"             # graphs are read at random and are up to 157 MB
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "unwind"            # a bad request must not take the service down
