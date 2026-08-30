@@ -9,6 +9,7 @@
  *
  *     ->  hr            green LED, heart rate
  *     ->  spo2          red and IR, adds the ratio of ratios and the pulse shape
+ *     ->  wear          the thermometer alone: no LEDs, no measurement
  *     <-  hr=49 spread=2 hz=24.9 ... spo2=98 sbp=102 dbp=66
  *     <-  hr=0 reason=...            when nothing trustworthy came out
  *
@@ -29,11 +30,62 @@
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <stddef.h>
+#include <fcntl.h>
 
 #define SOCKNAME "watchvitals"      /* abstract: android.net.LocalSocket, ABSTRACT namespace */
 #define HELPER   "/data/local/tmp/ppgd"
 #define SECS_HR   "40"   /* green is 25 Hz: it needs the time to fill enough windows */
 #define SECS_SPO2 "45"   /* red is 100 Hz - 2500 samples in 25 s is plenty */
+
+
+#define TEMP_ENABLE "/sys/devices/virtual/input/input6/enable"
+#define TEMP_VALUE  "/sys/devices/virtual/input/input6/value"
+
+/* Hundredths of a degree. Skin holds the thermopile in the low thirties - 34.57 on the wrist it
+ * was measured against - while on a table it falls to room temperature within minutes. Thirty
+ * sits between the two with room on either side. */
+#define WORN_C 3000
+
+/* The whole of a small file. */
+static int slurp(const char *path, char *buf, size_t n)
+{
+    ssize_t got;
+    int f = open(path, O_RDONLY);
+    if (f < 0) return -1;
+    got = read(f, buf, n - 1);
+    close(f);
+    if (got <= 0) return -1;
+    buf[got] = 0;
+    return 0;
+}
+
+/* Wrist temperature in hundredths of a degree, or -1 if the sensor will not say.
+ *
+ * A gxts02s thermopile, reported through the "temperature" input device rather than a thermal
+ * zone - the zones are the CPU, GPU, charger and board, none of which touch the wearer. It reads
+ * "0 0" until the driver has produced a sample, which takes about six seconds from cold, so this
+ * enables it and waits instead of believing the first look.
+ *
+ * Left enabled afterwards: disabling would save a little current, but the next measurement would
+ * pay those six seconds again and the framework may be sharing the sensor.
+ */
+static int read_temp(int patience)
+{
+    char buf[64];
+    int f, t, tries;
+
+    f = open(TEMP_ENABLE, O_WRONLY);
+    if (f >= 0) { write(f, "1\n", 2); close(f); }
+
+    for (tries = 0; tries < patience; tries++) {
+        if (slurp(TEMP_VALUE, buf, sizeof buf) == 0) {
+            t = atoi(buf);
+            if (t > 0) return t;
+        }
+        sleep(1);
+    }
+    return -1;
+}
 
 static int listenfd = -1;
 
@@ -52,7 +104,23 @@ static void measure(const char *mode, char *out, size_t outsz)
     char cmd[256];
     FILE *p;
 
+    int t;
+
     out[0] = 0;
+
+    /* Do not light the sensor for forty-five seconds against a bedside table.
+     *
+     * Off the wrist a measurement cannot succeed - it ends in no_agreement once the windows have
+     * failed to cluster - but it takes the whole run to get there with the LEDs on throughout.
+     * The thermometer answers the same question in about a second.
+     *
+     * If the sensor will not say, measure anyway: a missing thermometer is a reason to fall back
+     * to the slow answer, not to refuse to answer at all. */
+    t = read_temp(8);
+    if (t >= 0 && t < WORN_C) {
+        snprintf(out, outsz, "hr=0 reason=not_worn temp=%d.%02d\n", t / 100, t % 100);
+        return;
+    }
     /* Do NOT stop gh3011_daemon here. This process *is* that service now - it runs in the slot
      * init used to start the vendor's - so stopping it kills this daemon mid-measurement, which
      * is exactly what happened the first time. The vendor binary is disabled by virtue of being
@@ -75,6 +143,15 @@ static void measure(const char *mode, char *out, size_t outsz)
     }
 
     if (!out[0]) snprintf(out, outsz, "hr=0 reason=helper_gave_nothing\n");
+
+    /* Carry the temperature on the same line. It is a wrist and not a body - a few degrees above
+     * the room and well below its owner, which is how the vendor once filed 21 C as a body
+     * temperature - so converting it is the launcher's business, not this daemon's. */
+    if (t > 0) {
+        size_t at = strlen(out);
+        while (at > 0 && (out[at-1] == 0x0a || out[at-1] == 0x0d)) out[--at] = 0;
+        snprintf(out + at, outsz - at, " temp=%d.%02d\n", t / 100, t % 100);
+    }
 }
 
 int main(void)
@@ -114,7 +191,18 @@ int main(void)
         req[n] = 0;
         while (n > 0 && (req[n-1] == '\n' || req[n-1] == '\r')) req[--n] = 0;
 
-        measure(req, reply, sizeof reply);
+        if (strcmp(req, "wear") == 0) {
+            /* Answerable without lighting an LED, so the launcher can skip a measurement it
+             * already knows will fail. */
+            int wt = read_temp(8);
+            if (wt > 0)
+                snprintf(reply, sizeof reply, "worn=%d temp=%d.%02d\n",
+                         wt >= WORN_C ? 1 : 0, wt / 100, wt % 100);
+            else
+                snprintf(reply, sizeof reply, "worn=-1 reason=no_thermometer\n");
+        } else {
+            measure(req, reply, sizeof reply);
+        }
         write(c, reply, strlen(reply));
         close(c);
     }
