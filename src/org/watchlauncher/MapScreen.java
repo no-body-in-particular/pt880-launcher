@@ -275,6 +275,46 @@ public class MapScreen extends Screen implements LocationListener {
 
     private static final String PREF_BACKGROUND_NAV = "map.backgroundNav";
 
+    private static final String PREF_NAV_SCREEN_ON = "map.navScreenOn";
+
+    /**
+     * Whether the display stays lit for as long as a route is being followed.
+     *
+     * Off by default, and deliberately so: holding the screen on is the most expensive thing this
+     * watch does, and the navigation already works without it - the voice speaks with the screen
+     * dark, and background navigation keeps the route running. Someone walking a route for an
+     * hour should not have this happen to them by default.
+     *
+     * It earns its place anyway. On a bike or in a car the watch is glanced at rather than
+     * touched, so the thirty second timeout expires constantly and the map is dark exactly when
+     * it is wanted; and a screen that has to be woken with a button is worse than useless at a
+     * junction. Whoever is driving with a charger on the handlebars can pay for the light.
+     *
+     * It applies only while a route is actually running, and it lets go when the route ends -
+     * unlike the global keep-awake setting, which this deliberately does not touch.
+     */
+    boolean navScreenOn() {
+        try {
+            return shell.prefs().getBoolean(PREF_NAV_SCREEN_ON, false);
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    void setNavScreenOn(boolean on) {
+        try {
+            shell.prefs().edit().putBoolean(PREF_NAV_SCREEN_ON, on).commit();
+        } catch (Throwable t) { /* the default stands */ }
+        applyNavScreen();
+    }
+
+    /** Light while navigating and asked for, dark otherwise. Cheap enough to call every fix. */
+    void applyNavScreen() {
+        try {
+            shell.setTransientKeepAwake(navigating() && navScreenOn());
+        } catch (Throwable t) { /* a display that dims is not worth crashing a drive over */ }
+    }
+
     /**
      * Whether a route keeps being followed while another screen or the menu is in front.
      *
@@ -739,6 +779,10 @@ public class MapScreen extends Screen implements LocationListener {
         // lifecycle callback that may not come. Still timed, still renewed per fix, so a bug
         // cannot hold the processor up all night.
         if (navigating() && (!shell.showing() || backgroundNav())) holdForNavigation();
+        // Here rather than only where a route starts and ends: this is the one place that runs
+        // for every fix whatever else happened, so the flag cannot be left set by a route that
+        // ended down a path nobody thought to hook.
+        applyNavScreen();
         // The watch's own fixes often arrive without a speed, so take the one
         // worked out from the ground covered instead of showing nothing.
         if (speedMs < 0) speedMs = drive.speedMs();

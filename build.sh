@@ -298,6 +298,19 @@ if javac -nowarn -d "$TD5" "$HERE/src/org/watchlauncher/Route.java" \
 fi
 rm -rf "$TD5"
 
+# What is said at a roundabout, and how early. Same stub as the turn timing test.
+TD6=$(mktemp -d)
+if javac -nowarn -d "$TD6" "$HERE/src/org/watchlauncher/Route.java"         "$HERE/src/org/watchlauncher/Geo.java"         "$HERE/test/stub/org/watchlauncher/RoadGraph.java" 2>/dev/null    && javac -nowarn -cp "$TD6" -d "$TD6" "$HERE/test/RoundaboutTest.java" 2>/dev/null; then
+    if ! java -cp "$TD6" RoundaboutTest > "$TD6/out"; then
+        echo "roundabout test FAILED:" >&2
+        cat "$TD6/out" >&2
+        rm -rf "$TD6"
+        exit 1
+    fi
+    tail -1 "$TD6/out"
+fi
+rm -rf "$TD6"
+
 echo "built: $APK"
 ls -l "$APK"
 echo

@@ -194,6 +194,18 @@ public class MapMenuScreen extends ListScreen {
                     render();
                 } });
 
+        // Under background navigation, because the two are the same question asked twice: what
+        // the route is allowed to keep doing when you are not looking at it.
+        row(l, new Item("Screen on while driving", map.navScreenOn() ? "on" : "off",
+                        AppIcons.GEAR, map.navScreenOn() ? Ui.OK : Ui.DIM),
+                new Runnable() { public void run() {
+                    map.setNavScreenOn(!map.navScreenOn());
+                    shell.toast(map.navScreenOn()
+                            ? "Display stays on while a route is running"
+                            : "Display times out as usual");
+                    render();
+                } });
+
         row(l, new Item("Test voice", map.voiceStatus(), AppIcons.MUSIC,
                         map.voiceReady() ? Ui.OK : Ui.WARN),
                 new Runnable() { public void run() {

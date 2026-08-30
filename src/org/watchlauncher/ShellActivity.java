@@ -101,6 +101,9 @@ public class ShellActivity extends Activity {
 
     private boolean twoButtons = false;
     private boolean keepAwake = false;
+
+    /** Held by something in progress rather than chosen in a menu: see setTransientKeepAwake. */
+    private boolean transientAwake = false;
     private boolean started = false;
 
     // Shared services, built once and handed to whichever screens want them.
@@ -410,9 +413,27 @@ public class ShellActivity extends Activity {
         applyKeepAwake();
     }
 
+    /**
+     * Hold the screen on for as long as something is going on, without touching the setting.
+     *
+     * Navigation wants the display lit while a route is running and dark again the moment it is
+     * not. Going through setKeepAwake would write that into the saved preference, so a drive
+     * would silently turn the global setting on and leave it on afterwards. This is the state of
+     * a thing that is happening, not a thing that was chosen, so it is kept apart and only the
+     * window flag is shared.
+     */
+    public void setTransientKeepAwake(boolean on) {
+        if (transientAwake == on) return;
+        transientAwake = on;
+        applyKeepAwake();
+    }
+
     private void applyKeepAwake() {
-        if (keepAwake) getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        if (keepAwake || transientAwake) {
+            getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        } else {
+            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        }
     }
 
     // ---------------------------------------------------------------- ui

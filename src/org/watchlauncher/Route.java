@@ -57,6 +57,21 @@ public class Route {
     /** Spoken at the junction itself, without a distance. */
     private static final int NOW_M = 50;
 
+    /**
+     * A roundabout is announced this much earlier than anything else.
+     *
+     * Every other manoeuvre asks for one action at one moment, and a driver can be told as they
+     * arrive at it. A roundabout asks for a count, and counting cannot begin after the entry has
+     * been reached - by then the first exit is already going past. The sentence is also longer
+     * than any other, and it has to be finished, understood, and acted on before the give-way
+     * line, with time left to choose a lane.
+     */
+    private static final int ROUNDABOUT_LEAD_S = 12;
+
+    /** The last notice comes sooner at a roundabout too: the entry is the final useful moment,
+     *  not a point to draw level with. */
+    private static final int ROUNDABOUT_NOW_M = 90;
+
     /** Do not announce a turn further off than this in time, or a walker is
      *  told about a corner ten minutes before reaching it. Speed is unknown
      *  often enough that it has to have a sensible default. */
@@ -76,6 +91,14 @@ public class Route {
     public static class Turn {
         public int kind;
         public int metres;          // length of the step that follows
+        /**
+         * Which exit to take, for ROUNDABOUT. 0 when the server did not say.
+         *
+         * OSRM has always reported this and the route format used to drop it, so the watch could
+         * only say "at the roundabout" - which is true and is not the part a driver needs. A
+         * roundabout is the one manoeuvre where the direction says nothing on its own.
+         */
+        public int exit;
         public double lat, lon;
         /** Which advance notices have been given. Bit i is set once the
          *  notice for STAGE_SECONDS[i] has been spoken for this turn. */
@@ -218,9 +241,13 @@ public class Route {
             in = new DataInputStream(new BufferedInputStream(new FileInputStream(f)));
             byte[] magic = new byte[4];
             in.readFully(magic);
-            if (magic[0] != 'W' || magic[1] != 'R' || magic[2] != 'T' || magic[3] != '1') {
+            if (magic[0] != 'W' || magic[1] != 'R' || magic[2] != 'T'
+                    || (magic[3] != '1' && magic[3] != '2')) {
                 return null;
             }
+            // WRT2 adds one byte per step: the roundabout exit. WRT1 is still read, so a route
+            // cached before the server was updated keeps working and simply says less.
+            boolean hasExit = magic[3] == '2';
             Route r = new Route();
             r.totalMetres = in.readInt();
             int steps = in.readUnsignedShort();
@@ -229,6 +256,7 @@ public class Route {
             for (int i = 0; i < steps; i++) {
                 Turn t = new Turn();
                 t.kind = in.readUnsignedByte();
+                if (hasExit) t.exit = in.readUnsignedByte();
                 t.metres = in.readUnsignedShort();
                 t.lat = in.readInt() / 1e7;
                 t.lon = in.readInt() / 1e7;
@@ -283,10 +311,10 @@ public class Route {
         }
         if (next == null) return null;
 
-        if (best <= NOW_M) {
+        if (best <= (next.kind == ROUNDABOUT ? ROUNDABOUT_NOW_M : NOW_M)) {
             next.announced = true;
             next.spoken = -1;                       // every stage, done with
-            return phrase(next.kind, 0, signFor(next));
+            return phrase(next.kind, 0, signFor(next), next.exit);
         }
 
         float ms = speedMs > 0.5f ? speedMs : ASSUMED_MS;
@@ -297,11 +325,12 @@ public class Route {
         for (int i = 0; i < STAGE_SECONDS.length; i++) {
             int bit = 1 << i;
             if ((next.spoken & bit) != 0) continue;
-            if (best > triggerAt(STAGE_SECONDS[i], ms)) continue;
+            int lead = STAGE_SECONDS[i] + (next.kind == ROUNDABOUT ? ROUNDABOUT_LEAD_S : 0);
+            if (best > triggerAt(lead, ms)) continue;
             // Everything further out is now moot whether or not it was said.
             for (int j = 0; j <= i; j++) next.spoken |= (1 << j);
             if (best / ms > MAX_LOOKAHEAD_S) return null;
-            return phrase(next.kind, (int) best, signFor(next));
+            return phrase(next.kind, (int) best, signFor(next), next.exit);
         }
         return null;
     }
@@ -633,9 +662,29 @@ public class Route {
         return best;
     }
 
-    private static String phrase(int kind, int metres, String sign) {
+    /** "second", for the exit to take. Past what a driver would count at a glance, null. */
+    static String ordinal(int n) {
+        switch (n) {
+            case 1:  return "first";
+            case 2:  return "second";
+            case 3:  return "third";
+            case 4:  return "fourth";
+            case 5:  return "fifth";
+            case 6:  return "sixth";
+            default: return null;
+        }
+    }
+
+    private static String phrase(int kind, int metres, String sign, int exit) {
         String turn = action(kind);
         if (turn == null) return null;
+        // "at the roundabout, take the second exit". Without a number the plain form is left
+        // alone rather than guessed at: "take the seventh exit" said wrongly is worse than "at
+        // the roundabout" said vaguely, because the first will be acted on.
+        if (kind == ROUNDABOUT) {
+            String nth = ordinal(exit);
+            if (nth != null) turn = turn + ", take the " + nth + " exit";
+        }
         // "bear right, exit for Nuenen" - the direction first, because that is
         // the part that has to be acted on, and the name after it as
         // confirmation rather than instruction.
