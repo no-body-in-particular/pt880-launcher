@@ -31,7 +31,17 @@
 #include <unistd.h>
 
 #define VENDOR "/system/bin/gh3011_service.real"
-#define SPO2_OFFSET 0x1b7c0
+/* Ghidra loads a PIE at 0x10000, so every address it prints is that much higher than the offset
+ * from the load base. Verified against the bytes rather than assumed: +0x0b7c0 begins f0 b5,
+ * which is the push {r4,r5,r6,r7,lr} the disassembly shows, and +0x1b7c0 does not.
+ *
+ * Every crash before this was a jump into the middle of unrelated code. The routine had not been
+ * called once. */
+#define GHIDRA_BASE   0x10000
+#define SPO2_OFFSET   (0x1b7c0 - GHIDRA_BASE)
+#define INIT_OFFSET   (0x119b0 - GHIDRA_BASE)
+#define GUARD_OFFSET  (0x44030 - GHIDRA_BASE)
+#define MODE_OFFSET   (0x3ec4a - GHIDRA_BASE)
 
 typedef void (*spo2_fn)(void *, int, unsigned, unsigned char *, unsigned char *,
                         unsigned char *, unsigned char *, unsigned char *,
@@ -88,6 +98,49 @@ int main(int argc, char **argv)
     printf("dlopen accepted it; load base 0x%lx\n", base);
     if (!base) { printf("no mapping found, so the offset cannot be applied\n"); dlclose(h); return 1; }
 
+    /* What the loader actually did, before assuming anything about where things landed.
+     *
+     * base + vaddr is the right arithmetic for a shared object, and Ghidra's 0x44030 is a virtual
+     * address rather than a file offset, so it ought to work. It did not, which means either the
+     * base is wrong or the page is in a mapping the scan skipped - and .bss has no filename, so a
+     * scan keyed on the filename skips exactly that. Printing the neighbourhood settles it.
+     */
+    {
+        FILE *m = fopen("/proc/self/maps", "r");
+        char line[512];
+        printf("\nmappings around the image:\n");
+        if (m) {
+            while (fgets(line, sizeof line, m)) {
+                unsigned long lo = strtoul(line, NULL, 16);
+                /* the image and whatever anonymous pages follow it */
+                if (lo >= base && lo <= base + 0x60000) {
+                    line[strcspn(line, "\n")] = 0;
+                    printf("   %s\n", line);
+                }
+            }
+            fclose(m);
+        }
+        printf("   wanted: guard at 0x%lx, mode byte at 0x%lx\n\n",
+               base + GUARD_OFFSET, base + MODE_OFFSET);
+    }
+
+    /* Which offset is the real one.
+     *
+     * Ghidra loads a PIE at 0x10000 unless told otherwise, so every address it prints may be that
+     * much higher than the offset from the load base. The image here maps only 0x34000 bytes and
+     * the addresses wanted were past the end of it, which is exactly what that mistake looks
+     * like.
+     *
+     * Rather than believe either arithmetic, look at the bytes. Ghidra disassembled the routine's
+     * first instruction as push {r4,r5,r6,r7,lr}, which in Thumb is f0 b5. Whichever candidate
+     * starts with those bytes is the function.
+     */
+    {
+        const unsigned char *raw = (const unsigned char *) base;
+        printf("at +0x1b7c0: %02x %02x   at +0x0b7c0: %02x %02x   (want f0 b5)\n",
+               raw[0x1b7c0], raw[0x1b7c1], raw[0xb7c0], raw[0xb7c1]);
+    }
+
     /* Satisfy the two things the routine reads before it will run, without running the daemon.
      *
      * Ghidra resolves both, and neither is what the first guess assumed:
@@ -108,25 +161,31 @@ int main(int argc, char **argv)
      * the mode byte to 1, and the routine has what it was waiting for - no service object, no
      * constructor, and none of the daemon.
      */
+    /* Set the one thing that actually gates the routine.
+     *
+     * The stack guard was a red herring twice over. __stack_chk_guard is a libc symbol, not part
+     * of this image - Ghidra shows it in a synthetic block past the end of the file, which is why
+     * base + its address lands in an unmapped gap and why mprotect refused. dlopen resolves it
+     * through the GOT like any other import, so it was never broken. Writing to that address was
+     * the crash, and the crash was mine.
+     *
+     * What genuinely gates the function is one byte in .bss, and that mapped fine once the
+     * Ghidra base was accounted for. Zero means "no mode set" and the routine returns without
+     * doing anything; 1 is what the daemon puts there.
+     */
     {
-        unsigned long *guard = (unsigned long *)(base + 0x44030);
-        unsigned char *mode_byte = (unsigned char *)(base + 0x3ec4a);
-        static unsigned long cookie = 0xdeadbeef;
-
-        /* Writable first. The read succeeded and the write did not, which is RELRO: the linker
-         * marks these pages read-only once relocations are done, and an image brought in by
-         * dlopen gets the same treatment. mprotect undoes it for the two pages we need. */
+        unsigned char *mode_byte = (unsigned char *)(base + MODE_OFFSET);
         long pagesz = sysconf(_SC_PAGESIZE);
-        void *gp = (void *)((unsigned long) guard & ~(pagesz - 1));
         void *mp = (void *)((unsigned long) mode_byte & ~(pagesz - 1));
-        if (mprotect(gp, pagesz, PROT_READ | PROT_WRITE) != 0) printf("  mprotect(guard) failed\n");
-        if (mprotect(mp, pagesz, PROT_READ | PROT_WRITE) != 0) printf("  mprotect(mode) failed\n");
 
-        printf("stack guard slot at %p held 0x%lx\n", (void *) guard, *guard);
-        if (!*guard) { *guard = (unsigned long) &cookie; printf("  pointed it at a cookie\n"); }
-        printf("mode byte at %p held %u\n", (void *) mode_byte, *mode_byte);
-        *mode_byte = 1;
-        printf("  set it to 1\n\n");
+        if (mprotect(mp, pagesz, PROT_READ | PROT_WRITE) != 0) {
+            printf("could not make the mode byte writable\n");
+        } else {
+            printf("mode byte at %p held %u", (void *) mode_byte, *mode_byte);
+            *mode_byte = 1;
+            printf(", now %u\n\n", *mode_byte);
+
+        }
     }
 
     /* Their own initialisation first, when asked for by a third argument.
@@ -141,7 +200,7 @@ int main(int argc, char **argv)
      * rather than automatic.
      */
     if (argc > 3) {
-        void (*initfn)(void) = (void (*)(void))(void *)(base + 0x119b0);
+        void (*initfn)(void) = (void (*)(void))(void *)(base + INIT_OFFSET);
         printf("calling GH30xService::init at 0x%lx first\n", base + 0x119b0);
         fflush(stdout);
         initfn();
