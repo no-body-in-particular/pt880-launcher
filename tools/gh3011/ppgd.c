@@ -36,6 +36,11 @@
 struct msg { unsigned short addr, flags, len; unsigned char *buf; };
 struct rdwr { struct msg *msgs; int n; };
 
+/* Resting ratio-of-ratios for this sensor, measured with bin_amp on a still, healthy wrist.
+ * See the SpO2 comment below: this sets the offset of the whole scale, so it is the one number
+ * to revisit if saturation ever reads implausibly. */
+#define R_REST 0.35
+
 static int fd = -1;
 static void on_alarm(int s) { (void)s; }        /* no SA_RESTART: unblocks a stuck wait */
 
@@ -136,6 +141,61 @@ static void detrend(double *out, int n, int w)
 
 /* Dominant period by autocorrelation. Peak-picking is defeated by the motion in an ordinary
  * recording; autocorrelation survives it, and the confidence says whether to believe the answer. */
+/* Pulsatile amplitude at one frequency, by Goertzel's recurrence.
+ *
+ * Returns the height of the component at f, having removed dc first. Only ever used as a ratio
+ * between two channels measured the same way, so the factor between "amplitude of the
+ * fundamental" and "peak-to-peak swing" cancels and does not need to be right in absolute terms.
+ */
+static double bin_amp(const unsigned int *x, int n, double dc, double fs, double f)
+{
+    double w, c, s0, s1 = 0, s2 = 0, p;
+    int i;
+
+    if (n < 8 || f <= 0.0 || f >= fs / 2.0) return 0.0;
+    w = 2.0 * 3.14159265358979323846 * f / fs;
+    c = 2.0 * cos(w);
+    for (i = 0; i < n; i++) {
+        s0 = (x[i] - dc) + c * s1 - s2;
+        s2 = s1;
+        s1 = s0;
+    }
+    p = s1 * s1 + s2 * s2 - c * s1 * s2;
+    return p > 0.0 ? 2.0 * sqrt(p) / n : 0.0;
+}
+
+/* The same amplitude, but averaged over short windows instead of integrated across the record.
+ *
+ * One bin over the whole forty seconds resolves 0.025 Hz, and a heart does not hold still to a
+ * fortieth of a hertz - the breath alone moves it a couple of bpm. The pulse energy smears across
+ * neighbouring bins and the single bin at the mean rate keeps almost none of it: measured that
+ * way a channel visibly swinging 2700 counts reported an amplitude of 1.
+ *
+ * Six-second windows resolve 0.17 Hz, wide enough to hold the pulse wherever it wanders within
+ * one window, and averaging magnitudes rather than complex values means separate windows are not
+ * required to stay in phase with each other. Each window has its own mean removed, so a baseline
+ * that drifts across the record does not leak into any of them.
+ */
+static double band_amp(const unsigned int *x, int n, double fs, double f)
+{
+    int w = (int)(fs * 6.0), step, i, k, nw = 0;
+    double sum = 0.0, dc;
+
+    if (w < 16) w = 16;
+    if (w > n) w = n;
+    step = w / 2;
+    if (step < 1) step = 1;
+
+    for (i = 0; i + w <= n; i += step) {
+        dc = 0.0;
+        for (k = i; k < i + w; k++) dc += x[k];
+        dc /= w;
+        sum += bin_amp(x + i, w, dc, fs, f);
+        nw++;
+    }
+    return nw ? sum / nw : 0.0;
+}
+
 static double period_bpm(const double *seg, int n, double fs, double *conf)
 {
     static double corr[512];
@@ -280,6 +340,30 @@ int main(int argc, char **argv)
             if (op == 0)      wr16(rg, vl);
             else if (op == 1) wr8(rg, (unsigned char)vl);
             else              rd16(rg, &v);
+        }
+
+        /* Optional register overrides, applied after the captured sequence and before the chip
+         * is armed: ppgd 45 "" spo2 0130=03ff,0132=03ff
+         *
+         * These have to go in here rather than mid-stream. Writing 0x0130 to a running chip
+         * stopped it producing bursts altogether - every sample after the change came back empty
+         * - so a value only means anything if it was in place when the chip started.
+         *
+         * The point of it is the red channel: it pulses 5 counts against infrared's 64 on an
+         * unsaturated DC, so R is noise, and no shared gain can separate them. If one of these
+         * registers is the per-slot LED current then raising it is the whole fix.
+         */
+        if (argc > 4 && argv[4][0]) {
+            const char *p = argv[4];
+            while (*p) {
+                unsigned int rg2 = 0, vl2 = 0;
+                if (sscanf(p, "%x=%x", &rg2, &vl2) == 2) {
+                    wr16((unsigned short)rg2, (unsigned short)vl2);
+                }
+                while (*p && *p != ',') p++;
+                if (*p == ',') p++;
+            }
+            wr8(0xdddd, 0xc1);            /* commit, as the sequence itself does */
         }
         gain = want_spo2 ? 0x9055 : 0x1f69;     /* whichever that sequence applied */
     }
@@ -553,41 +637,55 @@ int main(int argc, char **argv)
              * watch itself said 100%. What matters here is whether both channels are pulsatile
              * at all, which is the precondition for any of it and is what the gain fix was for.
              */
+            /* Measure both channels where the pulse actually is.
+             *
+             * This used to be peak-to-peak within one-second blocks, which takes whatever the
+             * largest excursion in each second happens to be - a movement artefact, a swallow,
+             * the baseline drifting underneath - and calls it the pulse. The ratio then divides
+             * one contaminated number by another, which is the most likely reason a wrist that
+             * was resting throughout gave R of 0.248 on one run and 0.361 on the next with the
+             * saturation obviously unchanged.
+             *
+             * The rate is already known to a fraction of a bpm by this point, so ask each channel
+             * for its amplitude at that frequency and nowhere else. Baseline drift sits below the
+             * bin, motion spreads across the rest of the spectrum, and what comes back is the
+             * pulsatile amplitude the ratio of ratios is actually defined in terms of.
+             */
             double a1 = 0, a2 = 0, dc1 = 0, dc2 = 0, r = 0;
-            int blk = (int)fs, nb = 0, j2, k2;
-            for (j2 = 0; j2 + blk < ns; j2 += blk) {
-                unsigned int lo1 = ch1[j2], hi1 = ch1[j2], lo2 = ch2[j2], hi2 = ch2[j2];
-                for (k2 = j2; k2 < j2 + blk; k2++) {
-                    if (ch1[k2] < lo1) lo1 = ch1[k2];
-                    if (ch1[k2] > hi1) hi1 = ch1[k2];
-                    if (ch2[k2] < lo2) lo2 = ch2[k2];
-                    if (ch2[k2] > hi2) hi2 = ch2[k2];
-                }
-                a1 += hi1 - lo1;
-                a2 += hi2 - lo2;
-                dc1 += ch1[j2];
-                dc2 += ch2[j2];
-                nb++;
+            {
+                int j2;
+                for (j2 = 0; j2 < ns; j2++) { dc1 += ch1[j2]; dc2 += ch2[j2]; }
+                /* The mean of the whole record. The old code summed ch1[j2] once per block, so
+                 * one sample in every hundred stood in for the DC level. */
+                dc1 /= ns;
+                dc2 /= ns;
+                a1 = band_amp(ch1, ns, fs, med / 60.0);
+                a2 = band_amp(ch2, ns, fs, med / 60.0);
             }
-            if (nb) { a1 /= nb; a2 /= nb; dc1 /= nb; dc2 /= nb; }
             if (dc1 > 0 && dc2 > 0 && a2 > 0) r = (a1 / dc1) / (a2 / dc2);
-            /* SpO2, anchored on the vendor rather than a textbook.
+            /* SpO2 from R, anchored on this sensor rather than on the vendor's.
              *
-             * The usual SpO2 = 110 - 25R is fitted for transmissive fingertip oximeters and gives
-             * 81% here where the watch itself says 100. The vendor's own capture provides a real
-             * anchor instead: its two channels ran at 73 and 69 counts on a DC of about
-             * 3,194,500 - an R of 1.06 - while it reported 99%. So hold that point and let R move
-             * around it.
+             * The anchor used to be the vendor's own capture: its two channels at 73 and 69
+             * counts on a DC of 3,194,500 - an R of 1.06 - while it displayed 99%. Borrowing that
+             * was a mistake. Our channels do not sit near each other the way the vendor's did
+             * (450 against 158 on a resting wrist), so our R lands near R_REST, and
+             * 100 - 25*(0.35 - 1.06) comes to 117, which the clamp turns into 100 every single
+             * time. The 100% this printed on every run was the ceiling, not a measurement of
+             * anything, and it would have gone on reading 100 through a real desaturation.
              *
-             * One anchor fixes the offset, not the slope, so this tracks a change in R rather
-             * than measuring saturation outright. It is only reported when both channels are
-             * genuinely pulsatile: in green mode the second channel is not infrared and R lands
-             * between 1.5 and 3.5, which means nothing at all.
+             * So anchor on this sensor's own resting R instead. The wearer is healthy and still
+             * when R_REST was measured, so true saturation was ~98%. That is a one-point
+             * calibration: it fixes the offset and borrows the textbook slope, which means it
+             * reads ~98 at rest by construction and only movement away from that carries
+             * information. A fall is meaningful; the absolute number is an assumption.
+             *
+             * Reported only when both channels are genuinely pulsatile. In green mode the second
+             * channel is not infrared at all and R lands between 1.5 and 3.5, meaning nothing.
              */
             double spo2 = 0, sut = 0, ai = 0, sbp = 0, dbp = 0;
 
-            if (want_spo2 && a1 > 5 && a2 > 5 && r > 0.02 && r < 3.0) {
-                spo2 = 100.0 - 25.0 * (r - 1.06);
+            if (want_spo2 && a1 > 5 && a2 > 5 && r > 0.05 && r < 3.0) {
+                spo2 = 98.0 - 25.0 * (r - R_REST);
                 if (spo2 > 100.0) spo2 = 100.0;
                 if (spo2 < 70.0) spo2 = 70.0;
             }
@@ -615,9 +713,9 @@ int main(int argc, char **argv)
             }
 
             printf("hr=%.0f spread=%.0f hz=%.1f samples=%d windows=%d gain=%04x"
-                   " ac1=%.0f ac2=%.0f r=%.3f spo2=%.0f sut=%.0f ai=%.2f"
+                   " dc1=%.0f dc2=%.0f ac1=%.0f ac2=%.0f r=%.3f spo2=%.0f sut=%.0f ai=%.2f"
                    " sbp=%.0f dbp=%.0f used=%s\n",
-                   med, spread, fs, ns, nrates, gain, a1, a2, r, spo2, sut, ai, sbp, dbp,
+                   med, spread, fs, ns, nrates, gain, dc1, dc2, a1, a2, r, spo2, sut, ai, sbp, dbp,
                    src == ch2 ? "ch2" : "ch1");
         }
     }
