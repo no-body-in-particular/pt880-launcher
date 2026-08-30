@@ -456,6 +456,35 @@ int main(int argc, char **argv)
             else              rd16(rg, &v);
         }
 
+        /* On 0x0180, and why it is not applied here.
+         *
+         * The captured sequence leaves 0x0180 at 0x004d, and under that the two channels receive
+         * wildly different amounts of light: 4,200 counts against 53,000, a factor of twelve.
+         * Channel 1 then carries about two counts of pulsatile amplitude, and R - which is
+         * (AC/DC) on one channel over the other - is two counts divided by itself. Four resting
+         * measurements gave R of 2.10, 2.38, 4.75 and 0.824, which is noise wearing the shape of
+         * a saturation.
+         *
+         * Zeroing it moves the light to 18,500 against 32,800 and channel 1 to thirty or forty
+         * counts of pulse. Two consecutive runs then gave R of 0.730 and 0.741 - a spread of one
+         * and a half percent where it used to be a factor of five.
+         *
+         * Found by setting each configuration register to zero in turn and watching the light
+         * each channel received, which is a search that only became possible once the DC pedestal
+         * was subtracted: against a raw code of 3.14 million, quadrupling channel 1 looks like a
+         * rounding error. Only 0x0180 and 0x0110 moved it, and 0x0110 overshoots - it puts
+         * channel 2 below channel 1.
+         *
+         * It is not the default, because balancing costs the thing that already works. Channel 2
+         * carries the pulse shape the pressure is derived from, and zeroing 0x0180 drops its
+         * amplitude from 190-260 counts to 34-95: six runs in that state found no usable beats
+         * at all and returned no pressure. Nor is R yet steady enough to be worth that - five
+         * runs gave 0.96 to 1.32, and an earlier pair gave 0.73, so it moves between sessions as
+         * well as within one.
+         *
+         * A working pressure is not worth trading for a saturation that still is not measuring.
+         * Pass it as an override to carry the work on: ppgd 45 "" spo2 0180=0000
+         */
         /* Optional register overrides, applied after the captured sequence and before the chip
          * is armed: ppgd 45 "" spo2 0130=03ff,0132=03ff
          *

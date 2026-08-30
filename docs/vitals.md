@@ -257,3 +257,30 @@ Making it measurable needs channel 1's light raised from 3,916 toward channel 2'
 per-slot LED current is the obvious lever and has not been found: the captured sequence's writes
 to `0x0132` and `0x0134` do not stick, though the same writes applied explicitly after the
 sequence do, which is a thread worth pulling.
+
+## 0x0180 balances the two channels, and costs the pressure to do it
+
+Setting `0x0180` to zero, where the captured sequence leaves it at `0x004d`, moves the light each
+channel receives from 4,200 against 53,000 to 18,500 against 32,800 - from a factor of twelve to
+a factor of 1.8. Channel 1 goes from about two counts of pulsatile amplitude to thirty or forty.
+
+That is the thing that made R meaningless, so it is worth writing down properly. It was found by
+setting each configuration register to zero in turn and watching the light each channel received,
+a search that only became possible once the DC pedestal was subtracted: against a raw code of
+3.14 million, quadrupling channel 1 looks like a rounding error. Of thirty-two registers only two
+moved it - `0x0180`, and `0x0110`, which overshoots and puts channel 2 below channel 1.
+
+**It is not the default.** Two reasons, and the first is decisive:
+
+- Channel 2 carries the pulse shape the pressure is derived from, and its amplitude falls from
+  190-260 counts to 34-95. Six measurements in that state found no usable beats at all and
+  returned no pressure. A working pressure is not worth trading for a saturation that is still
+  not measuring.
+- R is steadier than it was and still not steady. Two runs gave 0.730 and 0.741, which looked
+  like an answer; five later ones gave 0.957, 1.014, 1.113, 1.192 and 1.324. That is sixteen
+  percent within a session and a different centre between sessions, on a wearer who was resting
+  for both.
+
+So it stays an override - `ppgd 45 "" spo2 0180=0000` - and the work carries on from there. What
+it would take next is a way to raise channel 1 without lowering channel 2, which is a different
+register from either of these two, or none.
