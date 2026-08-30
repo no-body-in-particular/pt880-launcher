@@ -196,17 +196,29 @@ static void pulse_shape(const double *d, int n, double fs, double *sut, double *
         if (!(d[i] >= d[i-1] && d[i] > d[i+1] && d[i] > thr)) continue;
         if (last >= 0 && i - last < (int)(fs * 0.4)) continue;
         if (last >= 0) {
-            int foot, k, lo = i - (int)(fs * 0.35);
-            double amp;
+            /* The foot is the last local minimum before the peak, not the lowest point in some
+             * window before it. Taking the window minimum finds wherever the trace happens to
+             * bottom out - often the very start of the search - and reported upstrokes of 341 ms
+             * where a real one is 80 to 250. */
+            int foot = -1, k, lo = i - (int)(fs * 0.5);
             if (lo < last) lo = last;
-            foot = lo;
-            for (k = lo; k < i; k++) if (d[k] < d[foot]) foot = k;
-            amp = d[i] - d[foot];
-            if (amp > 0) {
-                double mid = d[(i + last) / 2];
-                sum_sut += (i - foot) / fs * 1000.0;
-                sum_ai  += (mid - d[foot]) / amp;
-                nf++;
+            for (k = i - 2; k > lo; k--) {
+                if (d[k] <= d[k-1] && d[k] <= d[k+1]) { foot = k; break; }
+            }
+            if (foot < 0) foot = lo;
+            {
+                double amp = d[i] - d[foot];
+                /* The augmentation index compares the reflected wave with the systolic peak, and
+                 * the reflected wave arrives a couple of hundred milliseconds *after* the peak.
+                 * An earlier version sampled the midpoint between beats, which lands in the
+                 * trough and produced negative values - impossible on a real beat, and the reason
+                 * every pressure estimate built on it was nonsense. */
+                int refl = i + (int)(fs * 0.25);
+                if (amp > 0 && refl < n) {
+                    sum_sut += (i - foot) / fs * 1000.0;
+                    sum_ai  += (d[refl] - d[foot]) / amp;
+                    nf++;
+                }
             }
         }
         last = i;
@@ -554,7 +566,7 @@ int main(int argc, char **argv)
              */
             double spo2 = 0, sut = 0, ai = 0, sbp = 0, dbp = 0;
 
-            if (want_spo2 && a1 > 20 && a2 > 20 && r > 0.4 && r < 2.5) {
+            if (want_spo2 && a1 > 5 && a2 > 5 && r > 0.02 && r < 3.0) {
                 spo2 = 100.0 - 25.0 * (r - 1.06);
                 if (spo2 > 100.0) spo2 = 100.0;
                 if (spo2 < 70.0) spo2 = 70.0;
@@ -563,8 +575,16 @@ int main(int argc, char **argv)
             /* Pressure from pulse shape and rate. The coefficients are placeholders, not a
              * calibration - see docs/vitals.md. Reported so a trend is visible and so a cuff can
              * be fitted against it later; it is not a measurement of anyone's pressure yet. */
-            pulse_shape(d, ns, fs, &sut, &ai);
-            if (sut > 60 && sut < 400) {
+            /* Only at the red mode's 100 Hz. At the green mode's 25 Hz one sample is
+             * 40 ms, so a 150 ms upstroke is under four samples and the shape cannot
+             * be resolved - which is why green reported 316 ms upstrokes. */
+            if (fs > 60.0) pulse_shape(d, ns, fs, &sut, &ai);
+            /* Only when the shape is physiological. A real systolic upstroke is 80-250 ms and
+             * the augmentation index is positive - a negative one means the foot and the peak
+             * were found in the wrong order, and any pressure computed from that is arithmetic
+             * on noise. Publishing it anyway would be the vendor firmware's own failure dressed
+             * up, which is the thing this whole exercise exists to replace. */
+            if (sut > 80 && sut < 250 && ai > 0.0 && ai < 1.5) {
                 sbp = 105.0 + 0.28 * med - 0.055 * sut + 11.0 * ai;
                 dbp = 66.0 + 0.19 * med - 0.030 * sut + 6.5 * ai;
             }

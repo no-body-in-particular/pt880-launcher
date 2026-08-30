@@ -304,7 +304,14 @@ public class TrackerService extends Service {
                     // its windows disagree, which is what a moving wrist looks like - so the
                     // vendor path stays as the fallback, and is still the only source of SpO2
                     // and of a pressure.
-                    VendorVitals.Reading r = OwnVitals.measure(TrackerService.this);
+                    // Ask for the red mode: it carries the SpO2 ratio and runs at 100 Hz, which
+                    // is the only rate that can resolve a pulse shape - green's 25 Hz puts barely
+                    // four samples in a systolic upstroke.
+                    VendorVitals.Reading r = OwnVitals.measure(TrackerService.this, true);
+                    if (r == null) {
+                        // Green next: a much stronger pulse, and the rate is all it is for.
+                        r = OwnVitals.measure(TrackerService.this, false);
+                    }
                     if (r == null) {
                         r = VendorVitals.measure(TrackerService.this, VITALS_TIMEOUT_MS);
                     }
