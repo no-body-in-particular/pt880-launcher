@@ -588,3 +588,31 @@ Goodix wrote a good algorithm, not because the hardware hands one over. Our own 
 two counts of pulse where channel 2 carries sixty, and no algorithm recovers a ratio from that -
 which is why the work that matters is `0x0180` and the balance between the channels, not the
 arithmetic applied afterwards.
+
+## Calling the vendor's algorithm from outside its daemon
+
+The mechanism works and the state does not, and the second is the harder half.
+
+`gh3011_service` is a PIE - an ELF of type DYN, which is a shared object that happens to have an
+entry point - so `dlopen` maps it. It came up at 0xb6e68000 with the saturation routine at a known
+offset from there, the base read out of /proc/self/maps because nothing in a PIE's dynamic table
+points at a static function. So the code is addressable and callable with no daemon, no command
+socket, and no argument over the chip.
+
+Calling `FUN_0001b7c0` cold segfaults. Its opening lines dereference a pointer loaded from the
+data section, and that pointer is set during start-up; `dlopen` runs a binary's constructors but
+not its `main`, so it is null.
+
+Running their own initialisation first does not fix it, and the reason is plainer than the
+symptom. `GH30xService::init` is a C++ member function. It wants `this`, and calling it through a
+`void (*)(void)` hands it whatever happened to be in the argument register - so it segfaults
+before doing anything, exit 139. Getting a real `this` means constructing the service object,
+which means running the part of `main` that builds it, which is most of the daemon.
+
+So the position is: their algorithm can be reached but not used, because it is a method on an
+object rather than a function on data. What would make it work is not a cleverer call but the
+constructor, and at that point the honest description is running their daemon with extra steps.
+
+Recorded because the mechanism is worth knowing and because the failure is specific: this is a
+C++ object lifetime problem, not a permissions or relocation one, and nothing about it gets easier
+with a better guess at the arguments.

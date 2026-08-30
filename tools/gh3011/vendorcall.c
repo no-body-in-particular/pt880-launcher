@@ -86,6 +86,25 @@ int main(int argc, char **argv)
     printf("dlopen accepted it; load base 0x%lx\n", base);
     if (!base) { printf("no mapping found, so the offset cannot be applied\n"); dlclose(h); return 1; }
 
+    /* Their own initialisation first, when asked for by a third argument.
+     *
+     * The routine dereferences a pointer from the data section in its opening lines and that
+     * pointer is set during daemon start-up, so calling the algorithm cold segfaults. Rather than
+     * write the global by hand - which means guessing its address, its type and its lifetime -
+     * the code that owns it can be run.
+     *
+     * GH30xService::init is at 0x119b0. It will probably open the sensor and start threads, which
+     * is why this must not run while anything else is measuring, and why it is behind an argument
+     * rather than automatic.
+     */
+    if (argc > 3) {
+        void (*initfn)(void) = (void (*)(void))(void *)(base + 0x119b0);
+        printf("calling GH30xService::init at 0x%lx first\n", base + 0x119b0);
+        fflush(stdout);
+        initfn();
+        printf("init returned without crashing\n");
+    }
+
     fn = (spo2_fn)(void *)(base + SPO2_OFFSET);
     printf("calling the routine at 0x%lx with mode %d\n\n", base + SPO2_OFFSET, mode);
 
