@@ -827,3 +827,31 @@ A claim that ai depends on the sample rate does not survive either. It was 1.21 
 against 0.61 to 1.01 at 100, which looked like a rate effect; later runs at 100 Hz gave 1.22 and
 1.17. Same rate, 0.61 to 1.22. It is noisy, not rate-dependent, and two samples that happened to
 differ were enough to build a mechanism on.
+
+## The sut variance is occasional gross error, not jitter
+
+Two suspects ruled out by measurement rather than argument. Spacing the foot's second difference
+over a fixed twenty milliseconds instead of adjacent samples produced three more measurements and
+made them noisier - mean consecutive change 46.1 ms against 36.4, worst 181 against 141. Removing
+the per-beat alignment was worse still: 21 measurements of 43 instead of 36, and 46.0 ms of
+change. The alignment is helping and the foot is not the problem.
+
+Splitting one continuous recording into four 25-second segments - same wrist, same minutes, no
+gap - says what is:
+
+    segment  bpm  beats  sut  ai
+    1         49    17   150  1.05
+    2         52    17   231  1.14
+    3         60    12   241  1.11
+    4         54    15   231  1.13
+
+Three agree within ten milliseconds and one is eighty-one adrift. So sut is not continuously
+noisy; it is occasionally grossly wrong, about one measurement in four. That matches the shape of
+the archive statistics, where the median change between consecutive recordings is a healthy 30 ms
+while the mean is 36 and the worst 141 - outliers dragging an otherwise steady number.
+
+The two bad segments are also the two with the worst rate: 49 and 60 against a true rate near 53.
+The ensemble is built on the assumed period, so a wrong rate makes a wrong-length window and the
+shape measured inside it is wrong with it. The pulse shape path inherits every rate error rather
+than failing independently of one, which means sut cannot be stabilised on its own - the rate has
+to be right first, and one rate estimate in four is not.

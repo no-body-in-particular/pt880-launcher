@@ -1158,7 +1158,7 @@ static void pulse_shape(const double *d, int n, double fs, double bpm, double *s
             {
                 int shift, bestsh = 0;
                 double bestc = -2.0;
-                int room = T / 20 + 1;
+                int room = getenv("NOALIGN") ? 0 : T / 20 + 1;
                 for (shift = -room; shift <= room; shift++) {
                     double nu = 0, ds = 0, de = 0, cc;
                     int idx = pk[k] - pre + shift;
