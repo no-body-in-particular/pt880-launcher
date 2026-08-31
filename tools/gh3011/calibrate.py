@@ -104,8 +104,21 @@ def main(path, win_s=20.0, step_s=5.0):
     resps = [r[4] for r in good]
     med_resp = sorted(resps)[len(resps) // 2]
     # a hold is where the breathing stops; take the quietest quarter as held
+    # A held window has to be one where breathing stopped AND there is still a pulse to measure.
+    # Selecting on the first alone reaches around the hold to the transitions either side, which
+    # are the only windows near it with any amplitude - and then reports their difference from the
+    # baseline as a desaturation. That is how this script produced a slope of -21.6 percent per
+    # unit R from a recording in which every window of the actual hold was weak.
     held = [r for r in good if r[4] < med_resp * 0.6]
     free = [r for r in good if r[4] > med_resp]
+
+    quiet_all = [r for r in rows if r[4] < med_resp * 0.6]
+    if quiet_all and len(held) < max(2, len(quiet_all) // 2):
+        print('\n  the hold is in the recording but its windows have no pulse in them:'
+              ' %d quiet windows, %d of them with usable amplitude.' % (len(quiet_all), len(held)))
+        print('  holding a breath constricts the periphery, so wrist perfusion falls at the same'
+              ' time as the saturation does, and nothing can be read from it here.')
+        return
     print('\n  %d windows with usable pulse, R from %.3f to %.3f' % (len(good), min(Rs), max(Rs)))
     if held and free:
         hb = sum(r[1] for r in held) / len(held)

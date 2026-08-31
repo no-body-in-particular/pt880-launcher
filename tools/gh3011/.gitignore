@@ -3,3 +3,6 @@ drift-*.txt
 live*.bin*
 live*.mode*
 cmp.txt
+cal.txt
+valid.txt
+_cal.txt
