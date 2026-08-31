@@ -795,3 +795,28 @@ So the position is unchanged from before the attempt. The red channel carries on
 of pulse under our own configuration, that is too small to build a ratio on, and their block has
 not been made to work on our stack. The lever is still not found. What is new is only a way of
 being wrong about it - a large amplitude that is the gain moving rather than blood.
+
+## The blood pressure offset was not an offset
+
+Ours read 116/72 and 113/70 against a cuff of 105/65, which looked like a systematic nine over six
+and was worth chasing. Twenty minutes later the cuff read 120/74, 116/71, 115/72 and 112/66, and
+ours read 112/69.
+
+So the cuff moved about seventeen systolic within the hour and ours did not move at all: 112, 113,
+114 and 116 across every measurement of the session, whatever the reference was doing. There is no
+offset. There are two numbers drifting independently, and reading their difference at one moment
+as a calibration error was a mistake about what was varying.
+
+What that does show is worse than an offset. Ours is insensitive to real change - it sits near 114
+whether the wearer is at 105 or at 120 - which for a measurement whose entire purpose is to notice
+a change is the more serious fault, and one an offset correction would have hidden.
+
+The mechanism is visible in the same runs. beats came back as 17, 8, and twice nothing, out of
+about thirty-eight available in forty-five seconds at fifty-three bpm. The pulse shape analysis is
+discarding more than half the beats, so ai is computed from a handful and moves 0.61 to 1.01
+between runs at one sample rate. Through its coefficient of 11.0 that is four mmHg of noise on
+systolic by itself, which is the size of the signal.
+
+ai also depends on the sample rate: 0.61 to 1.01 at 100 Hz against 1.21 to 1.23 at 198, on the
+same wrist within minutes. A feature that changes with how fast it was sampled is measuring the
+sampling as much as the pulse.
