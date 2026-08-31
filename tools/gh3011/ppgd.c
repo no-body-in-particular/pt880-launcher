@@ -1683,6 +1683,64 @@ int main(int argc, char **argv)
                     (dc1 > 3200000.0 || (want_spo2 && dc2 > 3200000.0)))
                     newgain = (unsigned short)(gain - (gain >> 3));   /* back off about 12% */
 
+                /* And a floor, which this loop has never had.
+                 *
+                 * The rule above only ever backs off. Below 3,200,000 it does nothing at all, so
+                 * any level between zero and about 54,000 is accepted and the search stops
+                 * wherever it happens to be when saturation stops. That is why the same 0x0084
+                 * setting has finished at 4,500 in one session and 50,364 in the next, and why
+                 * the recordings fall into level groups that looked like a property of the
+                 * signal and were a property of this loop.
+                 *
+                 * The vendor does not regulate gain against amplitude at all. Their 0x0118 is
+                 * 0x2828 in all three of their configurations, and what they check is the level,
+                 * against a window per mode - 28626 up for heart rate, 5111 up for saturation.
+                 * A floor is the half we were missing.
+                 *
+                 * Raising gain here is safe in a way it was not before. An earlier version of
+                 * this raised gain when the amplitude was low, and a railed channel reads flat,
+                 * so it drove the rail harder and lost the pulse. The note above says why: level
+                 * is unambiguous where amplitude is not. Keying the rise on level cannot make
+                 * that mistake, because a railed channel has a high level and will be backed off
+                 * by the rule above instead.
+                 *
+                 * A step up of an eighth mirrors the step down, so the two cannot fight: the
+                 * window between the floor and saturation is far wider than one step.
+                 */
+                else if (gain < 0xe000) {
+                    /* Which channel has to clear the floor depends on what is being measured,
+                     * and getting this the wrong way round makes the floor do nothing.
+                     *
+                     * A rate is read off whichever channel carries more pulse, so it is the
+                     * better of the two that must be in range - the other being dark costs
+                     * nothing. A ratio of ratios needs both, so it is the worse of the two.
+                     *
+                     * The first version of this had it inverted: the rate keyed on channel one
+                     * alone and the ratio on the better channel. Measured, that left channel one
+                     * at a level of 3,750 with two counts of pulse while channel two sat at
+                     * 44,682 and satisfied the test on its own - the floor never fired, which is
+                     * the behaviour it was written to fix.
+                     *
+                     * Both can fit. The channels sit about 41,000 apart and the window from the
+                     * saturation floor to the back-off point is about 49,000, so there is room -
+                     * not much, which is why the ratio is the harder of the two to satisfy.
+                     */
+                    double lvl1 = dc1 - DARK_CODE;
+                    double lvl2 = dc2 - DARK_CODE;
+                    double lvl, want;
+
+                    if (want_spo2) {
+                        want = LEVEL_MIN_SPO2;
+                        lvl = lvl1 < lvl2 ? lvl1 : lvl2;        /* both channels must carry */
+                    } else {
+                        want = LEVEL_MIN_HR;
+                        lvl = lvl1 > lvl2 ? lvl1 : lvl2;        /* the better one is enough */
+                    }
+
+                    if (lvl < want)
+                        newgain = (unsigned short)(gain + (gain >> 3));
+                }
+
                 if (newgain != gain) {
                     /* Every gain change steps the DC by about 9500 counts, two orders of
                      * magnitude more than the pulse, so the settling period is unusable and has
