@@ -884,3 +884,31 @@ being repeated.
 2.09 is not physiological. Inverted it is 0.48, which would be - but which channel carries red in
 this configuration has not been established, and choosing the assignment that returns a plausible
 answer is assuming what is being measured. It stays 2.09 until the assignment is shown.
+
+## R, settled: it is quantisation, and three revisions did not change that
+
+Five consecutive ratio passes on one wrist, same configuration, minutes apart:
+
+    ac1  ac2      R
+      9    8   1.745
+      9    8   1.795
+     10   10   1.683
+      8    6   2.058
+      8    7   2.051
+
+and a single pass a few minutes earlier gave ac1=16, ac2=37, R=0.748.
+
+So R runs from 0.74 to 2.06 depending on whether the infrared amplitude comes out at seven counts
+or thirty-seven. Both are small enough that a count of quantisation is ten percent of the number,
+and the ratio of two such quantities is not a measurement of anything.
+
+This was the first diagnosis and it stands. It was then talked out of twice in one evening: once
+by a single capture whose ch2 carried a dropout, and once by a run that happened to have a large
+ac2 and produced a physiological 0.748 - each time by reading one measurement and writing it up
+before repeating it. The pattern is the same one that produced the phantom red drive earlier: a
+number in the expected range is not evidence when the thing being questioned is whether the number
+means anything.
+
+More averaging does not fix it either. Averaging reduces random error about a stable value, and
+these do not scatter about a value - they sit at 1.7 to 2.1 and then jump to 0.75 when the
+amplitude estimate lands in a different regime. That is not noise to be averaged down.
