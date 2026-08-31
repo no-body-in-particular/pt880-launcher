@@ -767,31 +767,31 @@ This file already said "per-slot LED current is the obvious lever and has not be
 still not found, and this is a second failure to find it rather than a new one. What is new is
 knowing what it costs: it is the whole of the saturation measurement, not a refinement of it.
 
-## How the manufacturer drives the red LED: the whole block, not one register
+## The manufacturer's register block, and a false result from it
 
-The slot registers were never their lever. Their three configurations write fifteen registers and
-0x0130, 0x0132 and 0x0134 are not among them. What they write is
+Their three configurations write fifteen registers, and 0x0130, 0x0132 and 0x0134 - the slot
+registers this project has twice recorded as the lever it could not find - are not among them.
+Their LED block is 0x0080=0x0405, 0x0082=0x01c4 and 0x0084, which is the one they step through
+0x21, 0x22 and 0x24 for their level ladder.
 
-    0002=ff21  000c=09f0  0012=0d02  0016=051e  0044=0001  0048=0001
-    0080=0405  0082=01c4  0084=0022    <- the one they step, 21/22/24
-    0118=2828  011a=0028  012e=0000  0136=0090  0180=008d  0186=0007
+0x0084 alone, over our own sequence, collapses both FIFO channels onto one slot: dc1 equals dc2 to
+the count, ac1 equals ac2, and R comes out 1.005 - one signal divided by itself. It means nothing
+without the 0x0080 and 0x0082 that belong with it.
 
-Applying 0084 by itself on top of our own sequence collapses both FIFO channels onto one slot -
-dc1 equals dc2 to the count, ac1 equals ac2, and R comes out 1.005, which is one signal divided by
-itself. It only means anything alongside the 0080 and 0082 that belong with it.
+Applying all fifteen appeared to raise the red pulse from three counts to five hundred and twenty
+three, and that was recorded here as the lever finally found. It was not. The raw samples say so:
+both channels span the same 61,000 counts, from 3,149,505 to 3,210,597, and each carries a
+within-group standard deviation of 17,662 across the record. A pulse is tens of counts on a
+steady baseline, not seventeen thousand.
 
-Applying all fifteen:
+What that amplitude actually was is our own gain loop fighting their configuration. Their block
+puts the DC above 3,200,000, which is this program's back-off threshold, so the gain steps down
+again and again through the measurement and the resulting sweep is read as an enormous pulse.
 
-                        red level   IR level   red AC   IR AC
-    our sequence            3,782     45,700        3      19
-    their block             3,965     44,353      523     487
+Freezing the gain does not rescue it either: their block with our gain held gives levels of 56,862
+and 64,805, both at or near the rail the notes record at about 3,210,580, and R of 1.427.
 
-The red pulse goes from three counts to five hundred and twenty three, and the DC separation
-survives - red still dim, infrared still bright, which is what the pair needs. That is the lever
-these notes have recorded as not found twice, and it was in their configuration the whole time.
-
-R is 12.0 and still not physiological, but the reason has changed and is worth stating separately.
-Red modulates 523 in 3,965, which is thirteen percent; infrared modulates 487 in 44,353, which is
-1.1 percent. The infrared figure is textbook for a PPG and the red one is far too high, so it is
-the red DC that is wrong rather than its AC - most likely bottoming out. That is a different
-problem from a pulse too small to measure, and a better one to have.
+So the position is unchanged from before the attempt. The red channel carries one to three counts
+of pulse under our own configuration, that is too small to build a ratio on, and their block has
+not been made to work on our stack. The lever is still not found. What is new is only a way of
+being wrong about it - a large amplitude that is the gain moving rather than blood.

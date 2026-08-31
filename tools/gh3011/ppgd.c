@@ -1724,7 +1724,16 @@ int main(int argc, char **argv)
                  * (ac1=986 ac2=652 at gain 7e4b) where the others stopped early at 9055 with ch2
                  * flat at 3 counts. In SpO2 mode go for both; for heart rate ch1 alone is enough
                  * and driving further only costs signal. */
-                if (gain > 0x1000 &&
+                /* Leave the gain alone when asked.
+                 *
+                 * Applying the vendor's configuration means applying their 0x0118 too, and this
+                 * loop then spends the measurement undoing it: their block puts the DC above the
+                 * back-off threshold, so the gain steps down again and again, and what comes out
+                 * is the gain moving rather than a pulse. A five hundred count amplitude was read
+                 * as a red channel at last driven properly, and it was this. */
+                if (getenv("FREEZEGAIN")) {
+                    /* nothing */
+                } else if (gain > 0x1000 &&
                     (dc1 > 3200000.0 || (want_spo2 && dc2 > 3200000.0)))
                     newgain = (unsigned short)(gain - (gain >> 3));   /* back off about 12% */
 
