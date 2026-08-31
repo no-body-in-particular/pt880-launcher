@@ -33,7 +33,8 @@ import java.io.OutputStream;
  * <h3>What is trusted, and what is not</h3>
  *
  * The heart rate is checked against the vendor's on the same wrist minutes apart - 46 through 52
- * against its 49 - and is published.
+ * against its 49 - and is published. Wear comes from the sensor's own detector rather than the
+ * thermopile: about a second, and it detects a wrist rather than warmth.
  *
  * SpO2 is anchored on the vendor's own ratio rather than the textbook fingertip formula, which
  * gave 81% where the watch said 100. One anchor fixes the offset and not the slope, so it tracks
@@ -62,7 +63,7 @@ final class OwnVitals {
      */
     private static final int TIMEOUT_MS = 120000;
 
-    /** The thermometer answers in about a second and needs no measurement, so it gets its own
+    /** The wear check answers in a few seconds and lights no LED for long, so it gets its own
      *  patience. Waiting two minutes to be told nobody is wearing the watch is the opposite of
      *  what the check is for. */
     private static final int WEAR_TIMEOUT_MS = 15000;
@@ -167,21 +168,22 @@ final class OwnVitals {
         String line = ask("wear", WEAR_TIMEOUT_MS);
         if (line == null) return -1;
 
-        // The sensor's own detector rides along in adt=, and is logged rather than used.
+        // worn= is the sensor's own detector now, not the thermometer.
         //
-        // It is the better instrument in principle: the thermopile infers a wrist from warmth,
-        // which a pocket or a radiator also provides, while the GH3011 detects the wrist itself
-        // and answers at once instead of taking six seconds to produce a first sample. It does
-        // not decide anything yet because it has not been shown to be right - and a wear check
-        // that wrongly says no cancels every measurement behind it, which is the one failure
-        // worth being slow about. Logging both is how the case for switching gets made.
+        // The GH3011 has a wear detector and it took a capture of the vendor daemon on the wire
+        // to arm it: there is a chip init before the auto-detect table, a second pass that
+        // overwrites six of that table's registers afterwards, and a write to 0x0002 before the
+        // start. vitals/docs/gh3011.md has the sequence. It answers in about a second where the
+        // thermopile needs eight, and it detects a wrist rather than warmth, which a pocket also
+        // supplies.
+        //
+        // The daemon still decides which source to use and reports both. adt= is the detector on
+        // its own: -1 there means it could not run and the thermometer answered instead, which is
+        // worth seeing in the log because it is the case where a reading got slow again.
+        int worn = field(line, "worn=");
         int adt = field(line, "adt=");
-        int therm = field(line, "worn=");
-        if (adt >= 0 && adt != therm) {
-            Log.i(TAG, "wear sources disagree: thermopile " + therm + ", sensor " + adt
-                    + "  [" + line.trim() + "]");
-        }
-        return therm;
+        if (adt < 0) Log.i(TAG, "wear fell back to the thermometer  [" + line.trim() + "]");
+        return worn;
     }
 
     /** Read {@code name=<decimal>} out of the reply, or -1. */
