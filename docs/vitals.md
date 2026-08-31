@@ -736,3 +736,33 @@ artefact of low gain rather than a real separation was wrong; it is real and the
 it. And the breath hold did not fail because of the sensor - it failed because of a change made a
 few hours earlier, and the capture was good enough to have shown a desaturation if there had been
 one to show.
+
+## The red drive lever is still not found, and it is what blocks saturation
+
+The second breath hold worked as an experiment. The hold is in the record twice over - respiratory
+energy spikes to 105 at t=40 to 55 against 12 to 38 elsewhere, and the rate falls to 42 to 44 bpm
+from 52 to 58 either side, which is breath-hold bradycardia. The wearer did it and the sensor saw
+it.
+
+R still could not report on it, and the reason is arithmetic rather than physiology. The red
+channel carries one to three counts of pulse. R is (redAC/redLevel) over (irAC/irLevel), so half a
+count of quantisation error on a two count numerator is twenty-five percent on R - which is the
+entire scatter observed, 1.15 to 1.87 across one recording. A few percent of desaturation moves R
+by about five percent. The measurement cannot see it, and no calibration curve changes that: a
+curve applied to a ratio built on a two count numerator returns a number with twenty-five percent
+of noise on it.
+
+So the lever is the red LED drive, and sweeping the slot registers did not find it. Across the
+writable range of the low byte in 0x0130, 0x0132 and 0x0134:
+
+    current   red DC   red AC   IR DC
+    0x06       3,865      3     45,356
+    0x26       3,854      3     45,166
+    0x76       3,849      3     45,121
+
+Neither channel's DC moves. LED current would move it enormously. Two bits of that byte are not
+writable either - bit 7 and bit 3 read back zero - so the field is narrower than it looks.
+
+This file already said "per-slot LED current is the obvious lever and has not been found". It is
+still not found, and this is a second failure to find it rather than a new one. What is new is
+knowing what it costs: it is the whole of the saturation measurement, not a refinement of it.
