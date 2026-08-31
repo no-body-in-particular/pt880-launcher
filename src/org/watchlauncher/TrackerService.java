@@ -1292,10 +1292,29 @@ public class TrackerService extends Service {
         return prefs(this).getInt(KEY_VITALS, 180);
     }
 
+    /**
+     * Restart the watch, and say so either way.
+     *
+     * This acknowledges the server's command before trying, so a restart that cannot happen is
+     * indistinguishable from one that did - the server is told yes and the watch stays up. That
+     * is worth a log line rather than silence: the shell falls back through wsu, su and finally
+     * a plain sh, and a plain sh opens successfully while being no use for this, so "opened" and
+     * "can reboot" are different questions.
+     */
     private void reboot() {
         RootShell sh = new RootShell();
         try {
-            if (sh.open() && sh.isRoot()) sh.runQuiet("reboot");
+            if (!sh.open()) {
+                Log.w(TAG, "restart asked for, but no shell would open");
+                return;
+            }
+            if (!sh.isRoot()) {
+                Log.w(TAG, "restart asked for, but the shell is not root (" + sh.identity()
+                        + "); " + sh.failure());
+                return;
+            }
+            if (!sh.runQuiet("reboot")) Log.w(TAG, "restart: the reboot command failed");
+            else Log.i(TAG, "restart: reboot issued");
         } catch (Throwable t) {
             Log.w(TAG, "reboot failed", t);
         } finally {
