@@ -920,3 +920,34 @@ the same rounding down by sixty-odd.
 The Goertzel amplitudes this file already computes for band_amp are the same quantity as their
 RMS, and the ratio pass already reports its R from those, which is why that path gives 0.61 to
 0.81 where the beatwise one gives 1.7 to 2.1 on the same wrist.
+
+## Breath-hold calibration does not work on a wrist, for a physiological reason
+
+The plan was sound on paper: R needs tying to a saturation somewhere, a reference oximeter is not
+available, and a breath hold supplies a second point for nothing. Rest gives the intercept, the
+hold gives the slope.
+
+What a 115-second capture shows, in twenty-second windows:
+
+    t(s)   ac1   ac2      R    resp
+     0-35  84-30 187-63  0.69-0.84  293-435
+    40-85  12-6   21-5   1.0-2.0    172-5     <- the hold
+    90-95  18-31  32-58  0.96-0.98  224-379
+
+The hold is unmistakable - respiratory energy falls from 435 to 5 - and so is the problem. The
+pulse amplitude collapses with it, from 187 counts to five, which is well inside the range where R
+is quantisation rather than measurement. Every window during the hold is weak. There is no
+saturation to read out of them.
+
+The cause is the wearer, not the sensor. Holding a breath provokes the diving response and with it
+peripheral vasoconstriction, so wrist perfusion falls exactly when the saturation does. On a
+fingertip clip the amplitude has room to spare and survives it; on a wrist it does not.
+
+That also settles the earlier attempt at this, where the amplitude collapse was read as the sensor
+losing contact and the wearer was asked to sit still and repeat it. They were sitting still. It
+was their circulation.
+
+The analysis script will fit a line through it if allowed - it reported a slope of -21.6 percent
+per unit R from this recording - and that number is worth nothing: the windows it used were the
+two transitions either side of the hold, the only ones near the hold with any pulse in them. A
+calibration from a breath hold needs the amplitude to survive the hold, and here it does not.
