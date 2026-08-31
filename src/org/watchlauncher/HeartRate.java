@@ -7,6 +7,8 @@ import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
 import android.hardware.TriggerEvent;
 import android.hardware.TriggerEventListener;
+import android.os.Handler;
+import android.os.Looper;
 
 import java.util.List;
 import java.util.Locale;
@@ -59,6 +61,9 @@ public class HeartRate {
         void onHeartRate(int bpm);
     }
 
+    private final Context ctx;
+    private final Handler ui = new Handler(Looper.getMainLooper());
+    private Thread own;
     private final SensorManager sensors;
     private final Sensor sensor;
     private final Listener listener;
@@ -69,6 +74,7 @@ public class HeartRate {
     private boolean running = false;
 
     public HeartRate(Context c, Listener l) {
+        ctx = c;
         listener = l;
         sensors = (SensorManager) c.getSystemService(Context.SENSOR_SERVICE);
         sensor = find();
@@ -136,9 +142,23 @@ public class HeartRate {
     private static final long MIN_DWELL_MS = 1500;
 
     /** Take one reading. Returns to idle by itself once it has one. */
+    /**
+     * Ask for a reading, from whichever source can give one.
+     *
+     * The platform sensor is the vendor's, and the vendor's daemon no longer runs - vitalsd took
+     * its init slot. So it is registered for and never speaks, which left this screen showing the
+     * last figure the tracker had logged, greyed out, for ever. It stays registered because it
+     * costs nothing and would start working again if the vendor daemon were ever put back.
+     *
+     * The reading that actually arrives comes from our own daemon, the same one the tracker uses,
+     * on a thread because it lights an LED for the better part of a minute. measuring() stays
+     * true meanwhile, which is what puts the screen into its reading state rather than showing a
+     * stale number as though it were current.
+     */
     public void start() {
-        if (sensor == null || running) return;
+        if (running) return;
         running = true;
+        startOwn();
         startedAt = android.os.SystemClock.elapsedRealtimeNanos();
         try {
             sensors.registerListener(events, sensor, SensorManager.SENSOR_DELAY_NORMAL);
@@ -148,6 +168,32 @@ public class HeartRate {
         try {
             sensors.requestTriggerSensor(trigger, sensor);
         } catch (Exception e) { /* not a trigger sensor */ }
+    }
+
+    /** One measurement from vitalsd, reported on the UI thread. */
+    private void startOwn() {
+        if (own != null && own.isAlive()) return;
+        own = new Thread(new Runnable() {
+            public void run() {
+                final VendorVitals.Reading r = OwnVitals.measure(ctx, false);
+                ui.post(new Runnable() {
+                    public void run() {
+                        running = false;
+                        if (r == null || r.heartRate <= 0) {
+                            if (listener != null) listener.onHeartRate(bpm);
+                            return;
+                        }
+                        bpm = r.heartRate;
+                        if (r.systolic > 0) systolic = r.systolic;
+                        if (r.diastolic > 0) diastolic = r.diastolic;
+                        readingAt = System.currentTimeMillis();
+                        if (listener != null) listener.onHeartRate(bpm);
+                    }
+                });
+            }
+        }, "sports-hr");
+        own.setDaemon(true);
+        own.start();
     }
 
     /** True while the LED is on and no reading has come back yet. */

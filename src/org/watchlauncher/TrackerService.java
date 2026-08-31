@@ -285,8 +285,15 @@ public class TrackerService extends Service {
      */
     private static final long MEASURE_STUCK_MS = 5 * 60 * 1000;
 
-    /** How often the red pass runs, in cycles. Green carries the rate on every one of them. */
-    private static final int RED_EVERY = 4;
+    /**
+     * How often the red pass runs, in cycles.
+     *
+     * Every one. It was every fourth to save the LED time - a red request is two passes against
+     * green's one - but red is the only source of a pressure, and a pressure every fortieth minute
+     * is not enough to be useful when most red passes come back without a usable pulse shape
+     * anyway. Better to try each time and publish the ones that work.
+     */
+    private static final int RED_EVERY = 1;
 
     private int redCycle = 0;
 
@@ -444,6 +451,18 @@ public class TrackerService extends Service {
                     }
                     if (r.oxygen > 0) {
                         sendAsync(BeehomeCodec.health(when, JK_OXYGEN, r.oxygen));
+                    }
+                    // The temperature came with the reading, so send it here.
+                    //
+                    // It had a timer of its own, and sendTemperatureAsync gives up when a
+                    // measurement is running - which since vitals got their own clock is most of
+                    // the time, a cycle occupying the better part of every three minutes. So the
+                    // temperature stopped being sent at all. It is a field of the reading we
+                    // already have; the separate reading was always the more awkward way to get
+                    // it, and this one costs nothing.
+                    if (r.temperature > 20.0 && r.temperature < 45.0) {
+                        sendAsync(BeehomeCodec.health(when, JK_TEMPERATURE,
+                                                      (float) r.temperature));
                     }
                 } catch (Throwable t) {
                     Log.w(TAG, "vitals measurement failed", t);
