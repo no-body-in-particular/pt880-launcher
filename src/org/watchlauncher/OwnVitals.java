@@ -166,7 +166,22 @@ final class OwnVitals {
     static int worn(Context ctx) {
         String line = ask("wear", WEAR_TIMEOUT_MS);
         if (line == null) return -1;
-        return field(line, "worn=");
+
+        // The sensor's own detector rides along in adt=, and is logged rather than used.
+        //
+        // It is the better instrument in principle: the thermopile infers a wrist from warmth,
+        // which a pocket or a radiator also provides, while the GH3011 detects the wrist itself
+        // and answers at once instead of taking six seconds to produce a first sample. It does
+        // not decide anything yet because it has not been shown to be right - and a wear check
+        // that wrongly says no cancels every measurement behind it, which is the one failure
+        // worth being slow about. Logging both is how the case for switching gets made.
+        int adt = field(line, "adt=");
+        int therm = field(line, "worn=");
+        if (adt >= 0 && adt != therm) {
+            Log.i(TAG, "wear sources disagree: thermopile " + therm + ", sensor " + adt
+                    + "  [" + line.trim() + "]");
+        }
+        return therm;
     }
 
     /** Read {@code name=<decimal>} out of the reply, or -1. */
