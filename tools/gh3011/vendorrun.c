@@ -616,13 +616,29 @@ int main(int argc, char **argv)
 
             printf("\nconfig 0x%p, register 0x%04x\n", cfg, rg);
             if (!cfg) {
-                printf("no measurement config: the snapshot was taken outside a measurement,\n");
-                printf("so neither routine can be called and no comparison is possible yet\n");
-            } else if (mode == 7) {
+                /* Their configure step dereferences this, so a zeroed block gets further than a
+                 * null one. It is not the real config and nothing it returns is trustworthy, but
+                 * it says whether anything past the gate runs at all. */
+                static unsigned char stub[512];
+                printf("no measurement config in this snapshot - using an empty one, so treat\n");
+                printf("anything below as a smoke test rather than a measurement\n");
+                cfg = stub;
+            }
+            if (mode == 7) {
+                /* The saturation routine wants the gate byte to read 8, not 7.
+                 *
+                 * FUN_00018f38 opens with a compare against 8 and returns otherwise, while the
+                 * heart rate routine wants 1 or 7. So 7 selects which start-up runs and 8 is what
+                 * that start-up leaves behind - which is why calling their start with mode 7
+                 * here left the byte reading 8 and looked like a mistake at the time.
+                 */
+                unsigned char *mb = (unsigned char *)(base + MODE_BYTE);
                 unsigned char sat = 0, q1 = 0, q2 = 0, q3 = 0, q4 = 0, q5 = 0, stat = 0, q6 = 0;
                 unsigned short s1 = 0, s2 = 0, s3 = 0, s4 = 0;
                 unsigned r;
-                printf("calling their saturation routine at Ghidra 0x18f38...\n");
+                make_writable(mb);
+                *mb = 8;
+                printf("gate byte set to 8; calling their saturation routine at Ghidra 0x18f38...\n");
                 r = ((sat_fn) FN(base, OFF(0x18f38)))(
                         cfg, rg, 2, &sat, &q1, &q2, &q3, &s1, &s2, &s3, &s4,
                         &q4, &q5, &e, &stat, scratch, &count, &q6);
