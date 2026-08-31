@@ -366,8 +366,20 @@ static double confidence_p(const double *vals, int n, double tol)
     sem = sd / sqrt((double) n);
 
     /* Windows that agree exactly are a claim about the windows, not certainty about the rate.
-     * Floor the error at a fifth of a bpm so this cannot return a flat 1.0. */
-    if (sem < 0.2) sem = 0.2;
+     *
+     * The floor was a fifth of a bpm and that was far too low to do the job. With a spread of two
+     * over seven windows the standard error is about 0.76, and the mass of a normal within two
+     * bpm of that is 0.99 - so it printed 1.00 on every measurement taken, including three at
+     * different sample rates that disagreed with each other by six bpm. A number that reads full
+     * confidence while the measurements it describes disagree is worse than no number.
+     *
+     * The windows of one measurement are not independent samples of the truth. They share a
+     * wrist, a contact, a gain and a minute of arm position, so their agreement understates the
+     * error by however much those are common to them - which is most of it. Three consecutive
+     * cuff-referenced runs disagreed with the cuff by one to three bpm while their own windows
+     * agreed to within two, so a bpm and a half is the floor the evidence supports.
+     */
+    if (sem < 1.5) sem = 1.5;
 
     /* P(|error| < tol) for a normal error: erf(tol / (sigma*sqrt(2))). */
     return erf(tol / (sem * 1.41421356237309505));
