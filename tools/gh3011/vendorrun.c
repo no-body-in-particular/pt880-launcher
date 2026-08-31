@@ -341,7 +341,14 @@ int main(int argc, char **argv)
     printf("mapped at 0x%lx\n", base);
 
     /* Their live state first, if a snapshot exists, before anything here writes over it. */
-    have_dump = load_dump("/data/local/tmp/live.bin", base, 0x2f000, 0x7f622000, 0x2c000);
+    {
+        /* Which snapshot. One per mode gets captured, since each routine needs the config that
+         * its own measurement builds, so the caller has to say which one it wants. */
+        const char *snap = getenv("SNAPSHOT");
+        if (!snap) snap = "/data/local/tmp/live.bin";
+        printf("snapshot: %s\n", snap);
+        have_dump = load_dump(snap, base, 0x2f000, 0x7f622000, 0x2c000);
+    }
 
     /* The one thing that must be in place before their code runs: register reads have to go
      * somewhere. Everything else start-up will do for itself. */
@@ -384,15 +391,25 @@ int main(int argc, char **argv)
     if (argc > 3) reg22 = (unsigned) strtoul(argv[3], NULL, 0);
     if (argc > 4) reg16 = (unsigned) strtoul(argv[4], NULL, 0);
     trace = !quiet;
-    if (have_dump) {
-        /* Their start-up already ran, in their process, against a real chip and a real wrist.
-         * Running it again here against a fake bus would write over the state that was the entire
-         * point of taking the snapshot. */
-        printf("\nskipping their start-up: the snapshot already carries its result\n");
-    } else {
-        printf("\ncalling gh30x_start_func_with_mode(%d) with 0x0022 answering 0x%x...\n",
+    /* Run their start-up even with a snapshot loaded, because the snapshot is of the wrong mode.
+     *
+     * The daemon was doing wear detection when it was caught - its gate byte read 1 - so the two
+     * things the measurement routines actually take, the config pointer at 0x3d5ac and the
+     * register at 0x3d5a8, are both still zero in it. What the snapshot does give is the heap and
+     * the context, which is what start-up needed and never had here.
+     *
+     * So the two halves fit together: their state from the snapshot, their configuration from
+     * their own start-up running on top of it.
+     */
+    {
+        unsigned long *cfg = (unsigned long *)(base + OFF(0x3d5ac));
+        unsigned short *rg = (unsigned short *)(base + OFF(0x3d5a8));
+
+        printf("\nbefore start: config 0x%08lx, register 0x%04x\n", *cfg, *rg);
+        printf("calling gh30x_start_func_with_mode(%d) with 0x0022 answering 0x%x...\n",
                mode, reg22);
         start_mode(mode);
+        printf("after start:  config 0x%08lx, register 0x%04x\n", *cfg, *rg);
     }
     printf("start state ready; %d register reads so far\n", reads);
     if (quiet) { printf("SWEEP reg22=0x%04x startreads=%d\n", reg22, reads); return 0; }
@@ -568,13 +585,64 @@ int main(int argc, char **argv)
             }
             printf("\n");
         }
-        printf("calling the saturation routine at Ghidra 0x1b7c0 with %d samples...\n", n);
-        spo2(mixed, n, (unsigned) mode, &res, &lvl, &st, &a, &b, &c, scratch, &e);
-        printf("  result=%u level=%u status=%u a=%u b=%u c=%u e=%u\n", res, lvl, st, a, b, c, e);
-        if (!res && !lvl && !st && !a && !b && !c && !e)
-            printf("  all zero: it returned without computing anything\n");
-        else
-            printf("  it answered - compare against what ppgd made of the same waveform\n");
+        /* Call them the way gh30x_fifo_evt_handler does.
+         *
+         * Every call before this passed our samples as the first argument, because a routine that
+         * measures a waveform ought to take one. It does not. The handler passes the config at
+         * 0x3d5ac and the register at 0x3d5a8, and the routine reads its own samples through the
+         * bus - which is why the fake bus matters and why the sample pointer never did. The zeros
+         * that came back were not a measurement of anything.
+         *
+         *     mode 2   heart rate    FUN_0001b7c0   11 arguments
+         *     mode 7   saturation    FUN_00018f38   18 arguments
+         *
+         * Both need a config that only a real measurement builds, so both are gated on a snapshot
+         * taken while one was running.
+         */
+        {
+            typedef unsigned (*hr_fn)(void *, unsigned short, int,
+                                      unsigned char *, unsigned char *, unsigned char *,
+                                      unsigned char *, unsigned char *, unsigned short *,
+                                      void *, unsigned short *);
+            typedef unsigned (*sat_fn)(void *, unsigned short, int,
+                                       unsigned char *, unsigned char *, unsigned char *,
+                                       unsigned char *, void *, void *, void *, void *,
+                                       unsigned char *, unsigned char *, unsigned short *,
+                                       unsigned char *, void *, unsigned short *,
+                                       unsigned char *);
+            void *cfg = *(void **)(base + OFF(0x3d5ac));
+            unsigned short rg = *(unsigned short *)(base + OFF(0x3d5a8));
+            unsigned short count = 0xcd;
+
+            printf("\nconfig 0x%p, register 0x%04x\n", cfg, rg);
+            if (!cfg) {
+                printf("no measurement config: the snapshot was taken outside a measurement,\n");
+                printf("so neither routine can be called and no comparison is possible yet\n");
+            } else if (mode == 7) {
+                unsigned char sat = 0, q1 = 0, q2 = 0, q3 = 0, q4 = 0, q5 = 0, stat = 0, q6 = 0;
+                unsigned short s1 = 0, s2 = 0, s3 = 0, s4 = 0;
+                unsigned r;
+                printf("calling their saturation routine at Ghidra 0x18f38...\n");
+                r = ((sat_fn) FN(base, OFF(0x18f38)))(
+                        cfg, rg, 2, &sat, &q1, &q2, &q3, &s1, &s2, &s3, &s4,
+                        &q4, &q5, &e, &stat, scratch, &count, &q6);
+                if (sat == 0xff) sat = 0;
+                printf("  saturation=%u%%  status=%u  returned=%u\n", sat, stat, r);
+                printf("  extras: %u %u %u %u %u  shorts: %u %u %u %u  count=%u\n",
+                       q1, q2, q3, q4, q5, s1, s2, s3, s4, count);
+            } else {
+                unsigned char bpm = 0, q1 = 0, q2 = 0, q3 = 0, q4 = 0;
+                unsigned short s1 = 0;
+                unsigned r;
+                printf("calling their heart rate routine at Ghidra 0x1b7c0...\n");
+                r = ((hr_fn) FN(base, OFF(0x1b7c0)))(
+                        cfg, rg, 2, &bpm, &q1, &q2, &q3, &q4, &s1, scratch, &count);
+                if (bpm == 0xff) bpm = 0;
+                printf("  heart rate=%u bpm  returned=%u\n", bpm, r);
+                printf("  extras: %u %u %u %u  short=%u  count=%u\n", q1, q2, q3, q4, s1, count);
+            }
+        }
+        (void) spo2; (void) mixed; (void) res; (void) lvl; (void) st; (void) a; (void) b; (void) c;
     }
 
     dlclose(h);
