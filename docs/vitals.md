@@ -704,30 +704,35 @@ this analysis: purity 0.053 to 0.075 against a validated noise score of 0.073, w
 during the cuff run. That is the first time the metric has earned its place: it rejected four
 recordings that would otherwise have been analysed as though they meant something.
 
-## The breath hold says the saturation problem is upstream of calibration
+## The breath hold, and the regression it exposed
 
-A hundred seconds of continuous capture: breathe, hold, breathe. The hold is visible - the
+A hundred seconds of continuous capture: breathe, hold, breathe. The hold is in the record - the
 respiratory peak between 0.12 and 0.45 Hz falls to 10 to 17 around t=45 to 55 where it is 20 to 45
-either side - so the wearer did what was asked and the recording caught it.
+either side.
 
-R did not respond. Through the hold 1.472, 1.730, 1.948; before it 1.961 and 2.027; after it
-1.699, 1.833, 1.910. The window to window scatter is about plus or minus 0.2 and a desaturation of
-a few percent would move R by perhaps 0.05, so the measurement cannot see the thing it was set up
-to see.
+R did not respond, and sat at 1.5 to 2.0, which is off the end of any calibration curve. The
+reading taken from that was that the two channels must be the same wavelength, since they carried
+nearly the same DC and a nearly constant AC ratio. That was wrong twice over: this file already
+records that the pair is red and infrared, and the wearer can see the sensor go red in saturation
+mode and green in rate mode.
 
-The more useful result is the absolute value. A ratio of ratios near 0.5 to 0.7 is about 97
-percent saturation and R of 1.0 is already about 82. Ours sits at 1.5 to 2.0, off the bottom of
-any calibration curve there is. With it, the two channels carry nearly the same DC - 50,100
-against 51,900 - and a nearly constant AC ratio, which is what two slots of one wavelength look
-like rather than a red and an infrared one.
+The cause was the gain floor added earlier the same day. It raises gain until the weaker channel
+clears a level, and on this sensor the red channel is meant to sit dim - about 3,500 of level and
+four or five counts of pulse against infrared's sixty-four, which is exactly what these notes
+already described. Lifting it pulls both channels to about 45,000 where they converge, and a ratio
+between two channels reading the same thing is not a ratio. Measured directly:
 
-That relocates the problem. Calibration constants, theirs or fitted, cannot produce a saturation
-from a ratio taken between two channels of the same colour, because the difference in how
-haemoglobin absorbs the two is the entire mechanism. Until the channels are shown to be a genuine
-wavelength pair, there is nothing for a calibration to calibrate.
+    with the floor      level 46,074 / 44,824   ac 41 / 21   R 1.855
+    without it          level  3,514 / 39,902   ac  4 / 68   R 0.736
 
-An analysis error nearly buried this. The first pass averaged the Goertzel magnitude across every
-bin between 0.8 and 1.6 Hz; a pulse occupies one or two of about sixteen, so the average reported
-a seventy count pulse as four and the capture looked dead. The raw peak to peak said otherwise.
-Taking the strongest bin rather than the mean of the band is the fix, and the lesson is that a
-result which says the data is worthless deserves the same check as one that says it is good.
+So the floor now runs for the rate only. The vendor's own thresholds said as much and were
+misread: their saturation floor is 5,111 against 28,626 for the rate, which is nearly no floor at
+all, because for a ratio the channel that matters is the dim one.
+
+Restored, three runs: ac 5/64 and 8/132, R of 0.882 and 0.738 - a saturation in the mid nineties.
+
+Two corrections follow from this. The claim that the 47,600 counts between the channels was an
+artefact of low gain rather than a real separation was wrong; it is real and the measurement needs
+it. And the breath hold did not fail because of the sensor - it failed because of a change made a
+few hours earlier, and the capture was good enough to have shown a desaturation if there had been
+one to show.

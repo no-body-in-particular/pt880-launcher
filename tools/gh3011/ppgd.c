@@ -1752,7 +1752,29 @@ int main(int argc, char **argv)
                  * A step up of an eighth mirrors the step down, so the two cannot fight: the
                  * window between the floor and saturation is far wider than one step.
                  */
-                else if (gain < 0xe000) {
+                /* A floor for the rate only. Never for the ratio.
+                 *
+                 * Raising gain until the weaker channel clears a level destroys the ratio it was
+                 * meant to help. On this sensor the red channel is supposed to sit dim - about
+                 * 3,500 of level and four counts of pulse against infrared's sixty-eight, which
+                 * is what the notes describe and what a red LED does through skin. Lifting it
+                 * pulls both channels to about 45,000 where they converge, and a ratio between
+                 * two channels reading the same thing is not a ratio.
+                 *
+                 * Measured, one against the other on the same wrist:
+                 *
+                 *     with the floor      level 46,074 / 44,824   ac 41 / 21   R 1.855
+                 *     without it          level  3,514 / 39,902   ac  4 / 68   R 0.736
+                 *
+                 * 0.736 is a saturation in the mid nineties. 1.855 is off the end of any curve.
+                 * The floor was written from the vendor's per-mode thresholds, and their
+                 * saturation floor of 5,111 is far below their rate floor of 28,626 for exactly
+                 * this reason - it is nearly no floor at all, because the channel that matters
+                 * for a ratio is the dim one.
+                 *
+                 * A rate is different: it reads one channel and wants that channel bright.
+                 */
+                else if (gain < 0xe000 && !want_spo2) {
                     /* Which channel has to clear the floor depends on what is being measured,
                      * and getting this the wrong way round makes the floor do nothing.
                      *
@@ -1774,13 +1796,11 @@ int main(int argc, char **argv)
                     double lvl2 = dc2 - DARK_CODE;
                     double lvl, want;
 
-                    if (want_spo2) {
-                        want = LEVEL_MIN_SPO2;
-                        lvl = lvl1 < lvl2 ? lvl1 : lvl2;        /* both channels must carry */
-                    } else {
-                        want = LEVEL_MIN_HR;
-                        lvl = lvl1 > lvl2 ? lvl1 : lvl2;        /* the better one is enough */
-                    }
+                    /* The rate reads whichever channel carries more pulse, so the better of
+                     * the two has to be in range and the other being dim costs nothing. There
+                     * is no saturation case here any more - see above. */
+                    want = LEVEL_MIN_HR;
+                    lvl = lvl1 > lvl2 ? lvl1 : lvl2;
 
                     if (lvl < want)
                         newgain = (unsigned short)(gain + (gain >> 3));
