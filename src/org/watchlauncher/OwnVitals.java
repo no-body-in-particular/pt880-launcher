@@ -122,15 +122,27 @@ final class OwnVitals {
     private static String ask(String request, int timeoutMs) {
         LocalSocket s = new LocalSocket();
         try {
-            // The timeout goes on before the connect, not after it.
+            // The timeout goes on before the connect where the platform allows it.
             //
             // vitalsd serves one request at a time behind a backlog of four, so a connect made
-            // while it is busy waits rather than failing. Setting the timeout afterwards meant
-            // the connect itself had none, and a thread that blocked there blocked forever -
-            // taking the measuring flag with it, which is only cleared in a finally that never
-            // ran. One stuck thread then stopped every later cycle: three hours of readings
-            // went missing that way.
-            s.setSoTimeout(timeoutMs);
+            // while it is busy waits rather than failing, and a thread that blocked there used to
+            // block for ever - taking the measuring flag with it, which is only cleared in a
+            // finally that never ran. Three hours of readings went missing that way.
+            //
+            // But this platform creates the socket's implementation inside connect(), so setting
+            // a timeout first throws "socket not created" and the request never leaves. That
+            // turned one hung measurement into every measurement failing instantly: twenty-two
+            // hours with nothing logged, and a wear check stuck on "removed" because the pulse
+            // it looks for comes from the readings this was refusing to take.
+            //
+            // So it is attempted and not required. The hang it guards against is covered anyway
+            // by TrackerService, which treats a measurement still running after five minutes as
+            // lost and starts another.
+            try {
+                s.setSoTimeout(timeoutMs);
+            } catch (Throwable ignored) {
+                // No timeout before connect on this platform; the one after it still applies.
+            }
             s.connect(new LocalSocketAddress(SOCKET, LocalSocketAddress.Namespace.ABSTRACT));
             s.setSoTimeout(timeoutMs);
 
