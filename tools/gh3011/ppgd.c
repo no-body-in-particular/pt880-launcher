@@ -333,6 +333,46 @@ static double spectral_purity(const unsigned int *x, int n, double fs, double bp
     return peak / total;
 }
 
+/* Confidence as a probability, the way they state it.
+ *
+ * FUN_0001e4a4 integrates exp(-(x-mu)^2 / (2*sigma^2)) / (sigma * sqrt(2*pi)) over a range, and
+ * the saturation path calls it as (-v, +v, 0, sigma, step). That is the probability a normally
+ * distributed error lands within plus or minus v, and it is a better thing to report than
+ * anything this file had: spread says three, and three of what, out of what, meaning what.
+ *
+ * The windows of one measurement are repeated estimates of one rate, so their scatter estimates
+ * the error of their own mean. Treating that as normal and asking for the mass within a
+ * tolerance turns it into a number that means the same thing to anyone - 0.9 is nine times out of
+ * ten, whoever is reading it.
+ *
+ * Done in closed form rather than by integrating, which is the one place worth departing from
+ * them. Theirs walks the curve in steps because it is summing an arbitrary interval; a symmetric
+ * one about zero is just the error function, and erf is in libm.
+ *
+ * The spread is of the windows and the estimate is their mean, so the error of that mean falls as
+ * the count rises - hence sigma over root n. Three windows agreeing closely is not the same claim
+ * as twelve, and this is where that gets said.
+ */
+static double confidence_p(const double *vals, int n, double tol)
+{
+    double mean = 0, var = 0, sd, sem;
+    int i;
+
+    if (n < 2 || tol <= 0.0) return 0.0;
+    for (i = 0; i < n; i++) mean += vals[i];
+    mean /= n;
+    for (i = 0; i < n; i++) { double d = vals[i] - mean; var += d * d; }
+    sd = sqrt(var / (n - 1));
+    sem = sd / sqrt((double) n);
+
+    /* Windows that agree exactly are a claim about the windows, not certainty about the rate.
+     * Floor the error at a fifth of a bpm so this cannot return a flat 1.0. */
+    if (sem < 0.2) sem = 0.2;
+
+    /* P(|error| < tol) for a normal error: erf(tol / (sigma*sqrt(2))). */
+    return erf(tol / (sem * 1.41421356237309505));
+}
+
 /* Whether the light level is one the pulse can be read out of at all.
  *
  * Also from the vendor firmware, and the more useful of the two. Their FUN_00032e48 takes an
@@ -2251,8 +2291,12 @@ int main(int argc, char **argv)
 
             printf("hr=%.0f spread=%.0f hz=%.1f samples=%d windows=%d gain=%04x"
                    " dc1=%.0f dc2=%.0f ac1=%.0f ac2=%.0f r=%.3f spo2=%.0f beats=%d raw=%.0f/%.2f sut=%.0f ai=%.2f motion=%.0f/%.0f"
-                   " sbp=%.0f dbp=%.0f used=%s%s\n",
-                   med, spread, fs, ns, nrates, gain, dc1, dc2, a1, a2, r, spo2, shape_beats, shape_raw_sut, shape_raw_ai, sut, ai, mot_med, mot_worst, sbp, dbp,
+                   " conf=%.2f sbp=%.0f dbp=%.0f used=%s%s\n",
+                   med, spread, fs, ns, nrates, gain, dc1, dc2, a1, a2, r, spo2, shape_beats, shape_raw_sut, shape_raw_ai, sut, ai, mot_med, mot_worst,
+                   /* Within two bpm, which is about what the reference itself holds to: the cuff
+                    * moved between 58 and 61 across four minutes on a resting wearer, so a
+                    * tighter tolerance would claim more than anything here can check. */
+                   confidence_p(rates, nrates, 2.0), sbp, dbp,
                    src == ch2 ? "ch2" : "ch1",
                    /* Say so when the windows did not agree on their own and the previous rate
                     * chose between them. Worth having under motion, and not the same claim as a
