@@ -491,6 +491,23 @@ int main(int argc, char **argv)
     sigaction(SIGBUS, &sa, NULL);
     sigaction(SIGFPE, &sa, NULL);
 
+    /* Claim their addresses before the loader can take them.
+     *
+     * Restoring their regions after dlopen skipped most of them as already occupied, and the ones
+     * skipped are exactly the ones that matter: their heap sits in the range the loader uses for
+     * whatever it maps next, so by the time the image is in, the addresses their pointers refer to
+     * belong to something else. Nothing here can be relocated onto - a heap pointer is only
+     * correct at its own address - so the addresses have to be claimed first and the image fitted
+     * around them.
+     */
+    {
+        const char *snap = getenv("SNAPSHOT");
+        char rn[512];
+        if (!snap) snap = "/data/local/tmp/live.bin";
+        snprintf(rn, sizeof rn, "%s.regions", snap);
+        load_regions(rn);
+    }
+
     h = dlopen(VENDOR, RTLD_NOW);
     if (!h) { printf("dlopen refused: %s\n", dlerror()); return 1; }
     base = g_base = base_of("gh3011_service.real");
@@ -503,11 +520,7 @@ int main(int argc, char **argv)
          * its own measurement builds, so the caller has to say which one it wants. */
         const char *snap = getenv("SNAPSHOT");
         if (!snap) snap = "/data/local/tmp/live.bin";
-        char rn[512];
         printf("snapshot: %s\n", snap);
-        /* Their heap first, at its own addresses, before anything reads a pointer into it. */
-        snprintf(rn, sizeof rn, "%s.regions", snap);
-        load_regions(rn);
         have_dump = load_dump(snap, base, 0x2f000, 0, 0x7f622000, 0x2c000);
 
         /* The config sits below the line the rest of the snapshot is taken from.

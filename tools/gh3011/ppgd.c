@@ -296,6 +296,66 @@ static double band_amp(const unsigned int *x, int n, double fs, double f)
     return nw ? sum / nw : 0.0;
 }
 
+/* How much of the pulse band is the pulse, from 0 to 1.
+ *
+ * Taken from the vendor firmware, which computes it and this did not. Their FUN_0002f2cc sums the
+ * magnitude bins across a band, finds the largest bin in it, and divides one by the other. A
+ * clean pulse puts nearly everything into one bin and scores high; noise spreads across the band
+ * and scores low. It costs one extra sweep of Goertzel bins and turns a rate into a rate with a
+ * reason to believe it.
+ *
+ * They do it with a 256-point FFT because they have the whole spectrum anyway. We do not need
+ * one: the same ratio falls out of the bins already being computed, and a sweep at the resolution
+ * band_amp already uses is both cheaper and a fairer comparison against the peak, since peak and
+ * total are then measured the same way.
+ *
+ * Returns 0 when there is nothing to judge, which reads as no confidence rather than as full
+ * confidence - the right way round for a number a caller may use to decide whether to report.
+ */
+static double spectral_purity(const unsigned int *x, int n, double fs, double bpm)
+{
+    double total = 0.0, peak = 0.0, f;
+    int bins = 0;
+
+    if (n < 32 || fs <= 0.0 || bpm < 30.0 || bpm > 210.0) return 0.0;
+
+    /* The band a heart can be in, swept at the resolution six-second windows resolve. */
+    for (f = 0.5; f <= 3.6; f += 0.17) {
+        double a = band_amp(x, n, fs, f);
+        total += a;
+        if (a > peak) peak = a;
+        bins++;
+    }
+    if (bins == 0 || total <= 0.0) return 0.0;
+
+    /* Against the sweep rather than against a separate estimate at the reported rate: comparing a
+     * finely measured peak with a coarsely measured total would flatter the ratio. */
+    return peak / total;
+}
+
+/* Whether the light level is one the pulse can be read out of at all.
+ *
+ * Also from the vendor firmware, and the more useful of the two. Their FUN_00032e48 takes an
+ * amplitude and a level off a hundred samples and answers 1 when the level sits outside the
+ * window its config expects, and their pipeline does not compute a rate when it says so. On every
+ * waveform recorded by this project that check says no, which is worth knowing on its own.
+ *
+ * Ours has always computed a rate regardless, so a number arrived with no way to tell a good one
+ * from one that should never have been reported.
+ *
+ * The window here is ours rather than theirs - their thresholds live in a config this project
+ * cannot read - and it is deliberately wide, because the point is to catch a channel pinned at
+ * the rail or sitting in the dark, not to second-guess a working measurement. Seventeen bits is
+ * the sensor range their own sample mask implies.
+ */
+#define LEVEL_MIN  2000.0        /* below this the channel is dark and the pulse is quantisation */
+#define LEVEL_MAX  125000.0      /* near the seventeen-bit ceiling the pulse clips */
+
+static int level_usable(double dc_minus_dark)
+{
+    return dc_minus_dark >= LEVEL_MIN && dc_minus_dark <= LEVEL_MAX;
+}
+
 /* The strongest pulsatile amplitude anywhere a heart could plausibly be.
  *
  * band_amp needs a rate, and the rate is exactly what the failure paths do not have. Scanning
@@ -1167,6 +1227,20 @@ int main(int argc, char **argv)
         pulse_shape(dw, ns, sfs, sbpm, &sut, &ai);
         printf("bpm=%.0f beats=%d raw=%.0f/%.2f sut=%.0f ai=%.2f", sbpm, shape_beats,
                shape_raw_sut, shape_raw_ai, sut, ai);
+
+        /* Say how much of the band the pulse actually is, and whether the level allowed the
+         * question to be asked. Reported rather than enforced: the caller decides what to do with
+         * a low number, and a measurement that would have been thrown away silently is more
+         * useful visible. */
+        {
+            double dc = 0.0, purity;
+            int q;
+            for (q = 0; q < ns; q++) dc += src[q];
+            if (ns) dc /= ns;
+            purity = spectral_purity(src, ns, sfs, sbpm);
+            printf(" purity=%.2f level=%.0f%s", purity, dc - DARK_CODE,
+                   level_usable(dc - DARK_CODE) ? "" : " OUT-OF-RANGE");
+        }
         if (sut > 0) {
             printf(" sbp=%.0f dbp=%.0f",
                    100.0 + 0.28 * sbpm - 0.055 * sut + 11.0 * ai,
