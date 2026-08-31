@@ -348,12 +348,40 @@ static double spectral_purity(const unsigned int *x, int n, double fs, double bp
  * the rail or sitting in the dark, not to second-guess a working measurement. Seventeen bits is
  * the sensor range their own sample mask implies.
  */
-#define LEVEL_MIN  2000.0        /* below this the channel is dark and the pulse is quantisation */
-#define LEVEL_MAX  125000.0      /* near the seventeen-bit ceiling the pulse clips */
+/* Their numbers, not ours.
+ *
+ * The window here started as a guess, deliberately wide, and it passed every recording this
+ * project has taken - while their own check refuses them. A guess that never fires is not a gate.
+ *
+ * The real thresholds are in .bss, reached through a table selected by mode and a flag, and a
+ * snapshot of the running daemon has them:
+ *
+ *     mode 2  heart rate   amplitude 34, level 28626 .. 65535
+ *     mode 1               amplitude 100, level 10735 .. 65535
+ *     mode 7  saturation   amplitude 34, level  5111 .. 65535
+ *
+ * Our recordings measure 25827 to 27230. That is below the heart rate floor of 28626 by between
+ * one and three thousand counts, which is why their check says no, and comfortably above the
+ * saturation floor of 5111, which is why saturation is the measurement that has been working.
+ *
+ * The upper bound is 0xffff in every table, so the quantity they compare is sixteen bits, and
+ * the match in magnitude with our dc minus pedestal is close enough to use while being short of
+ * proof that the two are the same number. If it turns out they are not, this gate becomes wrong
+ * in a visible way - it will refuse things that measure fine - rather than quietly.
+ */
+#define LEVEL_MIN_HR    28626.0
+#define LEVEL_MIN_SPO2   5111.0
+#define LEVEL_MAX       65535.0
+
+static int level_usable_for(double dc_minus_dark, int for_spo2)
+{
+    double lo = for_spo2 ? LEVEL_MIN_SPO2 : LEVEL_MIN_HR;
+    return dc_minus_dark >= lo && dc_minus_dark <= LEVEL_MAX;
+}
 
 static int level_usable(double dc_minus_dark)
 {
-    return dc_minus_dark >= LEVEL_MIN && dc_minus_dark <= LEVEL_MAX;
+    return level_usable_for(dc_minus_dark, 0);
 }
 
 /* The strongest pulsatile amplitude anywhere a heart could plausibly be.
@@ -1276,7 +1304,8 @@ int main(int argc, char **argv)
             if (ns) dc /= ns;
             purity = spectral_purity(src, ns, sfs, sbpm);
             printf(" purity=%.2f level=%.0f%s", purity, dc - DARK_CODE,
-                   level_usable(dc - DARK_CODE) ? "" : " OUT-OF-RANGE");
+                   level_usable(dc - DARK_CODE) ? ""
+                     : (level_usable_for(dc - DARK_CODE, 1) ? " BELOW-HR-FLOOR" : " OUT-OF-RANGE"));
         }
         if (sut > 0) {
             printf(" sbp=%.0f dbp=%.0f",
