@@ -855,3 +855,32 @@ The ensemble is built on the assumed period, so a wrong rate makes a wrong-lengt
 shape measured inside it is wrong with it. The pulse shape path inherits every rate error rather
 than failing independently of one, which means sut cannot be stabilised on its own - the rate has
 to be right first, and one rate estimate in four is not.
+
+## 0x0080=0x0105 gives both channels a real pulse
+
+Sweeping the high byte of 0x0080, which is in the vendor's block and not in our sequence:
+
+    0x0080    ch1 amp   ch2 amp
+    0x0105     141.6     119.4
+    0x0205      91.1       0.0
+    0x0305      13         5
+    0x0405       8.3     102.4    <- ours and theirs
+    0x0605       8.9     108.2
+
+0x0105 is the only setting where both channels carry a comparable pulse. Captured and measured
+against the DC as it actually reads, with no pedestal assumed, the modulations are 0.18 and 0.09
+percent - both textbook for a PPG, where our usual configuration leaves red at three counts and an
+impossible thirteen percent.
+
+R across three consecutive runs is 2.073, 2.011 and 2.191: mean 2.09, spread 0.18. Stable to nine
+percent, against the twenty-five it carried when the numerator was three counts of quantisation.
+
+A single earlier capture gave 0.62 and was recorded here as the first credible ratio this project
+had produced. It was not. That capture's ch2 held an excursion of a million counts against a mean
+of 2.18 million, which inflated its peak-to-peak, which inflated its modulation to 0.31 percent
+against the 0.09 that reproduces. One measurement, an artefact in it, and it was written up before
+being repeated.
+
+2.09 is not physiological. Inverted it is 0.48, which would be - but which channel carries red in
+this configuration has not been established, and choosing the assignment that returns a plausible
+answer is assuming what is being measured. It stays 2.09 until the assignment is shown.
