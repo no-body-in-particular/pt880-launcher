@@ -81,6 +81,15 @@ static unsigned reg16 = 0;
  * never report as zero. One settable default is enough to find out whether that is the problem.
  */
 static unsigned defreg = 0;
+
+/* What to answer for the FIFO level at 0x004a.
+ *
+ * Their routine turns this into a frame count and then a length, and the fault shows that length
+ * arriving at memcpy as 0xfffffffc - minus four. So the level this bus invents is not a level
+ * their arithmetic accepts; it is short by one frame, or not a multiple of the frame size, and
+ * the subtraction that follows goes under zero. Sweeping it is quicker than deriving it.
+ */
+static int levelfix = 1;   /* one frame per call: the only level their arithmetic accepts */
 static unsigned long g_base;
 
 /* Answer a register read the way the chip would. 0x004a is the level, 0xaaaa the FIFO - three
@@ -117,6 +126,7 @@ static int fake_read(void *handle, unsigned char *addr, int alen,
     if (reg == 0x004a) {
         int left = wave_n - wave_at;
         int lvl = left > 64 ? 64 : (left < 0 ? 0 : left);
+        if (levelfix >= 0) lvl = levelfix;
         out[0] = (unsigned char)(lvl >> 8);
         if (olen > 1) out[1] = (unsigned char) lvl;
         return 0;
@@ -277,6 +287,85 @@ static int load_dump(const char *path, unsigned long base, unsigned long from,
     return 1;
 }
 
+/* Put their heap back where it was.
+ *
+ * Relocating the image copy fixes pointers that refer to the image, because that offset is fixed.
+ * It cannot fix a pointer into the heap: the heap bears no fixed relation to the image, so those
+ * words are left alone, and their code then takes offsets from something that is not there. That
+ * is what a memcpy called with a source of zero and a length of minus four looks like from the
+ * outside.
+ *
+ * Mapping each region back at the address it had makes those pointers correct without touching
+ * them. It also means not caring what they point at - the whole graph comes across intact.
+ *
+ * Regions that clash with something already mapped here are skipped rather than forced, since
+ * MAP_FIXED over our own heap or libc would trade a clear fault for a baffling one.
+ */
+#define RGN_MAGIC 0x52474e31u
+
+/* Does anything in this process already occupy any part of [lo, lo+len)? */
+static int range_busy(unsigned long lo, unsigned long len)
+{
+    FILE *m = fopen("/proc/self/maps", "r");
+    char line[512];
+    unsigned long hi = lo + len;
+    int busy = 0;
+
+    if (!m) return 1;                       /* cannot tell, so do not touch it */
+    while (!busy && fgets(line, sizeof line, m)) {
+        unsigned long a, b;
+        if (sscanf(line, "%lx-%lx", &a, &b) != 2) continue;
+        if (a < hi && lo < b) busy = 1;     /* any overlap at all */
+    }
+    fclose(m);
+    return busy;
+}
+
+static int load_regions(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    int n = 0, skipped = 0;
+
+    if (!f) return 0;
+    for (;;) {
+        unsigned long hdr[3], got;
+        void *at;
+
+        if (fread(hdr, sizeof hdr, 1, f) != 1) break;
+        if (hdr[0] != RGN_MAGIC) { printf("regions file went out of step\n"); break; }
+
+        /* Anything at all in the way? Leave the whole region alone.
+         *
+         * Testing only the first page was not a check. Their anonymous regions run to a megabyte
+         * and land in the same range the loader uses here, so one whose first page happened to be
+         * free was mapped straight over our own image - and the fault that produced pointed at
+         * the image, which had been correct until this code overwrote it. A region has to be
+         * clear along its whole length before any of it can be claimed.
+         */
+        if (range_busy(hdr[1], hdr[2])) {
+            fseek(f, (long) hdr[2], SEEK_CUR);
+            skipped++;
+            continue;
+        }
+
+        at = mmap((void *) hdr[1], hdr[2], PROT_READ | PROT_WRITE,
+                  MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+        if (at == MAP_FAILED || (unsigned long) at != hdr[1]) {
+            fseek(f, (long) hdr[2], SEEK_CUR);
+            skipped++;
+            continue;
+        }
+        got = fread(at, 1, hdr[2], f);
+        if (got != hdr[2]) { printf("regions file was short\n"); break; }
+        n++;
+    }
+    fclose(f);
+    if (n || skipped)
+        printf("mapped %d of their regions back where they were, skipped %d already occupied\n",
+               n, skipped);
+    return n;
+}
+
 /* Say where it died, in the addresses the decompiler uses. */
 static void on_segv(int sig, siginfo_t *si, void *uc)
 {
@@ -296,6 +385,21 @@ static void on_segv(int sig, siginfo_t *si, void *uc)
     }
 #else
     (void) u;
+#endif
+#ifdef __arm__
+    /* The registers, because the faulting address alone does not say which pointer was wrong.
+     *
+     * A fault on address 4 means something null had a small offset added, and there are several
+     * candidates in flight at once: the frame descriptor, the data pointer FUN_00016668 hands
+     * back, and the result buffer. Which register holds zero picks between them, and reading it
+     * out of the fault is cheaper than instrumenting their code. */
+    {
+        unsigned long *r = &u->uc_mcontext.arm_r0;
+        int k;
+        fprintf(stderr, "  r0-r10:");
+        for (k = 0; k <= 10; k++) fprintf(stderr, " %lx", r[k]);
+        fprintf(stderr, "\n");
+    }
 #endif
     fprintf(stderr, "  after %d register reads, %d/%d samples consumed\n", reads, wave_at, wave_n);
     {
@@ -399,7 +503,11 @@ int main(int argc, char **argv)
          * its own measurement builds, so the caller has to say which one it wants. */
         const char *snap = getenv("SNAPSHOT");
         if (!snap) snap = "/data/local/tmp/live.bin";
+        char rn[512];
         printf("snapshot: %s\n", snap);
+        /* Their heap first, at its own addresses, before anything reads a pointer into it. */
+        snprintf(rn, sizeof rn, "%s.regions", snap);
+        load_regions(rn);
         have_dump = load_dump(snap, base, 0x2f000, 0, 0x7f622000, 0x2c000);
 
         /* The config sits below the line the rest of the snapshot is taken from.
@@ -457,6 +565,7 @@ int main(int argc, char **argv)
     if (argc > 3) reg22 = (unsigned) strtoul(argv[3], NULL, 0);
     if (argc > 4) reg16 = (unsigned) strtoul(argv[4], NULL, 0);
     { const char *d = getenv("DEFREG"); if (d) defreg = (unsigned) strtoul(d, NULL, 0); }
+    { const char *l = getenv("LEVEL"); if (l) levelfix = (int) strtol(l, NULL, 0); }
     trace = !quiet;
     /* Run their start-up even with a snapshot loaded, because the snapshot is of the wrong mode.
      *
@@ -566,7 +675,15 @@ int main(int argc, char **argv)
                                 unsigned char *, unsigned char *, unsigned char *,
                                 unsigned short *, void *, unsigned short *);
         static int mixed[48000];
-        static unsigned char scratch[1024];
+        /* As big as the buffer their handler passes.
+         *
+         * The count handed in is 0xcd - 205 frames - and the handler backs that with a 9844-byte
+         * stack buffer. This passed the same count with a kilobyte behind it, so their code was
+         * being told it had room for two hundred frames and given room for a fraction of that.
+         * A length computed against the promised size and checked against the real one is exactly
+         * how a memcpy ends up being asked for minus four bytes.
+         */
+        static unsigned char scratch[16384];
         unsigned char res = 0, lvl = 0, st = 0, a = 0, b = 0;
         unsigned short c = 0, e = 0;
         spo2_fn spo2 = (spo2_fn) FN(base, OFF(0x1b7c0));
@@ -746,11 +863,38 @@ int main(int argc, char **argv)
                 unsigned char bpm = 0, q1 = 0, q2 = 0, q3 = 0, q4 = 0;
                 unsigned short s1 = 0;
                 unsigned r;
-                printf("calling their heart rate routine at Ghidra 0x1b7c0...\n");
-                r = ((hr_fn) FN(base, OFF(0x1b7c0)))(
-                        cfg, rg, 2, &bpm, &q1, &q2, &q3, &q4, &s1, scratch, &count);
+                /* Call it the way the daemon does: once per interrupt, over and over.
+                 *
+                 * One call is one FIFO drain, not one measurement. Sweeping the level showed the
+                 * only value their arithmetic accepts here is a single frame - anything larger
+                 * arrives at memcpy as a negative length - and one frame is nowhere near enough
+                 * to see a heartbeat. So a single call answering zero is not the algorithm
+                 * declining to find a rate; it is the algorithm having been shown a hundredth of
+                 * a second and asked what the pulse is.
+                 *
+                 * Loop until the waveform is used up, and report the first rate it commits to as
+                 * well as the last, because their answer is built to converge rather than arrive.
+                 */
+                int call, first_at = -1;
+                unsigned char first = 0;
+                hr_fn hr = (hr_fn) FN(base, OFF(0x1b7c0));
+
+                printf("calling their heart rate routine at Ghidra 0x1b7c0, once per frame...\n");
+                for (call = 0; call < wave_n && wave_at < wave_n - 2; call++) {
+                    count = 0xcd;
+                    r = hr(cfg, rg, 2, &bpm, &q1, &q2, &q3, &q4, &s1, scratch, &count);
+                    if (bpm && bpm != 0xff && first_at < 0) {
+                        first = bpm;
+                        first_at = wave_at;
+                        printf("  first rate: %u bpm after %d samples (%.1f s)\n",
+                               bpm, wave_at, wave_at / (fs > 0 ? fs : 100.0));
+                    }
+                }
                 if (bpm == 0xff) bpm = 0;
-                printf("  heart rate=%u bpm  returned=%u\n", bpm, r);
+                printf("  after %d calls, %d samples: %u bpm  returned=%u\n",
+                       call, wave_at, bpm, r);
+                if (first_at >= 0 && first != bpm)
+                    printf("  it converged from %u to %u\n", first, bpm);
                 printf("  extras: %u %u %u %u  short=%u  count=%u\n", q1, q2, q3, q4, s1, count);
             }
             {

@@ -85,6 +85,67 @@ static int peek(int fd, unsigned long addr, void *out, int len)
     return read(fd, out, len) == len ? 0 : -1;
 }
 
+/* Everything else the daemon can write to, with the addresses it had.
+ *
+ * The image copy alone is not enough. Pointers inside it that refer to the image can be moved to
+ * wherever dlopen put ours, because the offset is fixed; pointers into the heap cannot, because
+ * the heap bears no fixed relation to the image. Those come back null or wild, and their code
+ * then takes offsets from them - which is how a memcpy ends up called with a source of zero and a
+ * length of minus four.
+ *
+ * Writing the other writable regions out with their original addresses lets the harness map them
+ * back where they were, and then a heap pointer needs no fixing at all: it is simply correct.
+ *
+ * Each region is a 12-byte header - address, length, and a magic to catch a truncated file - and
+ * then its bytes.
+ */
+#define RGN_MAGIC 0x52474e31u          /* "RGN1" */
+
+static void dump_regions(int pid, int fd, const char *path, unsigned long image_lo,
+                         unsigned long image_hi)
+{
+    char maps[64], line[512];
+    FILE *m, *o;
+    static unsigned char buf[1 << 20];
+    unsigned long total = 0;
+    int n = 0;
+
+    snprintf(maps, sizeof maps, "/proc/%d/maps", pid);
+    m = fopen(maps, "r");
+    if (!m) return;
+    o = fopen(path, "wb");
+    if (!o) { fclose(m); return; }
+
+    while (fgets(line, sizeof line, m)) {
+        unsigned long lo, hi, len, done;
+        char perms[8];
+
+        if (sscanf(line, "%lx-%lx %7s", &lo, &hi, perms) != 3) continue;
+        if (perms[1] != 'w') continue;                       /* writable only */
+        if (lo >= image_lo && lo < image_hi) continue;        /* the image is copied separately */
+        if (strstr(line, "/dev/") || strstr(line, "[vector")) continue;
+        len = hi - lo;
+        if (len > 4u << 20) continue;                         /* nothing enormous */
+
+        for (done = 0; done < len; ) {
+            unsigned long want = len - done;
+            if (want > sizeof buf) want = sizeof buf;
+            if (peek(fd, lo + done, buf, (int) want) != 0) break;
+            if (done == 0) {
+                unsigned long hdr[3];
+                hdr[0] = RGN_MAGIC; hdr[1] = lo; hdr[2] = len;
+                fwrite(hdr, sizeof hdr, 1, o);
+            }
+            fwrite(buf, 1, want, o);
+            done += want;
+        }
+        if (done == len) { total += len; n++; }
+    }
+    fclose(m);
+    fclose(o);
+    printf("  and %d other writable regions, %lu KB, in %s\n", n, total / 1024, path);
+}
+
 int main(int argc, char **argv)
 {
     int pid, fd, i, have = 0, secs = argc > 2 ? atoi(argv[2]) : 300;
@@ -130,6 +191,11 @@ int main(int argc, char **argv)
             fclose(o);
             have++;
             printf("\n[%ds] mode %u configured, config at 0x%lx -> %s\n", i / 4, mode, cfg, name);
+            {
+                char rn[320];
+                snprintf(rn, sizeof rn, "%s.regions", name);
+                dump_regions(pid, fd, rn, base, base + 0x36000);
+            }
         }
         if (i % 240 == 0) printf("  %ds, %d modes so far...\n", i / 4, have);
         usleep(250000);
