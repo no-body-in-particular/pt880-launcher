@@ -71,6 +71,16 @@ static int trace;
  * flag, and worth sweeping separately.
  */
 static unsigned reg16 = 0;
+
+/* What to answer for a register this bus does not model.
+ *
+ * Zero is a poor default. Their code divides by some of these and sizes buffers from others, so an
+ * unmodelled register answering zero turns into a bad length and a fault in libc that says nothing
+ * about which register was wrong. Their heart rate routine gets as far as reading the level, the
+ * FIFO and then 0x0122 and 0x0136 before dying, and those two are gain settings a real chip would
+ * never report as zero. One settable default is enough to find out whether that is the problem.
+ */
+static unsigned defreg = 0;
 static unsigned long g_base;
 
 /* Answer a register read the way the chip would. 0x004a is the level, 0xaaaa the FIFO - three
@@ -158,6 +168,14 @@ static int fake_read(void *handle, unsigned char *addr, int alen,
     if (reg == 0x0022) { out[0] = (unsigned char)(reg22 >> 8); if (olen > 1) out[1] = (unsigned char) reg22; return 0; }
     if (reg == 0x0016) { out[0] = (unsigned char)(reg16 >> 8); if (olen > 1) out[1] = (unsigned char) reg16; return 0; }
     if (reg == 0x0008) { out[0] = 0x00; if (olen > 1) out[1] = 0x02; return 0; }
+    if (defreg) {
+        int k;
+        for (k = 0; k + 1 < olen; k += 2) {
+            out[k] = (unsigned char)(defreg >> 8);
+            out[k + 1] = (unsigned char) defreg;
+        }
+        return 0;
+    }
     if (reg == 0x0028) { out[0] = 0x00; if (olen > 1) out[1] = 0x31; return 0; }
 
     return 0;
@@ -180,7 +198,7 @@ static int fake_read(void *handle, unsigned char *addr, int alen,
  * unrelated to the mistake. Those are counted and left alone.
  */
 static int load_dump(const char *path, unsigned long base, unsigned long from,
-                     unsigned long theirs, unsigned long dump_from)
+                     unsigned long len, unsigned long theirs, unsigned long dump_from)
 {
     FILE *f = fopen(path, "rb");
     static unsigned char buf[0x8000];
@@ -193,6 +211,31 @@ static int load_dump(const char *path, unsigned long base, unsigned long from,
     n = fread(buf, 1, sizeof buf, f);
     fclose(f);
     if (n < 0x1000) { printf("snapshot too small (%lu bytes)\n", n); return 0; }
+
+
+    /* Where the snapshot was taken, read out of the snapshot itself.
+     *
+     * The daemon gets restarted between captures and lands somewhere new each time, so a base
+     * written into this file by hand is right for exactly one snapshot and silently wrong for
+     * every one after it - relocating every pointer by the wrong amount and faulting somewhere
+     * with no relation to the mistake.
+     *
+     * Their read callback is a fixed address in the image, Ghidra 0x141ec, and the snapshot
+     * contains its relocated value. That gives the base away without anybody having to record it.
+     * The stack guard slot nearby looks like it would do the same job and does not: it resolves
+     * through the GOT to libc, which is not the image at all.
+     */
+    {
+        unsigned long cb;
+        memcpy(&cb, buf + (0x3e994 - 0x3c000), 4);
+        if (cb) {
+            unsigned long derived = (cb & ~1UL) - 0x41ec;
+            if (derived != theirs) {
+                printf("snapshot was taken at base 0x%lx, not 0x%lx\n", derived, theirs);
+                theirs = derived;
+            }
+        }
+    }
 
     /* Only the part of it that is theirs to give.
      *
@@ -210,6 +253,7 @@ static int load_dump(const char *path, unsigned long base, unsigned long from,
         if (skip >= n) { printf("the snapshot does not reach that far\n"); return 0; }
         memmove(buf, buf + skip, n - skip);
         n -= skip;
+        if (len && n > len) n = len;
     }
 
     for (i = 0; i + 4 <= n; i += 4) {
@@ -254,6 +298,15 @@ static void on_segv(int sig, siginfo_t *si, void *uc)
     (void) u;
 #endif
     fprintf(stderr, "  after %d register reads, %d/%d samples consumed\n", reads, wave_at, wave_n);
+    {
+        /* Which registers it had got to. A fault in libc says nothing about what their code was
+         * trying to do; the last few registers it asked for usually do. */
+        int j;
+        fprintf(stderr, "  registers by then:");
+        for (j = 0; j < unknown_n; j++)
+            fprintf(stderr, " 0x%04x(x%d)", unknown[j], unknown_hits[j]);
+        fprintf(stderr, "\n");
+    }
     _exit(3);
 }
 
@@ -347,7 +400,20 @@ int main(int argc, char **argv)
         const char *snap = getenv("SNAPSHOT");
         if (!snap) snap = "/data/local/tmp/live.bin";
         printf("snapshot: %s\n", snap);
-        have_dump = load_dump(snap, base, 0x2f000, 0x7f622000, 0x2c000);
+        have_dump = load_dump(snap, base, 0x2f000, 0, 0x7f622000, 0x2c000);
+
+        /* The config sits below the line the rest of the snapshot is taken from.
+         *
+         * Both routines take the config at 0x3d5ac and the register at 0x3d5a8, and both are
+         * under the 0x3f000 boundary drawn to keep the loader-owned slots out. So the boundary
+         * that stopped the crash also excluded the two things the measurement needs.
+         *
+         * They sit in their own corner though, well away from the callback slots at 0x3e994 and
+         * the bus handle at 0x3d53c, so a second copy of just that page brings them across
+         * without bringing back what broke.
+         */
+        if (have_dump)
+            load_dump(snap, base, 0x2d580, 0x80, 0x7f622000, 0x2c000);
     }
 
     /* The one thing that must be in place before their code runs: register reads have to go
@@ -390,6 +456,7 @@ int main(int argc, char **argv)
 
     if (argc > 3) reg22 = (unsigned) strtoul(argv[3], NULL, 0);
     if (argc > 4) reg16 = (unsigned) strtoul(argv[4], NULL, 0);
+    { const char *d = getenv("DEFREG"); if (d) defreg = (unsigned) strtoul(d, NULL, 0); }
     trace = !quiet;
     /* Run their start-up even with a snapshot loaded, because the snapshot is of the wrong mode.
      *
@@ -518,8 +585,20 @@ int main(int argc, char **argv)
         {
             unsigned char *mb = (unsigned char *)(base + MODE_BYTE);
             make_writable(mb);
-            printf("\ngate byte reads %u; the routine wants 1 or 7\n", *mb);
-            *mb = (unsigned char) mode;
+            /* The gate value is not the mode number.
+             *
+             * Writing the mode straight into this byte was right only by accident for 7 and wrong
+             * for everything else: heart rate is mode 2 but its routine wants 1 or 7, so asking
+             * for heart rate wrote a 2 and failed both gates. The routine then returned without
+             * reading a single register, which reads exactly like an algorithm that found nothing
+             * in the data and is not.
+             *
+             *     heart rate   mode 2   gate 1
+             *     saturation   mode 7   gate 8
+             */
+            unsigned char want = (mode == 7) ? 8 : 1;
+            printf("\ngate byte reads %u; mode %d needs it to read %u\n", *mb, mode, want);
+            *mb = want;
         }
         /* The config the lookup counts entries out of.
          *
@@ -610,12 +689,29 @@ int main(int argc, char **argv)
                                        unsigned char *, unsigned char *, unsigned short *,
                                        unsigned char *, void *, unsigned short *,
                                        unsigned char *);
-            void *cfg = *(void **)(base + OFF(0x3d5ac));
+            /* 0x3d5ac is the config, not a pointer to it.
+             *
+             * The handler computes its address with add r0,pc and passes that straight in - there
+             * is no load after it. Dereferencing it here read the first word of the struct and
+             * used it as an address, which is why a perfectly good config looked like the garbage
+             * pointer 0xf8840243. The register beside it at 0x3d5a8 really is a value.
+             */
+            void *cfg = (void *)(base + OFF(0x3d5ac));
             unsigned short rg = *(unsigned short *)(base + OFF(0x3d5a8));
             unsigned short count = 0xcd;
 
-            printf("\nconfig 0x%p, register 0x%04x\n", cfg, rg);
-            if (!cfg) {
+            /* Count what this routine asks for, not what the pump asked earlier.
+             *
+             * The register tally printed above belongs to the sample pump and was collected
+             * before the measurement routine ran at all, so reading it as though it described
+             * this call would be reading the wrong run. */
+            unknown_n = 0;
+            reads = 0;
+            wave_at = 0;
+            chan_toggle = 0;
+
+            printf("\nconfig %p, register 0x%04x\n", cfg, rg);
+            if (!*(unsigned long *)cfg) {
                 /* Their configure step dereferences this, so a zeroed block gets further than a
                  * null one. It is not the real config and nothing it returns is trustworthy, but
                  * it says whether anything past the gate runs at all. */
@@ -656,6 +752,13 @@ int main(int argc, char **argv)
                 if (bpm == 0xff) bpm = 0;
                 printf("  heart rate=%u bpm  returned=%u\n", bpm, r);
                 printf("  extras: %u %u %u %u  short=%u  count=%u\n", q1, q2, q3, q4, s1, count);
+            }
+            {
+                int j;
+                printf("  it read %d registers during that call:", reads);
+                for (j = 0; j < unknown_n; j++)
+                    printf(" 0x%04x(x%d)", unknown[j], unknown_hits[j]);
+                printf("\n");
             }
         }
         (void) spo2; (void) mixed; (void) res; (void) lvl; (void) st; (void) a; (void) b; (void) c;
