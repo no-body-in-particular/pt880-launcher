@@ -616,3 +616,31 @@ constructor, and at that point the honest description is running their daemon wi
 Recorded because the mechanism is worth knowing and because the failure is specific: this is a
 C++ object lifetime problem, not a permissions or relocation one, and nothing about it gets easier
 with a better guess at the arguments.
+
+## The level gate would throw away our best readings
+
+Their check refuses a measurement whose level is outside the window its mode expects, and for
+heart rate that window starts at 28626. Ours measure well below it, so the obvious reading is
+that our gain is too low and raising it would fix the low bias this file has recorded for weeks.
+
+Forty-two recordings from 30 August say otherwise. Level against reported rate, with the cuff
+reading 49 to 50 throughout:
+
+    level below 10,000     bpm 49, fifteen times out of fifteen, no scatter at all
+    level 18,000 - 32,000  bpm 37 to 52, mean about 45
+    level 43,000 - 55,000  bpm 44 to 48, mean about 45
+
+The low group is both the most accurate and the only precise one. It is also the one their gate
+rejects hardest.
+
+This is not the recordings being taken at different times of day. The groups interleave minute by
+minute - 16:04, 16:05 and 16:06 at level 7,800 reading 49, then 16:07 at 23,396 reading 44, then
+16:09 back at 7,997 reading 49 - same wearer, same sitting, minutes apart.
+
+The 47,000 between the 8,000 group and the 55,000 group is the 47,600 the channels are already
+known to sit apart, so those two are the same gain with the other channel picked. The choice of
+channel decides the answer, and the dimmer channel is the one that gets it right.
+
+So the gate stays reported rather than enforced, and raising the gain to clear their floor would
+have made the measurement worse while making it look more legitimate. What the number is good for
+is spotting which channel was picked, and that is worth more here than a refusal.
