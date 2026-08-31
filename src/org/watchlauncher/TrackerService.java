@@ -291,6 +291,11 @@ public class TrackerService extends Service {
     private int redCycle = 0;
 
     private void measureVitalsAsync(boolean asked) {
+        // Every return below used to be silent on at least one path, which made a cycle that
+        // never measured indistinguishable from one that was never asked to.
+        Log.i(TAG, "vitals cycle asked=" + asked + " measuring=" + measuring
+                + " misses=" + vitalsMisses + " skipped=" + vitalsSkipped
+                + " skipCycles=" + skipCycles());
         if (measuring) {
             // Unless it has been running so long that it is not running at all.
             //
@@ -316,6 +321,8 @@ public class TrackerService extends Service {
         }
         if (!asked && vitalsSkipped < skipCycles()) {
             vitalsSkipped++;
+            Log.i(TAG, "sitting out this cycle: " + vitalsSkipped + " of " + skipCycles()
+                    + " after " + vitalsMisses + " misses");
             return;
         }
         vitalsSkipped = 0;
