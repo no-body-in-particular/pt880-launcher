@@ -766,3 +766,32 @@ writable either - bit 7 and bit 3 read back zero - so the field is narrower than
 This file already said "per-slot LED current is the obvious lever and has not been found". It is
 still not found, and this is a second failure to find it rather than a new one. What is new is
 knowing what it costs: it is the whole of the saturation measurement, not a refinement of it.
+
+## How the manufacturer drives the red LED: the whole block, not one register
+
+The slot registers were never their lever. Their three configurations write fifteen registers and
+0x0130, 0x0132 and 0x0134 are not among them. What they write is
+
+    0002=ff21  000c=09f0  0012=0d02  0016=051e  0044=0001  0048=0001
+    0080=0405  0082=01c4  0084=0022    <- the one they step, 21/22/24
+    0118=2828  011a=0028  012e=0000  0136=0090  0180=008d  0186=0007
+
+Applying 0084 by itself on top of our own sequence collapses both FIFO channels onto one slot -
+dc1 equals dc2 to the count, ac1 equals ac2, and R comes out 1.005, which is one signal divided by
+itself. It only means anything alongside the 0080 and 0082 that belong with it.
+
+Applying all fifteen:
+
+                        red level   IR level   red AC   IR AC
+    our sequence            3,782     45,700        3      19
+    their block             3,965     44,353      523     487
+
+The red pulse goes from three counts to five hundred and twenty three, and the DC separation
+survives - red still dim, infrared still bright, which is what the pair needs. That is the lever
+these notes have recorded as not found twice, and it was in their configuration the whole time.
+
+R is 12.0 and still not physiological, but the reason has changed and is worth stating separately.
+Red modulates 523 in 3,965, which is thirteen percent; infrared modulates 487 in 44,353, which is
+1.1 percent. The infrared figure is textbook for a PPG and the red one is far too high, so it is
+the red DC that is wrong rather than its AC - most likely bottoming out. That is a different
+problem from a pulse too small to measure, and a better one to have.
