@@ -37,3 +37,34 @@ group reading 49 against a cuff of 49 to 50 while the bright group read 44 to 46
 - dim higher. Here dim reads lower. Dim tracks the cuff in both, so the bright
 bias is not a fixed offset and something about that setting is unstable rather
 than merely shifted.
+
+Second run, after the gain floor was added. Cuff through the run:
+
+  121/73 60   116/73 54   113/70 57   119/70 58   118/70 59   114/70 57   113/70 60
+
+mean 57.9.
+
+  pair  setting  level   motion    hr
+  1     0021     -       -         no cluster
+  1     0022     -       80/1329   no agreement
+  2     0021     54584   5/29      59
+  2     0022     -       55/110    no agreement
+  3     0021     45854   63/314    58
+  3     0022     46486   29/62     49
+  4     0021     47612   96/1012   45
+  4     0022     -       51/1116   no agreement
+
+The floor did what it was for. Every level is between 45,800 and 54,600 - the
+4,500 and 8,000 regimes are gone, and 0x0084 no longer decides which one the
+measurement lands in.
+
+The one measurement taken while genuinely still, motion 5 against 29, read 59
+against a cuff of 58 to 60.
+
+Accuracy is not demonstrated here and this run cannot demonstrate it. Four of
+eight failed against one of eight in the first cuff run, and motion was 51 to 96
+through most of them where the first run was 0 throughout. The failures track
+the movement rather than the change, but that also means the change is untested:
+reporting the 59 and setting aside the 49 and the 45 would be choosing the
+answer. What is needed is the same eight measurements with the wearer as still
+as they were the first time.
