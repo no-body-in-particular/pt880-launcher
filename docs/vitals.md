@@ -811,12 +811,19 @@ What that does show is worse than an offset. Ours is insensitive to real change 
 whether the wearer is at 105 or at 120 - which for a measurement whose entire purpose is to notice
 a change is the more serious fault, and one an offset correction would have hidden.
 
-The mechanism is visible in the same runs. beats came back as 17, 8, and twice nothing, out of
-about thirty-eight available in forty-five seconds at fifty-three bpm. The pulse shape analysis is
-discarding more than half the beats, so ai is computed from a handful and moves 0.61 to 1.01
-between runs at one sample rate. Through its coefficient of 11.0 that is four mmHg of noise on
-systolic by itself, which is the size of the signal.
+Instrumenting peaks found against beats kept says where the noise is not. Detection finds 34 to 37
+peaks against about thirty-eight available, so no beats are being missed. Retention is 22 to 29 of
+those when the wearer is still and drops to 4 when motion reads 283 - which is the shape test
+doing its job, not throwing measurements away. An earlier reading of this - that the analysis
+discards more than half the beats - came from runs that were all high-motion.
 
-ai also depends on the sample rate: 0.61 to 1.01 at 100 Hz against 1.21 to 1.23 at 198, on the
-same wrist within minutes. A feature that changes with how fast it was sampled is measuring the
-sampling as much as the pulse.
+The noise is in the features themselves, and the arithmetic is the whole story. ai ranges 0.6 to
+1.2 and carries a coefficient of 11.0, so it contributes about three and a half mmHg on its own.
+sut ranges 150 to 291 ms against a coefficient of -0.055, which is another eight. Together that is
+more than the seventeen of real change the cuff showed across the session, which is why ours sits
+near 114 whatever the wearer is doing.
+
+A claim that ai depends on the sample rate does not survive either. It was 1.21 to 1.23 at 198 Hz
+against 0.61 to 1.01 at 100, which looked like a rate effect; later runs at 100 Hz gave 1.22 and
+1.17. Same rate, 0.61 to 1.22. It is noisy, not rate-dependent, and two samples that happened to
+differ were enough to build a mechanism on.

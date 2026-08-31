@@ -1014,6 +1014,10 @@ static double period_bpm(const double *seg, int n, double fs, double *conf)
  * finds the trough after the *previous* beat and reports an upstroke of most of a second, which
  * no artery does. */
 static int shape_beats = 0;    /* beats in the last ensemble, for the report */
+/* How many beats were found against how many survived the shape test. beats=8 out of thirty-eight
+ * available says the shape analysis is throwing most of them away, but not whether they were lost
+ * at detection or at correlation - and those want opposite fixes. */
+static int shape_peaks = 0;
 static double shape_raw_sut = 0, shape_raw_ai = 0;   /* before the gate, for the report */
 
 static void pulse_shape(const double *d, int n, double fs, double bpm, double *sut, double *ai)
@@ -1098,6 +1102,7 @@ static void pulse_shape(const double *d, int n, double fs, double bpm, double *s
         for (j = 0; j < wlen; j++) acc[j] += (seg[j] - lo) / rng;
         used++;
     }
+    shape_peaks = npk;
     if (used < 4) return;
     for (j = 0; j < wlen; j++) ens[j] = acc[j] / used;
 
@@ -1178,6 +1183,7 @@ static void pulse_shape(const double *d, int n, double fs, double bpm, double *s
         if (used >= 4) break;
         }
     }
+    shape_peaks = npk;
     if (used < 4) return;
     for (j = 0; j < wlen; j++) ens[j] = acc[j] / used;
     shape_beats = used;
@@ -1347,7 +1353,7 @@ int main(int argc, char **argv)
             sbpm = spectral_bpm_d(dw, ns, sfs, &conf);
         }
         pulse_shape(dw, ns, sfs, sbpm, &sut, &ai);
-        printf("bpm=%.0f beats=%d raw=%.0f/%.2f sut=%.0f ai=%.2f", sbpm, shape_beats,
+        printf("bpm=%.0f beats=%d/%d raw=%.0f/%.2f sut=%.0f ai=%.2f", sbpm, shape_beats, shape_peaks,
                shape_raw_sut, shape_raw_ai, sut, ai);
 
         /* Say how much of the band the pulse actually is, and whether the level allowed the
@@ -2332,12 +2338,12 @@ int main(int argc, char **argv)
 
             printf("hr=%.0f spread=%.0f hz=%.1f samples=%d windows=%d gain=%04x"
                    " dc1=%.0f dc2=%.0f ac1=%.0f ac2=%.0f r=%.3f spo2=%.0f beats=%d raw=%.0f/%.2f sut=%.0f ai=%.2f motion=%.0f/%.0f"
-                   " conf=%.2f sbp=%.0f dbp=%.0f used=%s%s\n",
+                   " conf=%.2f peaks=%d sbp=%.0f dbp=%.0f used=%s%s\n",
                    med, spread, fs, ns, nrates, gain, dc1, dc2, a1, a2, r, spo2, shape_beats, shape_raw_sut, shape_raw_ai, sut, ai, mot_med, mot_worst,
                    /* Within two bpm, which is about what the reference itself holds to: the cuff
                     * moved between 58 and 61 across four minutes on a resting wearer, so a
                     * tighter tolerance would claim more than anything here can check. */
-                   confidence_p(rates, nrates, 2.0), sbp, dbp,
+                   confidence_p(rates, nrates, 2.0), shape_peaks, sbp, dbp,
                    src == ch2 ? "ch2" : "ch1",
                    /* Say so when the windows did not agree on their own and the previous rate
                     * chose between them. Worth having under motion, and not the same claim as a
