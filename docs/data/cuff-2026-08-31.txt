@@ -68,3 +68,24 @@ the movement rather than the change, but that also means the change is untested:
 reporting the 59 and setting aside the 49 and the 45 would be choosing the
 answer. What is needed is the same eight measurements with the wearer as still
 as they were the first time.
+
+Third run: the normal path, no register override, wearer holding still.
+Cuff 119/69 61 just before, then through the run 113/67 58, 113/66 60, 116/66 59.
+
+  m1  gain 534a  level 46082  motion  4  hr 59  spread 4
+  m2  gain 534a  level 45848  motion 20  hr 61  spread 2
+  m3  gain 534a  level 45600  motion 13  hr 61  spread 2
+  m4  gain 534a  level 46801  motion 31  no agreement
+
+The gain is the same in all four and the level holds at 46,000 give or take 600.
+Before the floor it moved across 4a09, 7e4b and 549c with levels from 3,750 to
+51,000 - that wandering was the defect and it is gone.
+
+Ours means 60.3 against a cuff of 59.0 through the run, so about one bpm high,
+with three of four agreeing inside two.
+
+What this does not show is better accuracy. The dim setting scored half a bpm
+against its own cuff before the floor existed and this scores one against its
+own, and both sit inside the cuff's own scatter - it read 58 to 61 across four
+minutes. The floor bought stability rather than accuracy, and stability was the
+thing that was broken.
