@@ -703,3 +703,31 @@ this analysis: purity 0.053 to 0.075 against a validated noise score of 0.073, w
 0.55 to 0.75 Hz - baseline wander from a moving arm, not a pulse. motion read 59 to 83 against 0
 during the cuff run. That is the first time the metric has earned its place: it rejected four
 recordings that would otherwise have been analysed as though they meant something.
+
+## The breath hold says the saturation problem is upstream of calibration
+
+A hundred seconds of continuous capture: breathe, hold, breathe. The hold is visible - the
+respiratory peak between 0.12 and 0.45 Hz falls to 10 to 17 around t=45 to 55 where it is 20 to 45
+either side - so the wearer did what was asked and the recording caught it.
+
+R did not respond. Through the hold 1.472, 1.730, 1.948; before it 1.961 and 2.027; after it
+1.699, 1.833, 1.910. The window to window scatter is about plus or minus 0.2 and a desaturation of
+a few percent would move R by perhaps 0.05, so the measurement cannot see the thing it was set up
+to see.
+
+The more useful result is the absolute value. A ratio of ratios near 0.5 to 0.7 is about 97
+percent saturation and R of 1.0 is already about 82. Ours sits at 1.5 to 2.0, off the bottom of
+any calibration curve there is. With it, the two channels carry nearly the same DC - 50,100
+against 51,900 - and a nearly constant AC ratio, which is what two slots of one wavelength look
+like rather than a red and an infrared one.
+
+That relocates the problem. Calibration constants, theirs or fitted, cannot produce a saturation
+from a ratio taken between two channels of the same colour, because the difference in how
+haemoglobin absorbs the two is the entire mechanism. Until the channels are shown to be a genuine
+wavelength pair, there is nothing for a calibration to calibrate.
+
+An analysis error nearly buried this. The first pass averaged the Goertzel magnitude across every
+bin between 0.8 and 1.6 Hz; a pulse occupies one or two of about sixteen, so the average reported
+a seventy count pulse as four and the capture looked dead. The raw peak to peak said otherwise.
+Taking the strongest bin rather than the mean of the band is the fix, and the lesson is that a
+result which says the data is worthless deserves the same check as one that says it is good.
