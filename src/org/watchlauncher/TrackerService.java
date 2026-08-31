@@ -1695,29 +1695,34 @@ public class TrackerService extends Service {
                     float motion = TrackerSources.motionEnergy(TrackerService.this, 4000);
                     boolean moving = motion > STILL_THRESHOLD;
 
+                    // Ask the sensor, and only guess if it will not answer.
+                    //
+                    // What was here inferred a wrist from stillness and a recent reading, and the
+                    // recent reading is the problem: lastVitalsOkAt is zero after every restart,
+                    // so a still arm reported "removed" until a measurement landed three minutes
+                    // later - and if measurements were failing for any reason it reported removed
+                    // for as long as that lasted. That happened: a day and a night of "removed"
+                    // on a watch that was being worn, because the readings it wanted as proof
+                    // were the ones it was helping to prevent.
+                    //
+                    // The GH3011's own detector answers in about a second and needs nothing to
+                    // have happened first. The old inference stays underneath for the case where
+                    // it cannot run - the daemon busy with a measurement, or missing entirely.
+                    int sensor = OwnVitals.worn(TrackerService.this);
+
                     boolean pulse = false;
-                    if (!moving) {
-                        // Only worth lighting the LED when stillness has already made removal
-                        // plausible. Running the optical sensor every five minutes to confirm
-                        // something the accelerometer already settled would cost battery for
-                        // nothing.
-                        // From the measurement this client already takes, rather than a
-                        // second grab at the optical sensor.
-                        //
-                        // The probe that was here read gh30x directly, and gh30x is a mirror of
-                        // the vendor service's last result - so with its cached value correctly
-                        // rejected as stale it always came back empty, and a still wrist was
-                        // reported as a removal. Worse, registering on that sensor every five
-                        // minutes collides with the measurement the vendor service is running,
-                        // which is a good way to wedge a queue that has no timeout.
-                        //
-                        // A reading that arrived recently is proof of a wrist, and costs
-                        // nothing to consult.
+                    if (sensor < 0 && !moving) {
+                        // Only worth consulting when stillness has already made removal
+                        // plausible, and only as a fallback. A reading that arrived recently is
+                        // proof of a wrist and costs nothing to look up.
                         long sincePulse = System.currentTimeMillis() - lastVitalsOkAt;
                         pulse = lastVitalsOkAt > 0 && sincePulse < WORN_BY_PULSE_MS;
                     }
-
-                    boolean worn = moving || pulse;
+                    // Movement still means worn whatever the sensor says: an arm that is moving
+                    // is attached to somebody. It is the negative that needs the better
+                    // instrument, and biasing towards worn is the right way round - a missed
+                    // removal is a gap in a log, a false one stops the readings.
+                    boolean worn = sensor >= 0 ? (sensor == 1 || moving) : (moving || pulse);
                     boolean was = prefs(TrackerService.this).getBoolean(KEY_WORN, true);
 
                     // Put back on: measure now, and forget the backoff.
@@ -1736,7 +1741,8 @@ public class TrackerService extends Service {
                         measureVitalsAsync();
                     }
                     Log.i(TAG, "wear check: motion=" + motion + " moving=" + moving
-                            + " pulse=" + pulse + " -> " + (worn ? "worn" : "removed"));
+                            + " sensor=" + sensor + " pulse=" + pulse
+                            + " -> " + (worn ? "worn" : "removed"));
                     if (worn == was) return;
 
                     prefs(TrackerService.this).edit().putBoolean(KEY_WORN, worn).commit();
