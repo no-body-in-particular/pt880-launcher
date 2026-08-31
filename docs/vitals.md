@@ -644,3 +644,35 @@ channel decides the answer, and the dimmer channel is the one that gets it right
 So the gate stays reported rather than enforced, and raising the gain to clear their floor would
 have made the measurement worse while making it look more legitimate. What the number is good for
 is spotting which channel was picked, and that is worth more here than a refusal.
+
+## Testing 0x0084 on the wrist: the knob is real, the 5 bpm gap is not
+
+Their ladder moves one register, so it can be set directly. Three forty-second measurements at
+each of the two interesting values, same wrist, alternating, daemon stopped:
+
+    0084=0021   level 4552  hr 53 spread 4
+    0084=0022   level 48367 hr 53 spread 2
+    0084=0021   level 4484  hr 54 spread 4
+    0084=0022   level 48318 hr 55 spread 2
+    0084=0021   level 4471  hr 54 spread 3
+    0084=0022   level 48340 hr 56 spread 3
+
+The register controls the level regime outright and reproducibly: 4,500 against 48,300, steady to
+about eighty counts across runs. That is the same 47,000 the two channels have always been
+recorded as sitting apart, so this register is what decides which of them the shared gain favours.
+Writing it also halves the sample rate, from 99.7 Hz to 49.8, so it is a slot or timing setting
+rather than a plain current.
+
+What did not survive the test is the interesting part. The archived recordings split cleanly - a
+level near 8,000 read 49 fifteen times out of fifteen while levels above 18,000 read 44 to 46 -
+and the obvious conclusion was that the dim setting is right and the bright one reads five bpm
+low. Measured deliberately, the two agree to about one bpm.
+
+So the archive split was not caused by the level. Measurement length and which channel got picked
+varied along with it, and one of those is the likelier cause. Neither setting is better on this
+evidence: the dim one repeats more closely across runs, 53/54/54 against 53/55/56, and the bright
+one has the lower spread inside each measurement, 2/2/3 against 4/4/3.
+
+Nothing here says which is more accurate, because there was no cuff reading taken alongside it.
+That is the measurement still missing, and it is a small one: a cuff pulse taken during a pair of
+these runs would settle it.
