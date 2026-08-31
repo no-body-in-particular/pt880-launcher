@@ -676,3 +676,30 @@ one has the lower spread inside each measurement, 2/2/3 against 4/4/3.
 Nothing here says which is more accurate, because there was no cuff reading taken alongside it.
 That is the measurement still missing, and it is a small one: a cuff pulse taken during a pair of
 these runs would settle it.
+
+## Why the bright setting drifts: we regulate the wrong quantity
+
+Capturing at both 0x0084 settings an hour after the cuff run produced something the earlier runs
+did not: both settings landed at a level near 51,000, including the one that had sat at 4,500 all
+through the cuff comparison. The gain register differed too - 4a09 throughout the cuff run, then
+7e4b and 549c.
+
+So the level is not something 0x0084 sets. It is where our gain search happens to stop, and
+0x0084 only influences that. Which explains the three level groups in the archive, and it explains
+the drift: nothing in our loop holds the level anywhere, so two measurements with the same
+register can finish in different regimes.
+
+The vendor does not have this problem because they regulate a different quantity. Their gain
+register 0x0118 is 0x2828 in all three configurations - they do not vary it between settings at
+all - and what they check is the level, against an explicit window per mode. Ours walks 0x0118
+proportionally towards a target amplitude and never looks at the level.
+
+Targeting amplitude is why the level wanders. Amplitude and level move together only while
+everything else holds still; a change in contact or perfusion moves one without the other, and the
+loop follows the amplitude wherever that goes.
+
+Those captures are also useless as measurements, and the confidence number said so before any of
+this analysis: purity 0.053 to 0.075 against a validated noise score of 0.073, with the peak at
+0.55 to 0.75 Hz - baseline wander from a moving arm, not a pulse. motion read 59 to 83 against 0
+during the cuff run. That is the first time the metric has earned its place: it rejected four
+recordings that would otherwise have been analysed as though they meant something.
