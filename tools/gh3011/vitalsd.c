@@ -152,6 +152,52 @@ static void logline(const char *mode, const char *line)
  */
 #define RING 9
 
+
+/* What the rate was last time, kept across restarts.
+ *
+ * The helper uses it only to choose between candidate rates a moving wrist has made ambiguous,
+ * and to refuse one that lands where a heart cannot have gone. Held in a file rather than in
+ * memory because init restarts this daemon, and a hint that dies with the process is no use after
+ * a reboot - which is exactly when a first measurement has nothing to go on.
+ *
+ * Staleness needs no handling here. The helper will not accept a candidate more than half above
+ * or an eighth below the hint, so an hours-old value cannot drag a genuine reading anywhere; if
+ * nothing fits, it is ignored and the measurement stands on its own.
+ */
+#define RATEFILE "/data/local/tmp/lastrate"
+
+static int last_rate(void)
+{
+    FILE *f = fopen(RATEFILE, "r");
+    int v = 0;
+    if (!f) return 0;
+    if (fscanf(f, "%d", &v) != 1) v = 0;
+    fclose(f);
+    return (v > 30 && v < 210) ? v : 0;
+}
+
+/* Their convergence rule, from the constant pool of FUN_00022928: keep four fifths of what we
+ * had and take one fifth of what arrived, unless the two are ten or more apart, in which case
+ * replace outright. The jump is the half that matters - a plain exponential average drags towards
+ * a bad reading and back, so one wild measurement bends the next several, while jumping follows a
+ * real change at once and still smooths small disagreements.
+ */
+static void store_rate(int fresh)
+{
+    int prev = last_rate();
+    int keep = fresh;
+    FILE *f;
+
+    if (prev > 30 && fresh > 30) {
+        int diff = fresh > prev ? fresh - prev : prev - fresh;
+        if (diff < 10) keep = (int)(prev * 0.8 + fresh * 0.2 + 0.5);
+    }
+    f = fopen(RATEFILE, "w");
+    if (!f) return;
+    fprintf(f, "%d\n", keep);
+    fclose(f);
+}
+
 static double ring[RING];
 static int ring_n = 0, ring_at = 0;
 
@@ -392,9 +438,31 @@ static void measure(const char *mode, char *out, size_t outsz)
             snprintf(wave_path, sizeof wave_path, "/sdcard/waves/%ld.txt", (long)nowt);
         }
     }
-    snprintf(cmd, sizeof cmd, "%s %s %s %s 2>/dev/null", HELPER,
-             strcmp(mode, "spo2") == 0 ? SECS_SPO2 : SECS_HR, wave_path,
-             strcmp(mode, "spo2") == 0 ? "spo2" : "hr");
+    /* Tell the helper what the rate was last time.
+     *
+     * It uses it only to choose between candidate rates that a moving wrist has made ambiguous,
+     * and to refuse one that lands where a heart cannot have gone. Without it the helper has to
+     * treat every measurement as the first, which is why a wrist in motion can produce a reading
+     * of 45 with a tighter spread than the correct 60 beside it - the windows agreed, about the
+     * arm.
+     *
+     * Persisted through a file rather than held in memory, because this daemon is restarted by
+     * init and a rate that only survives while the process does is no use across a reboot. Stale
+     * is handled at the other end: the helper will not accept a cluster more than half above or
+     * an eighth below the hint, so an hours-old value cannot drag a genuine reading anywhere,
+     * and if nothing fits the hint it simply is not used.
+     */
+    {
+        int hint = last_rate();
+        char pfx[32];
+
+        if (hint > 30) snprintf(pfx, sizeof pfx, "PREV_BPM=%d ", hint);
+        else           pfx[0] = 0;
+
+        snprintf(cmd, sizeof cmd, "%s%s %s %s %s 2>/dev/null", pfx, HELPER,
+                 strcmp(mode, "spo2") == 0 ? SECS_SPO2 : SECS_HR, wave_path,
+                 strcmp(mode, "spo2") == 0 ? "spo2" : "hr");
+    }
     p = popen(cmd, "r");
     if (p) {
         char line[512];
@@ -421,6 +489,12 @@ static void measure(const char *mode, char *out, size_t outsz)
     {
         const char *at = strstr(out, "hr=");
         int bpm = at ? atoi(at + 3) : 0;
+
+        /* Carry it to the next measurement, through their blend. Only a rate that stood as a
+         * measurement is stored - a zero or a refusal leaves the previous one alone, so a run of
+         * failures under motion does not erase what was known before them. */
+        if (bpm >= 30 && bpm <= 210) store_rate(bpm);
+
         if (bpm >= 30 && bpm <= 210) {
             char rcmd[320], line[512];
             snprintf(rcmd, sizeof rcmd, "%s 0 %s redo %d 2>/dev/null", HELPER, KEEP, bpm);
