@@ -951,3 +951,32 @@ The analysis script will fit a line through it if allowed - it reported a slope 
 per unit R from this recording - and that number is worth nothing: the windows it used were the
 two transitions either side of the hold, the only ones near the hold with any pulse in them. A
 calibration from a breath hold needs the amplitude to survive the hold, and here it does not.
+
+## Wrist perfusion is intermittent, and that is what blocks a calibration
+
+Across ninety seconds on one wrist, without moving the watch or changing anything:
+
+    ac1    ac2      R        note
+   854.2  1475.4   0.611
+     8.2     2.1   1.651     weak
+    84.7   198.5   0.713
+     6.6     7.0   1.604     weak
+     7.5     8.3   1.520     weak
+     4.2     8.0   0.891     weak
+
+dc1 sits at 3,162,7xx through all of it, so the light reaching the sensor does not change. Only the
+modulation does, by a factor of seven hundred.
+
+The shape of it is consistent. When perfusion is good the two channels differentiate as a red and
+an infrared should - 854 against 1475, or 84.7 against 198.5 - and R lands at 0.61 to 0.71. When it
+is not, both sit at six to eight counts, which is the same in each because it is not a pulse in
+either, and R goes wherever the rounding sends it.
+
+That is what blocks the calibration rather than anything about the algorithm. A breath hold needs a
+stable baseline to measure a fall from, and a baseline that moves seven hundredfold inside two
+minutes is not one. The hold then has to survive on top of that, and holding a breath constricts
+the periphery further.
+
+Warm hands help and are not sufficient: the two strong readings above came minutes after warming
+and lasted about a minute between them. What would settle it is a fingertip reference alongside,
+where the amplitude is ten to fifty times larger and survives both the hold and this.
