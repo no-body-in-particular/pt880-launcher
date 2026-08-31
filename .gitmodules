@@ -1,0 +1,3 @@
+[submodule "vitals"]
+	path = vitals
+	url = https://github.com/no-body-in-particular/gh3011-vitals.git

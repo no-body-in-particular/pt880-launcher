@@ -20,7 +20,9 @@ import java.io.OutputStream;
  * shorter than the measurement regardless.
  *
  * So the privileged half runs as {@code vitalsd}, started by init in the slot the vendor daemon
- * used to occupy, and this only speaks to a socket. Ask for a reading, get one line back:
+ * used to occupy, and this only speaks to a socket. That half lives in its own repository, checked
+ * out here as the {@code vitals} submodule - it drives the chip, and this class knows nothing
+ * about the sensor beyond the three words it can ask for. Ask for a reading, get one line back:
  *
  * <pre>
  *   -&gt; hr
