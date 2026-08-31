@@ -61,6 +61,16 @@ static int chan_toggle;
  * than reason about it.
  */
 static unsigned reg22 = 0;
+static int trace;
+
+/* And what to answer for 0x0016.
+ *
+ * The trace says start-up reads 0x0022 then 0x0016, which is the FUN_00016ee0(0x16) whose result
+ * goes straight into 0x8000 / v. Zero makes that divide produce nonsense, the nonsense becomes a
+ * length, and the length is the address libc faults on. So this one is a divisor rather than a
+ * flag, and worth sweeping separately.
+ */
+static unsigned reg16 = 0;
 static unsigned long g_base;
 
 /* Answer a register read the way the chip would. 0x004a is the level, 0xaaaa the FIFO - three
@@ -83,6 +93,16 @@ static int fake_read(void *handle, unsigned char *addr, int alen,
         }
     }
     memset(out, 0, olen);
+
+    /* The order the registers are asked for, not just the tally.
+     *
+     * Sweeping the answer to 0x0022 showed only odd values get past - it is a bit-0 test - and an
+     * odd answer buys exactly one more read before a fault. Counting registers cannot say what
+     * that second read wants; the sequence can, and the first few reads of start-up are short
+     * enough to print in full.
+     */
+    if (trace && reads <= 24)
+        fprintf(stderr, "  read %2d: reg 0x%04x, %d bytes\n", reads, reg, olen);
 
     if (reg == 0x004a) {
         int left = wave_n - wave_at;
@@ -136,10 +156,81 @@ static int fake_read(void *handle, unsigned char *addr, int alen,
         return 0;
     }
     if (reg == 0x0022) { out[0] = (unsigned char)(reg22 >> 8); if (olen > 1) out[1] = (unsigned char) reg22; return 0; }
+    if (reg == 0x0016) { out[0] = (unsigned char)(reg16 >> 8); if (olen > 1) out[1] = (unsigned char) reg16; return 0; }
     if (reg == 0x0008) { out[0] = 0x00; if (olen > 1) out[1] = 0x02; return 0; }
     if (reg == 0x0028) { out[0] = 0x00; if (olen > 1) out[1] = 0x31; return 0; }
 
     return 0;
+}
+
+/* Load a snapshot of the running daemon over our copy of its data.
+ *
+ * Every pointer this harness filled in by hand exists already, correct, inside the daemon - so
+ * copying its data and bss wholesale replaces the whole reconstruction. Their measurement starts
+ * on a wear event rather than a command, so the snapshot has to be taken while someone is wearing
+ * the watch; waitdump does that, and the state it caught has the context and the config both live
+ * and both inside the image.
+ *
+ * The catch is that a snapshot is full of absolute addresses valid where it was taken, and dlopen
+ * puts our copy somewhere else. Any word pointing into the image is moved by the difference.
+ *
+ * Only the image range can be fixed this way. A pointer into their heap or stack refers to memory
+ * this process does not have, and rewriting it would aim a valid-looking pointer at whatever
+ * happens to sit at that address here - worse than leaving it, because it would fault somewhere
+ * unrelated to the mistake. Those are counted and left alone.
+ */
+static int load_dump(const char *path, unsigned long base, unsigned long from,
+                     unsigned long theirs, unsigned long dump_from)
+{
+    FILE *f = fopen(path, "rb");
+    static unsigned char buf[0x8000];
+    unsigned long n, i, moved = 0, foreign = 0;
+    unsigned char *dst = (unsigned char *)(base + from);
+    long ps = sysconf(_SC_PAGESIZE);
+    unsigned long lo = (unsigned long) dst & ~(ps - 1);
+
+    if (!f) { printf("no snapshot at %s\n", path); return 0; }
+    n = fread(buf, 1, sizeof buf, f);
+    fclose(f);
+    if (n < 0x1000) { printf("snapshot too small (%lu bytes)\n", n); return 0; }
+
+    /* Only the part of it that is theirs to give.
+     *
+     * Loading the whole snapshot jumped to a libc address from the process it was taken in,
+     * reached through a function pointer this process had perfectly well relocated until the copy
+     * overwrote it. The snapshot is authoritative about the algorithm state it allocated, and
+     * wrong about every slot the loader owns.
+     *
+     * The two separate cleanly by address: the callback slots, the bus handle and the relocated
+     * tables sit below 0x3f000, while the context, the config and everything they point at sit
+     * above it. Take the top; leave the bottom as dlopen built it.
+     */
+    {
+        unsigned long skip = from - dump_from;
+        if (skip >= n) { printf("the snapshot does not reach that far\n"); return 0; }
+        memmove(buf, buf + skip, n - skip);
+        n -= skip;
+    }
+
+    for (i = 0; i + 4 <= n; i += 4) {
+        unsigned long v;
+        memcpy(&v, buf + i, 4);
+        if (v >= theirs && v < theirs + 0x36000) {
+            v = base + (v - theirs);
+            memcpy(buf + i, &v, 4);
+            moved++;
+        } else if (v > 0x10000 && v < 0xc0000000) {
+            foreign++;
+        }
+    }
+
+    if (mprotect((void *) lo, (size_t)((unsigned long) dst + n - lo + ps),
+                 PROT_READ | PROT_WRITE) != 0)
+        printf("warning: could not make the whole range writable\n");
+    memcpy(dst, buf, n);
+    printf("loaded %lu bytes of live state: %lu pointers moved into place, "
+           "%lu left alone as outside the image\n", n, moved, foreign);
+    return 1;
 }
 
 /* Say where it died, in the addresses the decompiler uses. */
@@ -217,7 +308,8 @@ int main(int argc, char **argv)
     unsigned long base;
     double fs = 0;
     int mode = argc > 2 ? atoi(argv[2]) : 7;
-    int quiet = argc > 4;
+    int quiet = argc > 5;
+    int have_dump = 0;
     int i, results = 0;
     FILE *w;
     struct sigaction sa;
@@ -247,6 +339,9 @@ int main(int argc, char **argv)
     base = g_base = base_of("gh3011_service.real");
     if (!base) { printf("no mapping found\n"); return 1; }
     printf("mapped at 0x%lx\n", base);
+
+    /* Their live state first, if a snapshot exists, before anything here writes over it. */
+    have_dump = load_dump("/data/local/tmp/live.bin", base, 0x2f000, 0x7f622000, 0x2c000);
 
     /* The one thing that must be in place before their code runs: register reads have to go
      * somewhere. Everything else start-up will do for itself. */
@@ -287,9 +382,19 @@ int main(int argc, char **argv)
     pump = (unsigned (*)(unsigned, unsigned, unsigned, unsigned)) FN(base, PUMP);
 
     if (argc > 3) reg22 = (unsigned) strtoul(argv[3], NULL, 0);
-    printf("\ncalling gh30x_start_func_with_mode(%d) with 0x0022 answering 0x%x...\n", mode, reg22);
-    start_mode(mode);
-    printf("start returned; %d register reads so far\n", reads);
+    if (argc > 4) reg16 = (unsigned) strtoul(argv[4], NULL, 0);
+    trace = !quiet;
+    if (have_dump) {
+        /* Their start-up already ran, in their process, against a real chip and a real wrist.
+         * Running it again here against a fake bus would write over the state that was the entire
+         * point of taking the snapshot. */
+        printf("\nskipping their start-up: the snapshot already carries its result\n");
+    } else {
+        printf("\ncalling gh30x_start_func_with_mode(%d) with 0x0022 answering 0x%x...\n",
+               mode, reg22);
+        start_mode(mode);
+    }
+    printf("start state ready; %d register reads so far\n", reads);
     if (quiet) { printf("SWEEP reg22=0x%04x startreads=%d\n", reg22, reads); return 0; }
 
     /* Put the callback back, because their start-up takes it away.
@@ -386,7 +491,84 @@ int main(int argc, char **argv)
         for (j = 0; j < n; j++) { mixed[j * 2] = wave1[j]; mixed[j * 2 + 1] = wave2[j]; }
         memset(scratch, 0, sizeof scratch);
 
-        printf("\ncalling the saturation routine at Ghidra 0x1b7c0 with %d samples...\n", n);
+        /* The guard byte, once more, immediately before the call.
+         *
+         * The routine returns without computing unless this reads 1 or 7. It does not any more:
+         * their start-up now runs far enough to set it itself, and what it sets is 8. So the
+         * earlier "force it only if zero" is exactly wrong now - zero was the symptom of start-up
+         * not running, and start-up running is what changed.
+         */
+        {
+            unsigned char *mb = (unsigned char *)(base + MODE_BYTE);
+            make_writable(mb);
+            printf("\ngate byte reads %u; the routine wants 1 or 7\n", *mb);
+            *mb = (unsigned char) mode;
+        }
+        /* The config the lookup counts entries out of.
+         *
+         * FUN_00032948 does *(byte *)(*piVar14 + 8) * 0x18 to size an allocation, and piVar14
+         * points at a slot their start-up fills with a config block. Ours is still null - start
+         * gets far enough to set the mode and size a frame, not far enough to load a config - so
+         * the count read lands on address 8. Byte 8 is the number of 0x18-byte entries.
+         */
+        {
+            static unsigned char cfg[512];
+            void **slot = (void **)(base + OFF(0x3f688));
+            make_writable(slot);
+            printf("config slot holds %p", *slot);
+            if (!*slot) {
+                memset(cfg, 0, sizeof cfg);
+                cfg[8] = 1;                        /* one entry */
+                *slot = cfg;
+                printf(", now %p with one entry", *slot);
+            }
+            printf("\n");
+        }
+        /* Somewhere for the answer to land.
+         *
+         * The dispatcher finishes by memcpying 0x1c bytes out of **(0x3ceb0). The outer pointer is
+         * a real data slot; only the inner one is missing, so the copy reads from address zero.
+         * The earlier harness hit this too and the fix is the same - fill the inner pointer only,
+         * and leave the outer alone.
+         */
+        {
+            void **outer = *(void ***)(base + OFF(0x3ceb0));
+            static unsigned char resbuf[128];
+            if (outer) {
+                make_writable(outer);
+                printf("result buffer holds %p", *outer);
+                if (!*outer) { *outer = resbuf; printf(", now %p", *outer); }
+                printf("\n");
+            } else {
+                printf("the result slot itself is null\n");
+            }
+        }
+        /* The context the computation carries between windows.
+         *
+         * FUN_00030b20 reads offset 0x354 of a pointer that is null, and their start-up does not
+         * fill it because it stops three reads in. Of every data address that function touches,
+         * 0x3cee0 is the only pointer slot reading zero, and nothing in the binary writes it
+         * through a recorded reference - which is what a pointer written through a computed
+         * address looks like.
+         *
+         * This is the m_stContext their strings name in g_pstHbamainExternBss2Heap. Its real size
+         * is unknown, so give it far more than 0x354 and zero it: a zeroed context is a plausible
+         * starting state for something that accumulates, and if 0x3cee0 is the wrong slot the
+         * fault will not move.
+         */
+        {
+            static unsigned char ctx[16384];
+            void **slot = (void **)(base + OFF(0x3cee0));
+            make_writable(slot);
+            printf("context slot holds %p", *slot);
+            if (!*slot) {
+                memset(ctx, 0, sizeof ctx);
+                *slot = ctx;
+                printf(", now %p (%u bytes)", *slot, (unsigned) sizeof ctx);
+            }
+            printf("\n");
+        }
+        printf("calling the saturation routine at Ghidra 0x1b7c0 with %d samples...\n", n);
         spo2(mixed, n, (unsigned) mode, &res, &lvl, &st, &a, &b, &c, scratch, &e);
         printf("  result=%u level=%u status=%u a=%u b=%u c=%u e=%u\n", res, lvl, st, a, b, c, e);
         if (!res && !lvl && !st && !a && !b && !c && !e)
