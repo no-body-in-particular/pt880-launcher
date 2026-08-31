@@ -82,7 +82,17 @@ final class OwnVitals {
         r.fromOwn = true;
         r.heartRate = bpm;
 
-        int ox = field(line, "spo2=");
+        // spo2rel, not spo2. The daemon stopped emitting an absolute saturation once R was shown
+        // to drift from 0.32 to 0.98 over eight hours on a motionless wrist - a threefold change
+        // in the ratio the whole method rests on, which makes any single anchor wrong by several
+        // points within a day.
+        //
+        // What it emits instead is a movement away from this sensor's own recent baseline, on
+        // the reasoning that the drift is slow and a desaturation is not: an apnoea lasts tens of
+        // seconds and the instrument takes hours to wander that far. So a fall is real and worth
+        // seeing. The absolute number is an assumption - 97 for a healthy adult at rest - and is
+        // not a measurement of anyone's saturation. docs/vitals.md is explicit about this.
+        int ox = field(line, "spo2rel=");
         if (ox >= 70 && ox <= 100) r.oxygen = ox;
 
         double temp = dfield(line, "temp=");
