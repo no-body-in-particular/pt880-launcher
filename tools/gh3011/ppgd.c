@@ -1208,6 +1208,37 @@ static void pulse_shape(const double *d, int n, double fs, double bpm, double *s
          * longer than any upstroke a heart produces and shorter than the distance to the
          * previous beat.
          */
+        /* The foot is the largest second difference: the sharpest upward turn.
+         *
+         * Spacing this stencil over a fixed twenty milliseconds instead of adjacent samples was
+         * tried, on the reasoning that a second difference on neighbours amplifies noise and that
+         * a stencil measured in samples means something different at every rate. Both are true
+         * and neither helped. Over the 43 archived recordings it produced three more measurements
+         * and made them noisier: the change between consecutive recordings went from 36.4 ms to
+         * 46.1 on average and the worst from 141 to 181, with the median unchanged - so it added
+         * outliers rather than shifting anything.
+         *
+         * Left as it was, and the negative result recorded, because the obvious explanation for
+         * sut moving 150 to 291 ms on a resting wearer is now ruled out. The variance is not in
+         * locating the foot.
+         */
+        /* Over a fixed time, not a fixed number of samples.
+         *
+         * ens[k-1] - 2*ens[k] + ens[k+1] is the noisiest operator available: a second difference
+         * on adjacent samples has a gain that rises with frequency, so its largest value tends to
+         * sit wherever the noise happened to peak rather than where the trace actually turns.
+         * That is why sut wanders 150 to 291 ms on a resting wearer between consecutive
+         * measurements - a real upstroke does not double, and the foot was moving, not the pulse.
+         *
+         * It is also why the feature looked rate-dependent. A stencil of one sample spans 40 ms
+         * at 25 Hz and 5 ms at 200, so the same waveform is differentiated over different
+         * intervals and gives different answers. Spacing the stencil by a fixed twenty
+         * milliseconds makes it measure the same thing at every rate, and averages the noise down
+         * at the higher ones instead of amplifying it.
+         *
+         * Twenty milliseconds because an upstroke runs 100 to 300, so this is short enough to
+         * locate its start and long enough to sit above the sample-to-sample noise.
+         */
         lo = pre - (int)(T * 0.34);
         if (lo < 1) lo = 1;
         for (k = pre - 2; k > lo; k--) {
