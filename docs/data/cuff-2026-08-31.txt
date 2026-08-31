@@ -1,0 +1,39 @@
+Cuff against the two drive settings, 31 August 2026, wearer seated.
+Upper-arm meter on one arm, watch on the other, measurements alternating.
+
+Cuff, taken through the run:
+
+  120/71  55     (before the run started)
+  115/72  53
+  108/67  55
+  105/63  53
+  109/66  56
+  108/66  54
+  107/69  57
+  107/68  57
+
+The seven taken during the run mean 55.0.
+
+Ours, alternating 0x0084 between 0x21 and 0x22, forty seconds each:
+
+  pair   0084=0021        0084=0022
+  1      53               56
+  2      54               58
+  3      55               61
+  4      60               no agreement
+  mean   55.5             58.3
+
+Against a cuff mean of 55.0 that is half a bpm for the dim setting and three and
+a third for the bright one. The bright setting read higher in all three complete
+pairs, by 3, 4 and 6, with the pairs minutes apart on one wrist - so it is a
+systematic bias and not scatter.
+
+The 60 in the fourth dim measurement is the one number that does not fit; the
+cuff was reading 54 to 57 around then. Without it the dim mean is 54.0 against a
+cuff of about 55, which is better still, but it is left in.
+
+What this does not explain is the direction. The 30 August archive had the dim
+group reading 49 against a cuff of 49 to 50 while the bright group read 44 to 46
+- dim higher. Here dim reads lower. Dim tracks the cuff in both, so the bright
+bias is not a fixed offset and something about that setting is unstable rather
+than merely shifted.
