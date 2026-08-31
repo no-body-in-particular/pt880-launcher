@@ -1192,6 +1192,10 @@ int main(int argc, char **argv)
     int nburst = 0;
     unsigned short gain = 0x9055;   /* the value the start sequence applies */
     int settled_at = 0;             /* first sample after the gain stopped moving */
+    /* What the rate was last time, if the caller knows. Only used to break a tie between two
+     * candidate clusters under motion; never to nudge an answer that stood on its own. */
+    double prev_bpm = 0.0;
+    int tracked = 0;
     struct timeval tprev;
     const char *csvpath = argc > 2 ? argv[2] : NULL;
     /* Match the whole word. "redo" and "ratio" both start with an r, so testing the first
@@ -1199,6 +1203,7 @@ int main(int argc, char **argv)
      * and returned nothing - and the ratio on the reply stayed the guess it was meant to
      * replace. */
     const char *mode = argc > 3 ? argv[3] : "";
+    { const char *pb = getenv("PREV_BPM"); if (pb) prev_bpm = atof(pb); }
     int want_ratio = (strcmp(mode, "ratio") == 0);
     int want_redo  = (strcmp(mode, "redo") == 0);
     /*
@@ -1990,6 +1995,102 @@ int main(int argc, char **argv)
             for (b2 = a2; b2 < nrates && rates[b2] <= rates[a2] * 1.10; b2++) cnt++;
             if (cnt > bn) { bn = cnt; bi = a2; }
         }
+        /* When no cluster is big enough, ask which one continues the rate we already had.
+         *
+         * Requiring a third of the windows to agree is right for a still wrist, where the
+         * disagreement is noise. It is wrong for a moving one, where the windows split between
+         * the pulse and the cadence and neither side is a third of anything - that is two
+         * answers, not scatter, and refusing is the safe response only while there is nothing to
+         * break the tie.
+         *
+         * A previous rate breaks it. A heart does not move far in the twenty or forty seconds
+         * since the last measurement, so of two candidate clusters the one near where the rate
+         * already was is the pulse and the one far from it is the arm. That is how a wrist
+         * monitor keeps reading while its wearer runs: not by cleaning the signal up, but by
+         * refusing to be moved far by any one window.
+         *
+         * Deliberately narrow. It needs a hint from the caller, so it does nothing on a first
+         * measurement; it needs two windows rather than one, so a single lucky window cannot
+         * carry it; and it only accepts a cluster within thirty percent of the hint, so a rate
+         * that genuinely has changed a lot is still reported as unknown rather than dragged back
+         * towards a stale value. The reading is flagged so it is never mistaken for one that
+         * stood on its own.
+         */
+        if ((bn * 3 < nrates || bn < 3) && prev_bpm > 30.0) {
+            int ci, cbest = -1, cn = 0;
+            double cdiff = 1e9;
+
+            for (ci = 0; ci < nrates; ci++) {
+                int cnt = 0, cj;
+                double sum = 0;
+                for (cj = ci; cj < nrates && rates[cj] <= rates[ci] * 1.10; cj++) {
+                    cnt++; sum += rates[cj];
+                }
+                if (cnt >= 2) {
+                    double centre = sum / cnt, diff = fabs(centre - prev_bpm);
+                    if (diff < cdiff && diff < prev_bpm * 0.30) {
+                        cdiff = diff; cbest = ci; cn = cnt;
+                    }
+                }
+            }
+            if (cbest >= 0) { bi = cbest; bn = cn; tracked = 1; }
+        }
+
+        /* And the same check when the windows did agree, because agreeing is not being right.
+         *
+         * Under motion the windows can settle confidently on the cadence rather than the pulse.
+         * Measured while the wearer moved: four readings of 61, 59, 45 and 56 against a rate that
+         * was near 60, and the 45 came back with a spread of two - the tightest of the four. Every
+         * signal this program has for doubting a reading pointed the wrong way, because the
+         * windows really did agree; they agreed about the arm.
+         *
+         * A previous rate catches it where spread cannot. Sixty to forty-five in forty seconds is
+         * not something a heart does, least of all while its owner is moving, when the one
+         * direction it will not go is down. So if the winning cluster is far from the hint and
+         * another cluster is close to it, take the close one.
+         *
+         * Thirty percent, which is loose on purpose. A rate genuinely climbing at the start of
+         * exercise moves fast, and this must not hold it back - it is here for the reading that
+         * lands somewhere a heart cannot have gone, not for the one that moved more than usual.
+         */
+        if (!tracked && prev_bpm > 30.0) {
+            double won = rates[bi + bn / 2];
+
+            /* Rises and falls are not equally suspicious, and treating them alike made this
+             * check useless. A symmetric thirty percent put the floor at 42, and the reading
+             * that prompted the check was 45 against a hint of 60 - inside the band, so it
+             * passed every time. The threshold was chosen to avoid holding back a climbing rate
+             * and was never able to catch the case it was written for.
+             *
+             * Physiology is not symmetric. A heart rate climbs fast when its owner starts
+             * moving - sixty to eighty in forty seconds is ordinary - and comes down slowly,
+             * a few percent in the same time even in recovery. So allow the climb and doubt the
+             * drop.
+             */
+            double hi_ok = prev_bpm * 1.50;      /* exertion can do this */
+            double lo_ok = prev_bpm * 0.88;      /* recovery cannot, not this fast */
+
+            if (won > hi_ok || won < lo_ok) {
+                int ci, cbest = -1, cn = 0;
+                double cdiff = 1e9;
+
+                for (ci = 0; ci < nrates; ci++) {
+                    int cnt = 0, cj;
+                    double sum = 0;
+                    for (cj = ci; cj < nrates && rates[cj] <= rates[ci] * 1.10; cj++) {
+                        cnt++; sum += rates[cj];
+                    }
+                    if (cnt >= 2) {
+                        double centre = sum / cnt, diff = fabs(centre - prev_bpm);
+                        if (diff < cdiff && centre <= hi_ok && centre >= lo_ok) {
+                            cdiff = diff; cbest = ci; cn = cnt;
+                        }
+                    }
+                }
+                if (cbest >= 0) { bi = cbest; bn = cn; tracked = 1; }
+            }
+        }
+
         if (bn * 3 < nrates || bn < 3) {
             printf("hr=0 reason=no_cluster best=%d of %d windows median=%.0f hz=%.1f samples=%d\n",
                    bn, nrates, rates[nrates/2], fs, ns);
@@ -2150,9 +2251,13 @@ int main(int argc, char **argv)
 
             printf("hr=%.0f spread=%.0f hz=%.1f samples=%d windows=%d gain=%04x"
                    " dc1=%.0f dc2=%.0f ac1=%.0f ac2=%.0f r=%.3f spo2=%.0f beats=%d raw=%.0f/%.2f sut=%.0f ai=%.2f motion=%.0f/%.0f"
-                   " sbp=%.0f dbp=%.0f used=%s\n",
+                   " sbp=%.0f dbp=%.0f used=%s%s\n",
                    med, spread, fs, ns, nrates, gain, dc1, dc2, a1, a2, r, spo2, shape_beats, shape_raw_sut, shape_raw_ai, sut, ai, mot_med, mot_worst, sbp, dbp,
-                   src == ch2 ? "ch2" : "ch1");
+                   src == ch2 ? "ch2" : "ch1",
+                   /* Say so when the windows did not agree on their own and the previous rate
+                    * chose between them. Worth having under motion, and not the same claim as a
+                    * reading the windows settled themselves. */
+                   tracked ? " tracked=1" : "");
         }
     }
     return 0;
