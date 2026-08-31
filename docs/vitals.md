@@ -885,30 +885,38 @@ being repeated.
 this configuration has not been established, and choosing the assignment that returns a plausible
 answer is assuming what is being measured. It stays 2.09 until the assignment is shown.
 
-## R, settled: it is quantisation, and three revisions did not change that
+## R is a measurement when there is amplitude, and noise when there is not
 
-Five consecutive ratio passes on one wrist, same configuration, minutes apart:
+Two groups of runs on one wrist within the hour, same configuration:
 
-    ac1  ac2      R
-      9    8   1.745
-      9    8   1.795
-     10   10   1.683
-      8    6   2.058
-      8    7   2.051
+    infrared amplitude 6 to 10      R = 1.68, 1.75, 1.80, 2.05, 2.06
+    infrared amplitude 32 to 253    R = 0.61 to 0.81 over ten runs, mean about 0.70, spread 7%
 
-and a single pass a few minutes earlier gave ac1=16, ac2=37, R=0.748.
+The first group is not a poor measurement of saturation; it is not a measurement. Half a count of
+rounding on an eight count amplitude is six percent before anything physiological happens, and a
+ratio of two such numbers goes wherever the rounding sends it. The second group is stable and sits
+where a healthy wearer should.
 
-So R runs from 0.74 to 2.06 depending on whether the infrared amplitude comes out at seven counts
-or thirty-seven. Both are small enough that a count of quantisation is ten percent of the number,
-and the ratio of two such quantities is not a measurement of anything.
+So the earlier conclusion here - that R is quantisation and no averaging fixes it - was drawn from
+the low-amplitude runs alone and is too broad. It is quantisation when the amplitude is low, and
+that is a condition worth testing rather than a property of the sensor.
 
-This was the first diagnosis and it stands. It was then talked out of twice in one evening: once
-by a single capture whose ch2 carried a dropout, and once by a run that happened to have a large
-ac2 and produced a physiological 0.748 - each time by reading one measurement and writing it up
-before repeating it. The pattern is the same one that produced the phantom red drive earlier: a
-number in the expected range is not evidence when the thing being questioned is whether the number
-means anything.
+ppgd now flags a ratio taken on too little pulse as weak=1, at an infrared amplitude of thirty,
+drawn between the two groups rather than derived from anything. It wants revisiting when there are
+runs in between to place it by, and it errs generous: a refused good measurement costs one
+reading, an accepted bad one costs a saturation that is wrong without looking wrong.
 
-More averaging does not fix it either. Averaging reduces random error about a stable value, and
-these do not scatter about a value - they sit at 1.7 to 2.1 and then jump to 0.75 when the
-amplitude estimate lands in a different regime. That is not noise to be averaged down.
+The vendor has this check and we did not. Their configuration expects the dim channel around a
+level of 5,111 and they test it every window - which is also why they can work with a red channel
+this faint, where the effort here went into trying to make it brighter.
+
+### How the amplitude is estimated, which is the real difference
+
+Ours takes one sample per beat: the peak, minus an interpolated baseline. Theirs is an RMS across
+the window - FUN_00022928 squares, sums and takes a root. On an eight count pulse a single sample
+carries half a count of rounding and averages nothing; an RMS over four thousand samples averages
+the same rounding down by sixty-odd.
+
+The Goertzel amplitudes this file already computes for band_amp are the same quantity as their
+RMS, and the ratio pass already reports its R from those, which is why that path gives 0.61 to
+0.81 where the beatwise one gives 1.7 to 2.1 on the same wrist.

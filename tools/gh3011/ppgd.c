@@ -333,6 +333,36 @@ static double spectral_purity(const unsigned int *x, int n, double fs, double bp
     return peak / total;
 }
 
+/* Is there enough pulse for a ratio to mean anything?
+ *
+ * R divides one small number by another, so what matters is not how large the amplitudes are in
+ * absolute terms but how many counts of quantisation sit inside them. Measured on one wrist within
+ * the hour:
+ *
+ *     infrared amplitude 6 to 10      R came out 1.68, 1.75, 1.80, 2.05, 2.06
+ *     infrared amplitude 32 to 150    R came out 0.66 to 0.81, six runs, mean 0.726, spread 7%
+ *
+ * The first group is not a worse measurement of saturation, it is not one: half a count of
+ * rounding on an eight count amplitude is six percent before anything physiological happens, and
+ * the ratio of two such numbers wanders wherever the rounding sends it. The second is a
+ * measurement, and 0.726 with seven percent of spread is in the range a healthy wearer should
+ * produce.
+ *
+ * Thirty counts is drawn between the two groups rather than derived. It wants revisiting when
+ * there are runs in between to place it by, and it is deliberately on the generous side: the cost
+ * of refusing a good measurement is one missing reading, and the cost of accepting a bad one is a
+ * saturation that is wrong without looking wrong.
+ *
+ * The vendor has this check and this file has not: their configuration expects the dim channel to
+ * sit around a level of 5,111 and they test it every window.
+ */
+#define RATIO_MIN_AC  30.0
+
+static int ratio_usable(double ac1, double ac2)
+{
+    return ac1 >= RATIO_MIN_AC * 0.25 && ac2 >= RATIO_MIN_AC;
+}
+
 /* Confidence as a probability, the way they state it.
  *
  * FUN_0001e4a4 integrates exp(-(x-mu)^2 / (2*sigma^2)) / (sigma * sqrt(2*pi)) over a range, and
@@ -1954,8 +1984,11 @@ int main(int argc, char **argv)
             }
         }
 
-        printf("r=%.3f at=%.0f dc1=%.0f dc2=%.0f ac1=%.1f ac2=%.1f samples=%d hz=%.1f\n",
-               r, bestf, d1, d2, a1, a2, ns, fs);
+        /* Say when the ratio has too little pulse behind it to mean anything, rather than
+         * printing a number that looks the same either way. The caller can then keep the good
+         * ones instead of averaging noise into them. */
+        printf("r=%.3f%s at=%.0f dc1=%.0f dc2=%.0f ac1=%.1f ac2=%.1f samples=%d hz=%.1f\n",
+               r, ratio_usable(a1, a2) ? "" : " weak=1", bestf, d1, d2, a1, a2, ns, fs);
         return 0;
     }
 
