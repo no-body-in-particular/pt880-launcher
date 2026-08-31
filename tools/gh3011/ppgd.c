@@ -778,6 +778,43 @@ static double window_motion(int from, int len, int total)
  * so that agreement is high and disagreement is low, and scaled by how much weight accumulated
  * at all. Three windows agreeing closely is not the same claim as twelve, and this says so.
  */
+/* Their convergence rule, exactly as the binary states it.
+ *
+ * This file has described the vendor's saturation as climbing rather than arriving, and
+ * reimplemented that from the outside by weighting windows. The rule itself turns out to be much
+ * plainer than the reimplementation. In FUN_00022928:
+ *
+ *     if (abs(a - b) < 10) { x = x * 0.8; y = y * 0.2; }
+ *
+ * with 0.8 and 0.2 as doubles in the constant pool. So the estimate holds four fifths of what it
+ * had and takes one fifth of what just arrived - but only while the new reading is within ten of
+ * the old one. A reading further away than that is not blended at all; it replaces.
+ *
+ * That gate is the interesting half and the part guesswork would have missed. A plain exponential
+ * average drags slowly towards a bad reading and then slowly back, so a single wild window bends
+ * the answer for the next several. Jumping instead means a genuine change is followed at once,
+ * while small disagreements are smoothed - which is the behaviour their numbers actually show,
+ * and it comes from one comparison rather than from any weighting.
+ *
+ * Ours weights windows by beats and stillness, which is better founded than a fixed fifth. What
+ * it does not have is the jump, so this is here to be compared against rather than to replace it.
+ *
+ * state is the running estimate and is updated in place; zero means nothing yet.
+ */
+#define VENDOR_KEEP  0.8         /* of the old */
+#define VENDOR_TAKE  0.2         /* of the new */
+#define VENDOR_JUMP  10.0        /* further apart than this and it does not blend, it replaces */
+
+static double vendor_converge(double *state, double fresh)
+{
+    if (*state <= 0.0) { *state = fresh; return *state; }
+    if (fabs(fresh - *state) < VENDOR_JUMP)
+        *state = *state * VENDOR_KEEP + fresh * VENDOR_TAKE;
+    else
+        *state = fresh;
+    return *state;
+}
+
 static int converge_ratio(const double *ppg, const unsigned int *a, const unsigned int *b,
                           int n, double fs, double bpm, double motion_ref,
                           double *out_r, double *out_conf, int *out_windows)
@@ -1365,6 +1402,30 @@ int main(int argc, char **argv)
                     if (converge_ratio(dwb, ch1, ch2, ns, rfs, rbpm,
                                        mref > 0 ? mref : 0.0, &rconv, &conf, &nwin)) {
                         printf("rconv=%.3f conf=%.0f nwin=%d ", rconv, conf, nwin);
+
+                        /* And what their rule would have said about the same windows.
+                         *
+                         * Ours weights each window by beats and stillness; theirs holds four
+                         * fifths and takes one fifth, jumping outright when the new value is ten
+                         * or more away. Running both over the same record is the only honest way
+                         * to say which behaves better, and it costs one pass. */
+                        {
+                            double vstate = 0.0, vr = 0.0;
+                            int w = (int)(rfs * 6.0), step, i2, seen = 0;
+                            if (w > ns) w = ns;
+                            step = w / 2 > 0 ? w / 2 : 1;
+                            for (i2 = 0; w >= 16 && i2 + w <= ns; i2 += step) {
+                                double rr = 0; int nb = 0;
+                                if (!beatwise_ratio(dwb + i2, ch1 + i2, ch2 + i2, w, rfs,
+                                                    rbpm, &rr, &nb)) continue;
+                                /* Their jump threshold is ten of whatever they carry; R runs
+                                 * near one, so compare on the same scale they would - hundredths
+                                 * of a percent of saturation rather than raw ratio. */
+                                vr = vendor_converge(&vstate, rr * 100.0);
+                                seen++;
+                            }
+                            if (seen) printf("vconv=%.3f vwin=%d ", vr / 100.0, seen);
+                        }
                     } else {
                         printf("rconv=0 conf=0 nwin=0 ");
                     }
