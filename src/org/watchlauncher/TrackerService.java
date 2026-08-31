@@ -169,6 +169,7 @@ public class TrackerService extends Service {
 
     private volatile boolean running;
     private Thread worker;
+    private Thread vitalsWorker;
     private volatile Socket sock;
 
     /** The live output stream, so sensor work running off the loop can answer without
@@ -609,6 +610,13 @@ public class TrackerService extends Service {
             worker.setDaemon(true);
             worker.start();
         }
+        if (vitalsWorker == null) {
+            vitalsWorker = new Thread(new Runnable() {
+                public void run() { vitalsLoop(); }
+            }, "vitals-clock");
+            vitalsWorker.setDaemon(true);
+            vitalsWorker.start();
+        }
         return START_STICKY;
     }
 
@@ -623,6 +631,39 @@ public class TrackerService extends Service {
     @Override
     public IBinder onBind(Intent intent) {
         return null;
+    }
+
+    /**
+     * Measure on a clock of its own, rather than on the connection's.
+     *
+     * The vitals cycle lived inside the read loop, so it only happened while that loop was going
+     * round. Every way of losing readings seen so far has that shape: the session drops and the
+     * loop is in a backoff, the app is reinstalled and the service comes back without its loop,
+     * the read does not return when the server goes quiet. In each case the watch is on a wrist,
+     * the sensor works, and nothing is measured - and because the loop is also what sends, the
+     * failure is silent.
+     *
+     * Measuring is not the connection's business. A reading stamps itself, and Spool already holds
+     * what cannot be sent until the link returns - that is how position frames survive a
+     * disconnect. So this drives the measurement and lets the sending catch up.
+     *
+     * The connection loop still asks as well. measureVitalsAsync refuses anything inside
+     * MEASURE_FLOOR_MS of the last one, so the two cannot double up.
+     */
+    private void vitalsLoop() {
+        while (running) {
+            try {
+                Thread.sleep(vitalsSeconds() * 1000L);
+            } catch (InterruptedException e) {
+                return;
+            }
+            if (!running) return;
+            try {
+                measureVitalsAsync();
+            } catch (Throwable t) {
+                Log.w(TAG, "the vitals clock could not start a measurement", t);
+            }
+        }
     }
 
     // ------------------------------------------------------------------ connection
