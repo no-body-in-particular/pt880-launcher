@@ -244,15 +244,34 @@ final class OwnVitals {
         return field(line, "steps=");
     }
 
+    /**
+     * One accelerometer burst, as the sums a sleep burst reduces to, or null.
+     *
+     * The daemon samples the DA217 directly for {@code ms} and returns n, the per-axis sums, the
+     * magnitude sums and the extremes - the nine numbers the recorder builds anyway. Reading the
+     * part here rather than through SensorManager is what makes the vendor's driver removable:
+     * it owns the same chip and delivers nothing at all for the step half of it.
+     */
+    static String accelBurst(Context ctx, int ms) {
+        // Long enough for the burst itself plus the daemon being busy with something else.
+        return ask("accel " + ms, ms + 10000);
+    }
+
     /** Read {@code name=<decimal>} out of the reply, or -1. */
     static double dfield(String line, String name) {
         if (line == null) return -1;
         int at = line.indexOf(name);
         if (at < 0) return -1;
         int i = at + name.length(), start = i;
+        // A leading minus, because an axis sum is negative whenever the wrist is the other way
+        // up. Without this every such field parsed as -1 and a burst read as motionless.
+        if (i < line.length() && line.charAt(i) == '-') i++;
+        int digits = i;
         while (i < line.length()
                 && (Character.isDigit(line.charAt(i)) || line.charAt(i) == '.')) i++;
-        if (i == start) return -1;
+        // Count the digits rather than compare against start: a consumed minus sign would
+        // otherwise look like progress and "sx=-" would parse as a number.
+        if (i == digits) return -1;
         try {
             return Double.parseDouble(line.substring(start, i));
         } catch (NumberFormatException e) {

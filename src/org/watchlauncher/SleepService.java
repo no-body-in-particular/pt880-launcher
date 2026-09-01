@@ -288,6 +288,20 @@ public class SleepService extends Service implements SensorEventListener {
             // being missed rather than averaged, and the direction of the error is towards
             // reading still - which here means falsely scoring sleep. UI leaves Nyquist above
             // 8 Hz, clear of essentially all wrist movement, so the metric is unchanged.
+            // The daemon first, so nothing here needs the vendor's driver.
+            //
+            // The DA217 carries both the accelerometer and the step counter, and its driver
+            // delivers nothing at all for the step half - so steps are already read off the bus.
+            // Reading this half the same way is what lets the driver go entirely, rather than
+            // merely being worked around.
+            //
+            // It samples at the same sixteen a second this asked SENSOR_DELAY_UI for and returns
+            // the nine sums a burst reduces to, so the scoring below is unchanged. The listener
+            // stays as the fallback: the daemon serves one request at a time, and a burst that
+            // arrives while a measurement holds it would otherwise be a lost night rather than a
+            // slow one.
+            if (startDaemonBurst()) return START_NOT_STICKY;
+
             sensors.registerListener(this, accel, SensorManager.SENSOR_DELAY_UI);
         } catch (Exception e) {
             finishBurst();
@@ -296,6 +310,61 @@ public class SleepService extends Service implements SensorEventListener {
         ui.postDelayed(stop, BURST_MS);
         return START_NOT_STICKY;
     }
+
+    /**
+     * Take the burst from vitalsd. True if it is under way, false to use the sensor instead.
+     *
+     * Runs off this thread because the reply takes as long as the burst does, and finishes on the
+     * ui handler so everything after it happens where it always did.
+     */
+    private boolean startDaemonBurst() {
+        if (!daemonBursts) return false;
+        new Thread(new Runnable() {
+            public void run() {
+                String line = OwnVitals.accelBurst(SleepService.this, (int) BURST_MS);
+                final boolean ok = line != null && OwnVitals.field(line, "n=") > 0;
+                if (ok) {
+                    n = OwnVitals.field(line, "n=");
+                    sx = OwnVitals.dfield(line, "sx=");
+                    sy = OwnVitals.dfield(line, "sy=");
+                    sz = OwnVitals.dfield(line, "sz=");
+                    sMag = OwnVitals.dfield(line, "smag=");
+                    sMagSq = OwnVitals.dfield(line, "smagsq=");
+                    sEnmo = OwnVitals.dfield(line, "senmo=");
+                    minMag = OwnVitals.dfield(line, "minmag=");
+                    maxMag = OwnVitals.dfield(line, "maxmag=");
+                } else {
+                    // Once is a busy daemon; repeatedly is a daemon that cannot do this, and
+                    // there is no sense asking all night. The sensor answers either way.
+                    if (++daemonMisses >= 3) {
+                        daemonBursts = false;
+                        Log.i(TAG, "vitalsd will not serve bursts; using the sensor");
+                    }
+                }
+                ui.post(new Runnable() {
+                    public void run() {
+                        if (ok) {
+                            daemonMisses = 0;
+                            finishBurst();
+                        } else {
+                            try {
+                                sensors.registerListener(SleepService.this, accel,
+                                        SensorManager.SENSOR_DELAY_UI);
+                                ui.postDelayed(stop, BURST_MS);
+                            } catch (Exception e) {
+                                finishBurst();
+                            }
+                        }
+                    }
+                });
+            }
+        }, "sleep-burst").start();
+        return true;
+    }
+
+    /** Off after three refusals in a row - see startDaemonBurst. */
+    private static volatile boolean daemonBursts = true;
+    private static volatile int daemonMisses = 0;
 
     private final Runnable stop = new Runnable() {
         public void run() { finishBurst(); }
