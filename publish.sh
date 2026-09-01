@@ -26,6 +26,28 @@ grep -q "$SUM" "$HERE/install-launcher.sh" || {
     exit 1
 }
 
+# The vitals daemon and its helpers, when they have been built. Pinned the same
+# way as the APK and for the same reason: a truncated download of the thing that
+# measures everything should be refused rather than installed.
+#
+# Not fatal when missing. Building them needs an NDK, and publishing a new
+# launcher should not depend on having one to hand - but the pins are cleared
+# rather than left stale, so the installer never checks a new binary against an
+# old checksum.
+BIN="$HERE/vitals-bin"
+for f in vitalsd ppgd adtwear; do
+    KEY=$(echo "$f" | tr '[:lower:]' '[:upper:]')_SHA256
+    if [ -f "$BIN/$f" ]; then
+        S=$(sha256sum "$BIN/$f" | cut -d' ' -f1)
+        install -D -m 644 "$BIN/$f" "$WEB/vitals/$f"
+        echo "  $f $S"
+    else
+        S=""
+        echo "  $f not built; pin cleared"
+    fi
+    sed -i -E "s/^${KEY}=\"[a-f0-9]*\"$/${KEY}=\"$S\"/" "$HERE/install-launcher.sh"
+done
+
 install -m 644 "$APK" "$WEB/watchlauncher.apk"
 install -m 644 "$HERE/install-launcher.sh" "$WEB/install-launcher.sh"
 

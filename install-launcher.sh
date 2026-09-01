@@ -5,9 +5,10 @@
 #
 #     (no flags)   install the APK and nothing else
 #     --root       also install the setuid helper the Terminal needs
+#     --vitals     also install the vitals daemon, which measures everything
 #     --home       also make it the watch's home screen
 #     --call       also take the in-call screen off the stock dialler
-#     --all        all three
+#     --all        all four
 #
 # Root and home are opt-in on purpose. One installs a binary that hands root to
 # anything on the device that can exec it, and the other changes what the watch
@@ -23,6 +24,12 @@ SERIAL="${SERIAL:-}"
 adbq() { $ADB "$@" </dev/null; }
 
 BASE="${BASE:-https://coredump.ws/pt880}"
+# The vitals daemon and its two helpers, pinned the same way and for the same
+# reason. Re-pinned by publish.sh; built by build-vitals.sh.
+VITALSD_SHA256="9cfa0bc9c2bb13cecae985665abae04ba020e891f18decb874fb27f0f84b1d2b"
+PPGD_SHA256="4a38bd1ad3f3666988280b7e7044e11579dfe4d8cfa30acc3d4f647dacb108a4"
+ADTWEAR_SHA256="0906e7bc2877f943d68315b2ed803d6e7966194fa4e2890b38c366b9d0bbeb82"
+
 APK_SHA256="e3b37ff7a2752dea020b5d5ccf3bb1b566cac9ac1468d90c923468584a64edfb"
 
 say() { printf '\n== %s\n' "$*"; }
@@ -31,12 +38,14 @@ die() { printf '\nerror: %s\n' "$*" >&2; exit 1; }
 DO_ROOT=0
 DO_HOME=0
 DO_CALL=0
+DO_VITALS=0
 for a in "$@"; do
   case "$a" in
     --root) DO_ROOT=1 ;;
+    --vitals) DO_VITALS=1 ;;
     --home) DO_HOME=1 ;;
     --call) DO_CALL=1 ;;
-    --all)  DO_ROOT=1; DO_HOME=1; DO_CALL=1 ;;
+    --all)  DO_ROOT=1; DO_HOME=1; DO_CALL=1; DO_VITALS=1 ;;
     -h|--help)
       sed -n '2,12p' "$0" 2>/dev/null || echo "flags: --root --home --all"
       exit 0 ;;
@@ -148,6 +157,66 @@ if [ "$DO_ROOT" = "1" ]; then
   # Runs as a file rather than a pipe, so its own BASH_SOURCE logic works and
   # its adb calls are not competing with this script for stdin.
   ADB="$ADB" WSU_URL="$BASE/wsu" bash "$TMP/install-root-helper.sh"
+fi
+
+if [ "$DO_VITALS" = "1" ]; then
+  say "vitals daemon"
+  # The launcher measures nothing itself: it asks vitalsd over a socket, and
+  # vitalsd runs ppgd and adtwear as helpers because each needs the chip's
+  # device node to itself for the length of a pass. Without these three the
+  # watch reports no pulse, no pressure, no saturation and no temperature -
+  # there is no longer a fallback to the OEM's own service.
+  for f in vitalsd ppgd adtwear; do
+    fetch "$BASE/vitals/$f" "$TMP/$f" || die "could not fetch $BASE/vitals/$f"
+    case "$f" in
+      vitalsd) want="$VITALSD_SHA256" ;;
+      ppgd)    want="$PPGD_SHA256" ;;
+      adtwear) want="$ADTWEAR_SHA256" ;;
+    esac
+    got="$(sha256of "$TMP/$f")"
+    if [ -n "$want" ] && [ -n "$got" ] && [ "$got" != "$want" ]; then
+      die "$f checksum mismatch
+       expected $want
+       got      $got"
+    fi
+    adbq push "$TMP/$f" "/data/local/tmp/$f" >/dev/null 2>&1 \
+      || die "could not push $f to the watch"
+    adbq shell "chmod 755 /data/local/tmp/$f" >/dev/null 2>&1
+    echo "  $f  $(wc -c < "$TMP/$f") bytes"
+  done
+
+  # init already runs gh3011_service as root and restarts it if it dies, which
+  # is exactly the supervision this needs and is not otherwise available: the
+  # app has no root, and nothing else here survives an adb disconnect. The real
+  # vendor binary is kept alongside as .real, so the original behaviour is one
+  # copy away.
+  #
+  # Needs root. With the helper installed --root puts it there; without it this
+  # step says so rather than half-doing it.
+  adbq shell 'su -c id 2>/dev/null || wsu id 2>/dev/null || id' \
+    | tr -d '\r' | grep -q 'uid=0' || {
+      echo "  no root on this watch, so the daemon cannot be put in init's slot."
+      echo "  run again with --root first, then --vitals."
+      DO_VITALS=0
+  }
+fi
+
+if [ "$DO_VITALS" = "1" ]; then
+  adbq shell 'wsu sh -c "
+    mount -o rw,remount /system 2>/dev/null
+    setprop ctl.stop gh3011_daemon
+    sleep 2
+    if [ ! -f /system/bin/gh3011_service.real ]; then
+        cat /system/bin/gh3011_service > /system/bin/gh3011_service.real
+        chmod 755 /system/bin/gh3011_service.real
+    fi
+    printf \"#!/system/bin/sh\\nexec /data/local/tmp/vitalsd\\n\" > /system/bin/gh3011_service
+    chmod 755 /system/bin/gh3011_service
+    setprop ctl.start gh3011_daemon
+    sleep 3
+    ps | grep vitalsd | grep -v grep
+  "' | tr -d '\r' | sed 's/^/  /'
+  echo "  to go back:  adb shell wsu cat /system/bin/gh3011_service.real \> /system/bin/gh3011_service"
 fi
 
 if [ "$DO_CALL" = "1" ]; then

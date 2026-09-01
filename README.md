@@ -300,12 +300,22 @@ curl -fsSL https://coredump.ws/pt880/install-launcher.sh | bash -s -- --all
 |---|---|
 | *(none)* | the APK, and starts it |
 | `--root` | the setuid helper the Terminal needs |
+| `--vitals` | the daemon that measures the pulse, pressure, saturation and temperature |
 | `--home` | makes it the watch's home screen |
-| `--all` | both |
+| `--call` | takes the in-call screen off the stock dialler |
+| `--all` | all four |
 
 Root and home are opt-in on purpose: one installs a binary that hands root to
 anything on the device that can exec it, and the other changes what the watch
 boots into. Neither belongs in the default path of a one-liner.
+
+`--vitals` needs root and so runs after `--root`, because the daemon goes in
+the init slot the vendor's used to occupy — init supervises it there and
+restarts it if it dies, which is supervision the app cannot give it. Without
+that daemon the watch reports no vitals at all: the launcher measures nothing
+itself, and the fallback to the OEM's own sensor service was removed when ours
+became the only source worth having. Build the three binaries with
+`./build-vitals.sh` (needs an NDK) before `./publish.sh` pins them.
 
 The installer verifies the SHA-256 of everything it downloads before touching
 the device — a 404 page downloads perfectly well and installs not at all. The
@@ -322,8 +332,8 @@ adb shell am start -n org.watchlauncher/.ShellActivity
 ```
 
 Hosted files: `watchlauncher.apk`, `wsu`, `install-launcher.sh`,
-`install-root-helper.sh`, `set-as-home.sh`, all under
-`https://coredump.ws/pt880/`.
+`install-root-helper.sh`, `set-as-home.sh` and `vitals/{vitalsd,ppgd,adtwear}`,
+all under `https://coredump.ws/pt880/`.
 
 ## Building
 
