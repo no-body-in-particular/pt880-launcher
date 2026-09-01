@@ -303,6 +303,22 @@ public class TrackerService extends Service {
 
     private int redCycle = 0;
 
+    /**
+     * Whether a saturation is owed.
+     *
+     * The oxygen schedule used to call straight into the ordinary vitals cycle, which asks green
+     * for a rate and only lights red every {@link #RED_EVERY} cycles - and green cannot produce
+     * a saturation at all. So "measure oxygen every fifteen minutes" measured oxygen only when
+     * its timer happened to land on a red cycle, and reported one only if that pass also liked
+     * the signal. It went from thin to nothing at all without anything being wrong.
+     *
+     * A flag rather than a second measurement: the cycle is already guarded against overlapping
+     * and against running twice inside {@link #MEASURE_FLOOR_MS}, and an oxygen timer that
+     * called past those guards would light the LEDs on top of a measurement already running.
+     * This waits for the next cycle that does run and tells it what it is for.
+     */
+    private volatile boolean oxygenDue = false;
+
     private void measureVitalsAsync(boolean asked) {
         // Every return below used to be silent on at least one path, which made a cycle that
         // never measured indistinguishable from one that was never asked to.
@@ -348,8 +364,16 @@ public class TrackerService extends Service {
                     // to gh3011_service; checked against the vendor on the same wrist minutes
                     // apart, 47/50/52 against its 49. It returns null rather than guessing when
                     // its windows disagree, which is what a moving wrist looks like - so the
-                    // vendor path stays as the fallback, and is still the only source of SpO2
-                    // and of a pressure.
+                    // vendor path stays as the fallback.
+                    //
+                    // This used to end "and is still the only source of SpO2 and of a pressure",
+                    // which stopped being true of the pressure when OwnVitals learned to read a
+                    // pulse shape: sbp and dbp come from our own daemon now and the vendor is
+                    // not asked for them. It remains the only source of an *absolute* saturation.
+                    // Ours reports spo2rel - a movement away from this sensor's own baseline,
+                    // anchored on an assumed 97 - which docs/vitals.md is explicit is not a
+                    // measurement of anyone's saturation. That is why the oxygen cycle below
+                    // falls back to the vendor rather than settling for ours.
                     // Green first, for the rate.
                     //
                     // This asked for red first, because red samples at 100 Hz and green at 25,
@@ -395,8 +419,14 @@ public class TrackerService extends Service {
                     // sensor time back. A pressure every fortieth minute is enough for something
                     // that moves as slowly as blood pressure does, and the rate, which is what
                     // this watch is asked for, still comes every cycle from green.
+                    // Consumed whether or not a saturation comes of it. Leaving it set until
+                    // one does would light red every cycle for as long as the signal refused,
+                    // which is the expensive pass and the one the cadence exists to ration.
+                    final boolean wantOxygen = oxygenDue;
+                    oxygenDue = false;
+
                     boolean wantShape = (redCycle++ % RED_EVERY) == 0;
-                    if (wantShape || r == null) {
+                    if (wantShape || wantOxygen || r == null) {
                         VendorVitals.Reading red = OwnVitals.measure(TrackerService.this, true);
                         if (red != null) {
                             // Green's rate wins where both found one: red ran for the shape.
@@ -404,7 +434,28 @@ public class TrackerService extends Service {
                             r = red;
                         }
                     }
-                    if (r == null) {
+                    // Ours reports a saturation only when the pulse shape supports one, and
+                    // reports none at all while channel 1 carries two counts of signal - which
+                    // is most of the time on a still wrist. The vendor service measures an
+                    // absolute saturation and is the only source of one, so the oxygen cycle is
+                    // the one place worth paying its queue for.
+                    boolean askedVendor = false;
+                    if (wantOxygen && (r == null || r.oxygen <= 0)) {
+                        askedVendor = true;
+                        VendorVitals.Reading v =
+                                VendorVitals.measure(TrackerService.this, VITALS_TIMEOUT_MS);
+                        if (v != null && v.oxygen > 0) {
+                            if (r == null) {
+                                r = v;
+                            } else {
+                                r.oxygen = v.oxygen;
+                            }
+                        }
+                    }
+                    // Not twice. The vendor's queue is the slowest thing here and it has just
+                    // been asked; asking again on the same cycle would spend two minutes of lit
+                    // LEDs to get the same silence.
+                    if (r == null && !askedVendor) {
                         r = VendorVitals.measure(TrackerService.this, VITALS_TIMEOUT_MS);
                     }
                     if (r == null) {
@@ -839,6 +890,7 @@ public class TrackerService extends Service {
                 nextVitals = now + vitalsSeconds() * 1000L;
             }
             if (now >= nextOxygen) {
+                oxygenDue = true;
                 measureVitalsAsync();
                 nextOxygen = now + oxygenSeconds() * 1000L;
             }

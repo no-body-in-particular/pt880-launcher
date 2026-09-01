@@ -446,17 +446,92 @@ public final class TrackerSources {
      */
     private static volatile int lastSteps = 0;
 
-    public static int steps(Context c) {
-        // TYPE_STEP_COUNTER first, then by name: this watch's counter is a DA217 with a vendor
-        // type number, so getDefaultSensor(TYPE_STEP_COUNTER) returns null on it and the step
-        // field in every heartbeat has been a hardcoded-looking zero ever since.
-        float[] v = oneShot(c, "step", Sensor.TYPE_STEP_COUNTER, 5000);
-        if (v == null) {
-            Log.i(TAG, "no step count; the counter did not answer");
-            return lastSteps;
+    /** Whether the standing listener below has been put in place yet. */
+    private static volatile boolean stepsListening = false;
+
+    /** Where the count survives a restart of this process. */
+    private static final String KEY_STEPS = "client_last_steps";
+
+    /**
+     * Keep a listener on the step counter for as long as the process lives.
+     *
+     * The counter reports once on registration and then only when it changes. A five second
+     * one-shot therefore answers only if a step happens to be taken inside those five seconds,
+     * and on a still wrist it returns nothing at all -- which {@link #steps} then reported as
+     * whatever it last saw, which after a restart is zero. That is what put a hardcoded-looking
+     * zero in every heartbeat for five days: the sensor was not broken and the wearer was not
+     * still, the window was just never open at the right moment.
+     *
+     * A standing registration has no such window. The counter runs in hardware whether anyone
+     * is listening or not, so this costs a callback per step and nothing else.
+     */
+    private static synchronized void listenForSteps(Context c) {
+        if (stepsListening) return;
+        SensorManager sm = (SensorManager) c.getSystemService(Context.SENSOR_SERVICE);
+        if (sm == null) return;
+
+        Sensor found = sm.getDefaultSensor(Sensor.TYPE_STEP_COUNTER);
+        if (found == null) {
+            // By name, because this watch's counter is a DA217 with a private type number and
+            // getDefaultSensor is useless on it.
+            List<Sensor> all = sm.getSensorList(Sensor.TYPE_ALL);
+            for (int i = 0; all != null && i < all.size(); i++) {
+                String n = all.get(i).getName();
+                if (n != null && n.toLowerCase(Locale.US).indexOf("step") >= 0) {
+                    found = all.get(i);
+                    break;
+                }
+            }
         }
-        int n = (int) v[0];
-        if (n >= 0) lastSteps = n;
+        if (found == null) {
+            Log.w(TAG, "no step counter on this device, by type or by name");
+            return;
+        }
+
+        final Context app = c.getApplicationContext();
+        boolean ok = false;
+        try {
+            ok = sm.registerListener(new SensorEventListener() {
+                public void onSensorChanged(SensorEvent e) {
+                    if (e.values == null || e.values.length == 0) return;
+                    int n = (int) e.values[0];
+                    if (n < 0 || n == lastSteps) return;
+                    lastSteps = n;
+                    // Kept, so a restart does not report zero until the wearer next moves.
+                    // The counter itself is since boot, so this is only ever a floor: a real
+                    // reboot resets it and the next event will be smaller, which is correct.
+                    try {
+                        app.getSharedPreferences("tracker", Context.MODE_PRIVATE)
+                                .edit().putInt(KEY_STEPS, n).apply();
+                    } catch (Throwable ignored) { /* the reading still stands */ }
+                }
+
+                public void onAccuracyChanged(Sensor s, int a) { }
+            }, found, SensorManager.SENSOR_DELAY_NORMAL);
+        } catch (Throwable t) {
+            Log.w(TAG, "could not listen to " + found.getName(), t);
+        }
+        stepsListening = ok;
+        Log.i(TAG, "step counter " + found.getName() + (ok ? ": listening" : ": would not register"));
+    }
+
+    /**
+     * Steps since boot from the hardware counter.
+     *
+     * Served from the standing listener. The first call also restores what was last seen before
+     * the process restarted, so a heartbeat sent before the wearer has moved carries the count
+     * they had rather than a zero.
+     */
+    public static int steps(Context c) {
+        if (!stepsListening) {
+            if (lastSteps == 0) {
+                try {
+                    lastSteps = c.getSharedPreferences("tracker", Context.MODE_PRIVATE)
+                            .getInt(KEY_STEPS, 0);
+                } catch (Throwable ignored) { /* nothing kept; zero is the honest answer */ }
+            }
+            listenForSteps(c);
+        }
         return lastSteps;
     }
 
