@@ -438,11 +438,13 @@ public class TrackerService extends Service {
     }
 
     private void measureVitalsAsync(boolean asked) {
-        // Every return below used to be silent on at least one path, which made a cycle that
-        // never measured indistinguishable from one that was never asked to.
-        Log.i(TAG, "vitals cycle asked=" + asked + " measuring=" + measuring
-                + " misses=" + vitalsMisses + " skipped=" + vitalsSkipped
-                + " skipCycles=" + skipCycles());
+        // The ordinary returns below are quiet again. They were narrated for a while, after a
+        // cycle that never measured proved indistinguishable from one that was never asked to,
+        // and that reading is now available without the per-cycle noise: a measurement that
+        // happened leaves its numbers in the server's stats file, and the paths that are
+        // actually wrong - a measurement stuck past MEASURE_STUCK_MS, a daemon that will not
+        // answer - still warn. What has gone is the running commentary on the cycles that are
+        // behaving.
         if (measuring) {
             // Unless it has been running so long that it is not running at all.
             //
@@ -453,7 +455,6 @@ public class TrackerService extends Service {
             // service that looked healthy the whole time because it was still running.
             long busy = SystemClock.elapsedRealtime() - lastMeasureAt;
             if (busy < MEASURE_STUCK_MS) {
-                Log.i(TAG, "a measurement is already running; not starting another");
                 return;
             }
             Log.w(TAG, "the last measurement has been running " + (busy / 1000)
@@ -462,14 +463,10 @@ public class TrackerService extends Service {
         }
         long since = SystemClock.elapsedRealtime() - lastMeasureAt;
         if (lastMeasureAt > 0 && since < MEASURE_FLOOR_MS) {
-            Log.i(TAG, "last measurement was " + (since / 1000) + "s ago; too soon for another"
-                    + (asked ? " even though the server asked" : ""));
             return;
         }
         if (!asked && vitalsSkipped < skipCycles()) {
             vitalsSkipped++;
-            Log.i(TAG, "sitting out this cycle: " + vitalsSkipped + " of " + skipCycles()
-                    + " after " + vitalsMisses + " misses");
             return;
         }
         vitalsSkipped = 0;
@@ -597,7 +594,7 @@ public class TrackerService extends Service {
                         // A pulse is proof of a wrist, and outranks every other instrument.
                         foundAPulse();
                         int bpm = calibratedPulse(r.heartRate);
-                        sendAsync(BeehomeCodec.health(when, JK_PULSE, bpm));
+                        sendBatched(BeehomeCodec.health(when, JK_PULSE, bpm));
                         TrackerLog.recordPulse(TrackerService.this, bpm,
                                 System.currentTimeMillis());
                     }
@@ -606,10 +603,10 @@ public class TrackerService extends Service {
                                 .getInt(KEY_CAL_BPH, 0), 60, 260);
                         int dia = clamp(r.diastolic + prefs(TrackerService.this)
                                 .getInt(KEY_CAL_BPL, 0), 30, 200);
-                        if (dia < sys) sendAsync(BeehomeCodec.bloodPressure(when, sys, dia));
+                        if (dia < sys) sendBatched(BeehomeCodec.bloodPressure(when, sys, dia));
                     }
                     if (r.oxygen > 0) {
-                        sendAsync(BeehomeCodec.health(when, JK_OXYGEN, r.oxygen));
+                        sendBatched(BeehomeCodec.health(when, JK_OXYGEN, r.oxygen));
                     }
                     // The temperature came with the reading, so send it here.
                     //
@@ -625,7 +622,7 @@ public class TrackerService extends Service {
                     // is the band that let a wrist through in the first place.
                     if (r.temperature >= BodyTemp.PERSON_MIN_C
                             && r.temperature <= BodyTemp.PERSON_MAX_C) {
-                        sendAsync(BeehomeCodec.health(when, JK_TEMPERATURE,
+                        sendBatched(BeehomeCodec.health(when, JK_TEMPERATURE,
                                                       (float) r.temperature));
                     }
                 } catch (Throwable t) {
@@ -898,22 +895,7 @@ public class TrackerService extends Service {
         // Then whatever was measured while there was nowhere to send it. After the position
         // rather than before: the server has just watched this device reconnect and the first
         // thing it should learn is where the watch is now, not where it was an hour ago.
-        final OutputStream spoolOut = out;
-        int waiting = Spool.size(this);
-        if (waiting > 0) {
-            Log.i(TAG, waiting + " frame(s) waiting from while the connection was down");
-            Spool.drain(this, new Spool.Sender() {
-                public boolean send(String frame) {
-                    try {
-                        TrackerService.this.send(spoolOut, frame);
-                        return true;
-                    } catch (Throwable t) {
-                        // The socket has gone again. Spool keeps the rest.
-                        return false;
-                    }
-                }
-            });
-        }
+        drainSpool(out, "waiting from while the connection was down");
 
         long nextBeat = SystemClock.elapsedRealtime() + HEARTBEAT_MS;
         long nextFix = SystemClock.elapsedRealtime() + cycleSeconds() * 1000L;
@@ -930,6 +912,9 @@ public class TrackerService extends Service {
                 send(out, BeehomeCodec.heartbeat(id, TrackerSources.steps(this),
                         TrackerSources.battery(this), cycleSeconds()));
                 nextBeat = now + HEARTBEAT_MS;
+                // The radio is up for the heartbeat regardless, so this is where the readings
+                // taken since the last one go out - see sendBatched.
+                drainSpool(out, "measured since the last heartbeat");
             }
             if (mediaData != null) {
                 if (!mediaWaiting) {
@@ -958,6 +943,9 @@ public class TrackerService extends Service {
             if (now >= nextFix) {
                 sendKeeping(out, TrackerSources.positionFrame(this, id));
                 nextFix = now + cycleSeconds() * 1000L;
+                // Same reasoning as after the heartbeat: the position frame has just paid for
+                // the ramp, so anything spooled travels on it for nothing.
+                drainSpool(out, "measured since the last position frame");
                 acquireFixAsync();
             }
             if (now >= nextVitals) {
@@ -1004,7 +992,6 @@ public class TrackerService extends Service {
      */
     private void handle(OutputStream out, String id, BeehomeCodec.Frame f) throws Exception {
         if (f == null) return;
-        Log.i(TAG, "<- " + f);
         if ("JK".equals(f.op)) jkAcks.incrementAndGet();
 
         if ("18".equals(f.op)) {                    // reboot
@@ -1369,7 +1356,6 @@ public class TrackerService extends Service {
 
     private void send(OutputStream out, String frame) throws Exception {
         synchronized (sendLock) {
-            Log.i(TAG, "-> " + frame);
             out.write(frame.getBytes("UTF-8"));
             out.flush();
         }
@@ -1393,6 +1379,63 @@ public class TrackerService extends Service {
             Spool.add(this, frame);
             throw e;
         }
+    }
+
+    /**
+     * Push out everything the spool is holding, on a connection known to be up.
+     *
+     * @param why what to call the backlog in the log, so a reconnect drain and a routine flush
+     *            are told apart
+     */
+    private void drainSpool(final OutputStream out, String why) {
+        int waiting = Spool.size(this);
+        if (waiting <= 0) return;
+        Log.i(TAG, waiting + " frame(s) " + why);
+        Spool.drain(this, new Spool.Sender() {
+            public boolean send(String frame) {
+                try {
+                    TrackerService.this.send(out, frame);
+                    return true;
+                } catch (Throwable t) {
+                    // The socket has gone again. Spool keeps the rest.
+                    return false;
+                }
+            }
+        });
+    }
+
+    /**
+     * Hold a reading until the radio is next up anyway.
+     *
+     * Measured on this watch, the modem is the bill: with the sensor doing nothing at all for
+     * thirteen hours the battery still fell 2.18 %/hr against 2.44 %/hr while measuring
+     * normally, so every LED, both channels and the wear checks together came to about a
+     * seventh of the drain. What does not vary is the talking - roughly thirty-nine frames an
+     * hour, one every ninety seconds, day and night - and on 2G each one is a fresh ramp and
+     * tail whether it carries four bytes or four hundred.
+     *
+     * So readings stop buying their own transmission. They go to the spool, and the loop
+     * empties it after the heartbeat and after the position frame - transmissions that were
+     * going to happen regardless. A reading therefore waits at most one heartbeat, and rides a
+     * radio that is already warm.
+     *
+     * This is only defensible because of what Spool already promises: every frame here stamps
+     * itself when it is measured, so arriving late is not the same as being recorded late.
+     * That is the same property that lets a disconnected night replay into the right minutes.
+     *
+     * Not for anything the server acts on when it arrives rather than when it happened. The
+     * login, the heartbeat and the acknowledgements describe the connection; a position fix
+     * chased out of band is worth its own transmission by the argument in acquireFixAsync;
+     * and the worn flag is a state change the server reacts to, not a sample.
+     *
+     * Note for the server side: CTracker reboots a watch that has gone quiet on health data
+     * for HEALTH_RECOVERY_TIMEOUT, which is thirty minutes. Batching delays a reading by at
+     * most one HEARTBEAT_MS, ten minutes, so the margin holds - but the two numbers are now
+     * related, and shortening that timeout below the heartbeat would make the server start
+     * rebooting a watch that is working.
+     */
+    private void sendBatched(String frame) {
+        Spool.add(this, frame);
     }
 
     /**
@@ -1469,7 +1512,6 @@ public class TrackerService extends Service {
      */
     private void sendTemperatureAsync() {
         if (measuring) {
-            Log.i(TAG, "a measurement is running; the temperature waits for the next round");
             return;
         }
         measuring = true;
@@ -1478,7 +1520,7 @@ public class TrackerService extends Service {
                 try {
                     float t = TrackerSources.temperature(TrackerService.this);
                     if (t > 0) {
-                        sendAsync(BeehomeCodec.health(TrackerSources.stamp(), JK_TEMPERATURE, t));
+                        sendBatched(BeehomeCodec.health(TrackerSources.stamp(), JK_TEMPERATURE, t));
                     }
                 } finally {
                     measuring = false;
@@ -1568,7 +1610,6 @@ public class TrackerService extends Service {
             String v = f.fields.get(i).trim();
             if (v.length() == 0 || v.equals(tok)) continue;
             prefs(this).edit().putString(key, v).commit();
-            Log.i(TAG, key + " = " + v);
             return;
         }
     }
@@ -1637,7 +1678,6 @@ public class TrackerService extends Service {
         }
         if (b.length() == 0) return;
         prefs(this).edit().putString(key, b.toString()).commit();
-        Log.i(TAG, key + " = " + b);
     }
 
     /**
@@ -1712,7 +1752,7 @@ public class TrackerService extends Service {
 
     private void sendPressureAsync(HeartRate hr) {
         String f = pressureFrame(hr);
-        if (f != null) sendAsync(f);
+        if (f != null) sendBatched(f);
     }
 
     /** Null when the sensor gave no pressure, which is not the same as a pressure of zero. */
@@ -1748,7 +1788,6 @@ public class TrackerService extends Service {
         }
         if (b.length() == 0) return;
         prefs(this).edit().putString(KEY_MESSAGE, TrackerSources.stamp() + "  " + b).commit();
-        Log.i(TAG, "message from the server: " + b);
     }
 
     /**
@@ -1807,11 +1846,9 @@ public class TrackerService extends Service {
         if (f == null) return;
         String tok = f.token();
         if (tok == null) {
-            Log.i(TAG, "no token on BP" + f.op + "; treating it as a reply, not acknowledging");
             return;
         }
         if (NEVER_ACK.contains(f.op)) {
-            Log.i(TAG, "BP" + f.op + " is a reply by definition; not acknowledging");
             return;
         }
         send(out, BeehomeCodec.ack(f.op, tok));
@@ -2085,7 +2122,6 @@ public class TrackerService extends Service {
             b.append(v);
         }
         prefs(this).edit().putString(key, b.toString()).commit();
-        Log.i(TAG, key + " set (" + b.length() + " chars)");
     }
 
     private boolean shell(String command) {

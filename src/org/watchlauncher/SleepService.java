@@ -274,7 +274,21 @@ public class SleepService extends Service implements SensorEventListener {
 
         reset();
         try {
-            sensors.registerListener(this, accel, SensorManager.SENSOR_DELAY_GAME);
+            // UI rather than GAME: a third of the sample deliveries for a decision that cannot
+            // tell the difference.
+            //
+            // Every number the scorer acts on is a mean - enmo is sEnmo/n, the angle comes from
+            // sx/n, sy/n, sz/n - so none of them move when the rate does. GAME was asking the
+            // CPU to wake about five hundred times a burst, every thirty seconds once a night
+            // is under way, to compute averages that three hundred fewer samples give just as
+            // well.
+            //
+            // Not SENSOR_DELAY_NORMAL, which would be a further threefold cut. That is 5 Hz,
+            // and ENMO is a movement metric: at a Nyquist of 2.5 Hz real wrist motion starts
+            // being missed rather than averaged, and the direction of the error is towards
+            // reading still - which here means falsely scoring sleep. UI leaves Nyquist above
+            // 8 Hz, clear of essentially all wrist movement, so the metric is unchanged.
+            sensors.registerListener(this, accel, SensorManager.SENSOR_DELAY_UI);
         } catch (Exception e) {
             finishBurst();
             return START_NOT_STICKY;
