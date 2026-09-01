@@ -50,6 +50,9 @@ public class SleepService extends Service implements SensorEventListener {
 
     private static final String TAG = "SleepService";
 
+    /** How soon to try again after the accelerometer hands back an empty buffer. */
+    private static final long EMPTY_RETRY_MS = 30 * 1000;
+
     /** How often to sample once sleep has been detected. */
     public static final long INTERVAL_MS = 30000;
 
@@ -326,7 +329,38 @@ public class SleepService extends Service implements SensorEventListener {
             double range = (maxMag > minMag) ? (maxMag - minMag) : 0;
             double enmo = sEnmo / n;
             double sd = Math.sqrt(var);
-            next = decide(now, mx, my, mz, sd, enmo, range, n);
+
+            // A burst that read nothing is not a still wearer.
+            //
+            // The accelerometer sometimes hands back a buffer it never filled: every axis zero,
+            // every metric zero, and a sample count of exactly 256 where a real burst gives about
+            // 505. Gravity alone makes that impossible - a watch lying on a table still reads
+            // about 1g on one axis - so all three means at zero is the sensor declining, not the
+            // wearer being motionless.
+            //
+            // It matters because of what the scorer does with it. Perfect stillness is exactly
+            // what deep sleep looks like, so an empty burst is not a gap in the record, it is a
+            // false claim of the soundest sleep there is. On the night of 31 August nine of the
+            // seventy-eight bursts were empty and they clustered where our own measurements ran:
+            // 22% of the bursts within ninety seconds of one against 2% of the rest. ppgd reads
+            // this same accelerometer for its motion figure, and vitals now run every three
+            // minutes.
+            //
+            // So drop it. A missing burst is honest and the scorer already copes with gaps.
+            if (mx == 0 && my == 0 && mz == 0) {
+                // Come back sooner than the usual interval. Whatever had the sensor - almost
+                // always one of our own measurements - will not have it for long, and the
+                // alternative is a hole the length of the interval every time one collides.
+                // Half a minute is short enough to recover the epoch and long enough not to
+                // spin: the night of 31 August lost four hours to a single empty burst that
+                // was then not retried until the next alarm.
+                next = EMPTY_RETRY_MS;
+                Log.i(TAG, "burst read nothing from the accelerometer (" + n
+                        + " samples, all zero); no line written, retrying in "
+                        + (EMPTY_RETRY_MS / 1000) + "s");
+            } else {
+                next = decide(now, mx, my, mz, sd, enmo, range, n);
+            }
         }
 
         sampling = false;
