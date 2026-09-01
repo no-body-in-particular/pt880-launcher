@@ -552,6 +552,71 @@ public final class TrackerSources {
     }
 
     /** One count from either path, kept and persisted if it is new. */
+    /**
+     * The chip's count plus everything counted before it last restarted.
+     *
+     * The DA217's counter is since boot and resets to zero with the watch - which is a step total
+     * going backwards to nothing, and a day's walking disappearing from the server. It happened
+     * within an hour of this being wired up.
+     *
+     * So a base is kept alongside it. When the raw count drops, the counter has restarted rather
+     * than the wearer having un-walked: the last raw value is added to the base and counting
+     * resumes from there. A reboot therefore costs at most the steps taken between the final
+     * reading and the restart, rather than the whole day.
+     *
+     * What is reported is the day's steps, not that running total. The total is what makes the
+     * arithmetic survive a restart; the day is what anyone actually wants to see, so the total at
+     * the first reading after midnight is remembered and subtracted from every reading until the
+     * next one.
+     *
+     * The chip has a reset of its own at 0x2e. It is deliberately not used: zeroing the counter
+     * makes the reset itself the record, so a missed midnight or a daemon that was busy loses the
+     * day outright, and nothing can be recomputed afterwards. Subtracting a remembered total is
+     * recoverable from the numbers themselves.
+     */
+    private static final String KEY_STEP_BASE = "client_step_base";
+    private static final String KEY_STEP_RAW  = "client_step_raw";
+    private static final String KEY_STEP_DAY  = "client_step_day";
+    private static final String KEY_STEP_DAY0 = "client_step_day_start";
+
+    private static int carryOverReboot(Context app, int rawNow) {
+        try {
+            android.content.SharedPreferences p =
+                    app.getSharedPreferences("tracker", Context.MODE_PRIVATE);
+            int base = p.getInt(KEY_STEP_BASE, 0);
+            int rawWas = p.getInt(KEY_STEP_RAW, 0);
+
+            if (rawNow < rawWas) {
+                base += rawWas;
+                Log.i(TAG, "the step counter restarted at " + rawNow + "; carrying " + base
+                        + " forward");
+            }
+            int total = base + rawNow;
+
+            // Local midnight, from the watch's own calendar rather than a fixed number of
+            // seconds, so a timezone change or a leap does not land the boundary mid-afternoon.
+            java.util.Calendar cal = java.util.Calendar.getInstance();
+            String today = cal.get(java.util.Calendar.YEAR) + "-"
+                    + cal.get(java.util.Calendar.DAY_OF_YEAR);
+            String was = p.getString(KEY_STEP_DAY, null);
+            int dayStart = p.getInt(KEY_STEP_DAY0, 0);
+
+            if (!today.equals(was)) {
+                dayStart = total;
+                Log.i(TAG, "a new day; counting steps from " + total);
+            }
+            // A total below the day's start means the base was lost rather than time moving,
+            // and a negative step count helps nobody.
+            if (dayStart > total) dayStart = total;
+
+            p.edit().putInt(KEY_STEP_BASE, base).putInt(KEY_STEP_RAW, rawNow)
+                    .putString(KEY_STEP_DAY, today).putInt(KEY_STEP_DAY0, dayStart).apply();
+            return total - dayStart;
+        } catch (Throwable t) {
+            return rawNow;
+        }
+    }
+
     private static void record(Context app, int n) {
         if (n < 0 || n == lastSteps) return;
         lastSteps = n;
@@ -631,8 +696,8 @@ public final class TrackerSources {
                 try {
                     int n = OwnVitals.steps(app);
                     if (n >= 0) {
-                        daemonSteps = n;
-                        record(app, n);
+                        daemonSteps = carryOverReboot(app, n);
+                        record(app, daemonSteps);
                     }
                 } catch (Throwable t) {
                     Log.w(TAG, "could not read the step counter", t);
