@@ -288,12 +288,18 @@ public class TrackerService extends Service {
     /**
      * How often the red pass runs, in cycles.
      *
-     * Every one. It was every fourth to save the LED time - a red request is two passes against
-     * green's one - but red is the only source of a pressure, and a pressure every fortieth minute
-     * is not enough to be useful when most red passes come back without a usable pulse shape
-     * anyway. Better to try each time and publish the ones that work.
+     * Every second one. It was every fourth, which put a pressure forty minutes apart and was too
+     * sparse to be useful given how many red passes come back without a usable pulse shape. Every
+     * cycle was tried and costs more than the pressure is worth: a red request is two passes
+     * against green's one, so it left the sensor busy about two minutes in every three.
+     *
+     * That matters beyond battery. ppgd reads the accelerometer for its motion figure and the
+     * sleep detector needs the same one - on the night of 31 August, 22% of the sleep bursts
+     * within ninety seconds of a measurement came back empty against 2% of the rest, and the
+     * night lost most of its record. Halving the red passes gives that sensor back without
+     * returning the pressure to forty-minute intervals.
      */
-    private static final int RED_EVERY = 1;
+    private static final int RED_EVERY = 2;
 
     private int redCycle = 0;
 
