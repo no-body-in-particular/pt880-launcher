@@ -331,9 +331,33 @@ adb install -r watchlauncher.apk
 adb shell am start -n org.watchlauncher/.ShellActivity
 ```
 
+### Turning the vendor's health stack off
+
+Once the launcher measures its own vitals, the OEM's service is still running,
+still holding the same chip, and still taking turns on a work queue this
+firmware cannot recover if it jams. Nothing needs it:
+
+```bash
+curl -fsSL https://coredump.ws/pt880/disable-vendor-health.sh | bash
+```
+
+It disables `com.ic.work` — the sensor service, which also carries an AMap
+location SDK and holds `INTERNET`, `WAKE_LOCK` and `BODY_SENSORS` — along with
+the two factory test apps that can hold the thermometer, and the vendor's own
+tracker client if it is somehow still there. `pm disable` is persistent and
+survives a reboot; `--undo` puts them all back.
+
+Not part of `--all`, for the same reason root and home are not: it changes what
+the device runs, and that belongs in a decision rather than in the default path
+of a one-liner.
+
+It leaves `/system/lib/libICJniUtils.so` alone. That is a library the launcher
+loads into its own process to read the thermometer, not a package, and
+disabling an app does not affect it.
+
 Hosted files: `watchlauncher.apk`, `wsu`, `install-launcher.sh`,
-`install-root-helper.sh`, `set-as-home.sh` and `vitals/{vitalsd,ppgd,adtwear}`,
-all under `https://coredump.ws/pt880/`.
+`install-root-helper.sh`, `set-as-home.sh`, `disable-vendor-health.sh` and
+`vitals/{vitalsd,ppgd,adtwear}`, all under `https://coredump.ws/pt880/`.
 
 ## Building
 

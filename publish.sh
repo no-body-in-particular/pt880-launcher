@@ -50,6 +50,7 @@ done
 
 install -m 644 "$APK" "$WEB/watchlauncher.apk"
 install -m 644 "$HERE/install-launcher.sh" "$WEB/install-launcher.sh"
+install -m 644 "$HERE/disable-vendor-health.sh" "$WEB/disable-vendor-health.sh"
 
 # The PPG gate patcher, same arrangement as the APK: patch-watch-ppg.sh pins the
 # python file's sha256 because it downloads it and runs it against a system
