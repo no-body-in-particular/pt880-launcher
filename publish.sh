@@ -34,6 +34,13 @@ grep -q "$SUM" "$HERE/install-launcher.sh" || {
 # launcher should not depend on having one to hand - but the pins are cleared
 # rather than left stale, so the installer never checks a new binary against an
 # old checksum.
+# The daemon's own installer goes up beside its binaries: --vitals pushes and
+# runs it rather than repeating its steps in another quoting context.
+if [ -f "$HERE/vitals/tools/gh3011/install-vitalsd.sh" ]; then
+    install -D -m 644 "$HERE/vitals/tools/gh3011/install-vitalsd.sh" \
+        "$WEB/vitals/install-vitalsd.sh"
+fi
+
 BIN="$HERE/vitals-bin"
 for f in vitalsd ppgd adtwear; do
     KEY=$(echo "$f" | tr '[:lower:]' '[:upper:]')_SHA256

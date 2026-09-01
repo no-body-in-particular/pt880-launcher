@@ -386,7 +386,7 @@ public class TrackerService extends Service {
             return w;
         }
 
-        double wrist = SensorInput.wristTemperature();
+        double wrist = OwnVitals.temperature(this);
         boolean warm = wrist >= WRIST_WARM_C;
 
         if (warm) {

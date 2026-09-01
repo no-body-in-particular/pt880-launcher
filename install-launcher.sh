@@ -26,11 +26,11 @@ adbq() { $ADB "$@" </dev/null; }
 BASE="${BASE:-https://coredump.ws/pt880}"
 # The vitals daemon and its two helpers, pinned the same way and for the same
 # reason. Re-pinned by publish.sh; built by build-vitals.sh.
-VITALSD_SHA256="9cfa0bc9c2bb13cecae985665abae04ba020e891f18decb874fb27f0f84b1d2b"
+VITALSD_SHA256="79d96f40c8bdb34bc804edd5971d70f160996db9b66047385b163255f3944230"
 PPGD_SHA256="4a38bd1ad3f3666988280b7e7044e11579dfe4d8cfa30acc3d4f647dacb108a4"
 ADTWEAR_SHA256="0906e7bc2877f943d68315b2ed803d6e7966194fa4e2890b38c366b9d0bbeb82"
 
-APK_SHA256="52b331f6138444cc774c5602d39848149015c8590aa6ae112de0458ed1042b98"
+APK_SHA256="58aa0b2dc5a2bfe57d363bb0f49da7761622b242cb42e4c156ac726085979df8"
 
 say() { printf '\n== %s\n' "$*"; }
 die() { printf '\nerror: %s\n' "$*" >&2; exit 1; }
@@ -202,20 +202,23 @@ if [ "$DO_VITALS" = "1" ]; then
 fi
 
 if [ "$DO_VITALS" = "1" ]; then
-  adbq shell 'wsu sh -c "
-    mount -o rw,remount /system 2>/dev/null
-    setprop ctl.stop gh3011_daemon
-    sleep 2
-    if [ ! -f /system/bin/gh3011_service.real ]; then
-        cat /system/bin/gh3011_service > /system/bin/gh3011_service.real
-        chmod 755 /system/bin/gh3011_service.real
-    fi
-    printf \"#!/system/bin/sh\\nexec /data/local/tmp/vitalsd\\n\" > /system/bin/gh3011_service
-    chmod 755 /system/bin/gh3011_service
-    setprop ctl.start gh3011_daemon
-    sleep 3
-    ps | grep vitalsd | grep -v grep
-  "' | tr -d '\r' | sed 's/^/  /'
+  # The daemon's own installer, pushed and run, rather than the same steps
+  # rewritten inline here.
+  #
+  # They were inline, and one of them was `printf ... > /system/bin/gh3011_service`.
+  # There is no printf on this device - it is not in /system/bin and mksh has
+  # print, not printf - and a redirection is performed before the command that
+  # was going to fill it, so that truncated the init slot to nothing. The daemon
+  # then never started, no measurement ever ran, and the sensor never lit.
+  #
+  # The upstream script writes the same file with a `cat` heredoc, which cannot
+  # fail that way, and it is the copy that gets tested. Nothing is gained by
+  # having a second version of it in a different quoting context.
+  fetch "$BASE/vitals/install-vitalsd.sh" "$TMP/install-vitalsd.sh" \
+    || die "could not fetch the vitals installer"
+  adbq push "$TMP/install-vitalsd.sh" /data/local/tmp/install-vitalsd.sh >/dev/null 2>&1 \
+    || die "could not push the vitals installer"
+  adbq shell 'wsu sh /data/local/tmp/install-vitalsd.sh' | tr -d '\r' | sed 's/^/  /'
   echo "  to go back:  adb shell wsu cat /system/bin/gh3011_service.real \> /system/bin/gh3011_service"
 fi
 

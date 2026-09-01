@@ -744,16 +744,16 @@ public final class TrackerSources {
 
 
     public static float temperature(Context c) {
-        // The thermometer reads the wrist, which is not a body temperature and never was;
-        // SensorInput.bodyTemperature has the derivation.
+        // The daemon reads the thermopile and this converts what it says. Both halves used to
+        // be the vendor's: its library read the sensor, because the platform's own GXTS02S is a
+        // mirror stuck at last=<0.0,0.0,0.0>, and its get_bodytemp_from_wristtemp turned a
+        // wrist into a body. The conversion was disassembled and reimplemented first, and now
+        // the reading comes from vitalsd too, so nothing here is borrowed.
         //
-        // There used to be a second try here through the vendor's binder, because GXTS02S in
-        // the platform sensor list is a mirror sitting at last=<0.0,0.0,0.0> and registerListener
-        // on it returns that for ever. That client is gone with the rest of the vendor path, and
-        // it is no loss: every vitals cycle already carries a temp= from our own daemon and
-        // sends it, so this is the fallback for a TEMP# asked between cycles rather than the
-        // only route. When it has nothing, the last good reading stands.
-        float v = SensorInput.bodyTemperature();
+        // This is the path for a TEMP# asked between cycles. Every vitals measurement already
+        // carries a temp= of its own and sends it, so when this has nothing the last good
+        // reading stands rather than a gap appearing.
+        float v = (float) BodyTemp.fromWrist(OwnVitals.temperature(c));
         if (v >= BodyTemp.PERSON_MIN_C && v <= BodyTemp.PERSON_MAX_C) lastTemp = v;
         else if (v > 0f) Log.i(TAG, "temperature " + v + " C is not a body; not reporting it");
         return lastTemp;

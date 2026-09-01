@@ -351,9 +351,11 @@ Not part of `--all`, for the same reason root and home are not: it changes what
 the device runs, and that belongs in a decision rather than in the default path
 of a one-liner.
 
-It leaves `/system/lib/libICJniUtils.so` alone. That is a library the launcher
-loads into its own process to read the thermometer, not a package, and
-disabling an app does not affect it.
+It leaves `/system/lib/libICJniUtils.so` alone, which costs nothing: it is a
+library rather than a package, and nothing of ours calls it any more. The
+launcher read the thermometer through it until `vitalsd` learned to answer a
+`temp` request, and borrowed its wrist-to-body conversion until that was
+disassembled and reimplemented as `BodyTemp`.
 
 Hosted files: `watchlauncher.apk`, `wsu`, `install-launcher.sh`,
 `install-root-helper.sh`, `set-as-home.sh`, `disable-vendor-health.sh` and

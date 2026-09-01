@@ -129,13 +129,15 @@ say "done"
 cat <<'EOF'
 What this did not touch, on purpose:
 
-  /system/lib/libICJniUtils.so   still there, and still used. It is a library
-                                 the launcher loads into its own process to read
-                                 the thermometer, not a package -- disabling an
-                                 app does not affect it. The conversion from a
-                                 wrist reading to a body temperature used to
-                                 come from it too; that has been reimplemented
-                                 and is checked against it on every build.
+  /system/lib/libICJniUtils.so   still there, and no longer used by anything of
+                                 ours. It is a library rather than a package, so
+                                 disabling an app would not have touched it
+                                 anyway. The launcher read the thermometer
+                                 through it until vitalsd learned to answer a
+                                 "temp" request, and borrowed its wrist-to-body
+                                 conversion until that was disassembled and
+                                 reimplemented. Left in place: it is part of the
+                                 stock system and removing it buys nothing.
 
   gh3011_service                 the init slot the vitals daemon runs in. That
                                  was replaced by install-launcher.sh --vitals,

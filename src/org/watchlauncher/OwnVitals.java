@@ -114,7 +114,7 @@ final class OwnVitals {
         // same mistake in the other direction - the offset is not constant, it is most of what
         // the conversion is for.
         double wrist = dfield(line, "temp=");
-        float body = SensorInput.bodyFromWrist(wrist);
+        double body = BodyTemp.fromWrist(wrist);
         if (body >= BodyTemp.PERSON_MIN_C && body <= BodyTemp.PERSON_MAX_C) r.temperature = body;
 
         int sbp = field(line, "sbp=");
@@ -192,6 +192,23 @@ final class OwnVitals {
      * the wrist. -1 means the thermometer would not answer, and the caller should measure rather
      * than assume either way.
      */
+    /**
+     * What the thermometer reads at the skin, in Celsius, or 0 if it will not say.
+     *
+     * A wrist and not a body -- {@link BodyTemp} converts it, and needs an ambient reading this
+     * watch does not have, so the conversion is an approximation the caller should know about.
+     *
+     * Nothing is lit for this. The daemon reads the same gxts02s thermopile the vendor's library
+     * reads, through the temperature input device, and that library is not on this path any
+     * more: it was the last thing it was still being used for.
+     */
+    static double temperature(Context ctx) {
+        String line = ask("temp", WEAR_TIMEOUT_MS);
+        if (line == null) return 0;
+        double t = dfield(line, "temp=");
+        return t > 0 ? t : 0;
+    }
+
     static int worn(Context ctx) {
         String line = ask("wear", WEAR_TIMEOUT_MS);
         if (line == null) return -1;
