@@ -880,6 +880,19 @@ public final class TrackerSources {
      * never quite motionless.
      */
     public static float motionEnergy(Context c, int windowMs) {
+        // The daemon first, so nothing here needs the vendor's driver.
+        //
+        // It samples the same chip off the bus and returns the same statistic - a mean absolute
+        // deviation of the magnitude, not a standard deviation, so the threshold this feeds keeps
+        // its meaning. In g, where the framework reports m/s^2, hence the multiply.
+        //
+        // The listener below stays for when the daemon is busy: it serves one request at a time.
+        String line = OwnVitals.accelBurst(c, Math.max(500, windowMs));
+        if (line != null && OwnVitals.field(line, "n=") >= 4) {
+            double mad = OwnVitals.dfield(line, "mad=");
+            if (mad >= 0) return (float) (mad * 9.80665);
+        }
+
         final java.util.List<Float> mags = new java.util.ArrayList<Float>();
         try {
             SensorManager sm = (SensorManager) c.getSystemService(Context.SENSOR_SERVICE);
