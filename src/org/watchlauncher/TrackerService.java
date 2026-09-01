@@ -319,6 +319,48 @@ public class TrackerService extends Service {
      */
     private volatile boolean oxygenDue = false;
 
+    /**
+     * How many "not on a wrist" answers in a row it takes to believe one.
+     *
+     * One was enough, and one is not reliable. The detector said no on a watch that was on a
+     * wrist at the time - the thermometer on the same device was reading 34.7 at the skin, which
+     * a watch on a table cannot do in any room anybody sits in - and a single no skipped the
+     * cycle outright, so the readings stopped while the evidence that they should not have said
+     * otherwise.
+     *
+     * An unconfirmed no is reported as -1, "would not say", which both callers already handle by
+     * measuring anyway or by looking at movement instead. So this needs nothing else to change.
+     *
+     * Three costs up to two measurements taken after a real removal, each holding the sensor for
+     * its timeout and finding nothing. That is the right way round: a missed removal is a gap in
+     * a log, and a false one stops the readings.
+     */
+    private static final int OFF_WRIST_CONFIRM = 3;
+
+    private int offWristStreak;
+
+    /**
+     * The wear detector, with a removal confirmed rather than taken on the first answer.
+     *
+     * Shared by the vitals cycle and the wear report, on purpose: they run on different timers,
+     * and any positive from either is enough to say the watch is still on.
+     *
+     * @return 1 worn, 0 off the wrist and confirmed, -1 unknown or not yet believed
+     */
+    private int wornConfirmed() {
+        int w = OwnVitals.worn(this);
+        if (w == 0) {
+            if (++offWristStreak < OFF_WRIST_CONFIRM) {
+                Log.i(TAG, "the wear detector says no (" + offWristStreak + " of "
+                        + OFF_WRIST_CONFIRM + "); not believing it yet");
+                return -1;
+            }
+            return 0;
+        }
+        offWristStreak = 0;
+        return w;
+    }
+
     private void measureVitalsAsync(boolean asked) {
         // Every return below used to be silent on at least one path, which made a cycle that
         // never measured indistinguishable from one that was never asked to.
@@ -398,8 +440,9 @@ public class TrackerService extends Service {
                     // detector - but they take a minute or more between them to get there with
                     // the LEDs lit the whole time. Only a definite no skips the cycle; -1 means
                     // the thermometer would not say, and then it is better to measure.
-                    if (OwnVitals.worn(TrackerService.this) == 0) {
-                        Log.i(TAG, "not on a wrist; skipping this cycle without measuring");
+                    if (wornConfirmed() == 0) {
+                        Log.i(TAG, "not on a wrist, confirmed; skipping this cycle without "
+                                + "measuring");
                         return;
                     }
 
@@ -1777,7 +1820,7 @@ public class TrackerService extends Service {
                     // The GH3011's own detector answers in about a second and needs nothing to
                     // have happened first. The old inference stays underneath for the case where
                     // it cannot run - the daemon busy with a measurement, or missing entirely.
-                    int sensor = OwnVitals.worn(TrackerService.this);
+                    int sensor = wornConfirmed();
 
                     boolean pulse = false;
                     if (sensor < 0 && !moving) {
