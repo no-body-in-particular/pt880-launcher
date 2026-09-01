@@ -154,25 +154,12 @@ final class SensorInput {
     }
 
     /**
-     * A body temperature, or 0 if the library cannot give one.
+     * A body temperature, or 0 if the thermometer will not give one.
      *
-     * The thermometer reads the wrist, and a wrist is not a body: it sits a few degrees above
-     * the room and well below the person, which is how a reading of 21 got reported as a body
-     * temperature. The vendor does not use that number raw either - com.ic.work converts it in
-     * its own onSensorChanged, and the conversion is in the same library everything else here
-     * comes from:
-     *
-     *     iget-wide  offset 24            the wrist reading
-     *     invoke-static a(wrist, ambient) -> getBodyTempFromWristTemp
-     *     iput-wide  offset 32            the body temperature
-     *
-     * with a constant 26.0 standing in for ambient whenever the measured one is not usable.
-     * There is no ambient thermometer to read here, so 26.0 is what this passes - the vendor's
-     * own fallback, and the same number its code uses for most of the day.
-     *
-     * That approximation is worth stating plainly: the conversion leans on the difference
-     * between skin and surroundings, so in a cold room or outdoors the result drifts in the
-     * direction of the error. It is a wrist thermometer either way, not a clinical one.
+     * The library still reads the thermopile - that is the sensor, and GXTS02S in the platform
+     * sensor list is a mirror sitting at last=&lt;0.0,0.0,0.0&gt; - but the conversion from wrist
+     * to body is {@link BodyTemp} now rather than a JNI call into the same blob. See that class
+     * for where its constants came from and how they were checked.
      */
     static float bodyTemperature() {
         if (!LIB_OK) return 0f;
@@ -182,7 +169,7 @@ final class SensorInput {
             try {
                 double wrist = ICJniUtils.getTemperature();
                 if (wrist <= 0) return 0f;
-                double body = ICJniUtils.getBodyTempFromWristTemp(wrist, AMBIENT_C);
+                double body = BodyTemp.fromWrist(wrist);
                 Log.i(TAG, String.format("wrist %.2f C -> body %.2f C", wrist, body));
                 return (float) body;
             } finally {
@@ -193,9 +180,6 @@ final class SensorInput {
             return 0f;
         }
     }
-
-    /** What com.ic.work passes when it has no ambient reading of its own. */
-    private static final double AMBIENT_C = 26.0;
 
     /**
      * What counts as a body temperature at all.
@@ -211,23 +195,20 @@ final class SensorInput {
     /**
      * A wrist reading converted to a body temperature, or 0 if it cannot be.
      *
-     * The same conversion {@link #bodyTemperature} applies, split out for readings that arrive
-     * from somewhere other than this class. vitalsd measures the same thermopile and says so on
-     * every line it sends - "it is a wrist and not a body, so converting it is the launcher's
-     * business, not this daemon's" - and the launcher was not doing it. Every temperature from a
-     * vitals cycle went to the server as the wrist reading it was: 31 to 35 where the converted
-     * path was reporting 36 and a half, on the same watch on the same afternoon, which reads as
-     * a person getting steadily colder all day.
+     * For readings that arrive from somewhere other than this class. vitalsd measures the same
+     * thermopile and says so on every line it sends - "it is a wrist and not a body, so
+     * converting it is the launcher's business, not this daemon's" - and the launcher was not
+     * doing it. Every temperature from a vitals cycle went to the server as the wrist reading
+     * it was: 31 to 35 where the converted path was reporting 36 and a half, on the same watch
+     * on the same afternoon, which reads as a person getting steadily colder all day.
+     *
+     * No library involved, which matters here rather than being tidiness: this is the path
+     * every vitals cycle takes, and it used to return nothing at all on a watch where
+     * libICJniUtils.so had not loaded.
      */
     static float bodyFromWrist(double wristC) {
-        if (!LIB_OK || wristC <= 0) return 0f;
-        try {
-            double body = ICJniUtils.getBodyTempFromWristTemp(wristC, AMBIENT_C);
-            return (float) body;
-        } catch (Throwable t) {
-            Log.w(TAG, "the vendor library would not convert a wrist temperature", t);
-            return 0f;
-        }
+        if (wristC <= 0) return 0f;
+        return (float) BodyTemp.fromWrist(wristC);
     }
 
     /** Whether libICJniUtils.so loaded. Checked once; a missing library is not an error here. */

@@ -38,15 +38,10 @@ public final class ICJniUtils {
     public static native int disableTemperature();
     public static native int isTemperatureDevAvailable();
 
-    /** What the thermometer reads at the wrist, which is not a body temperature. */
+    /** What the thermometer reads at the wrist, which is not a body temperature.
+     *  {@link org.watchlauncher.BodyTemp} converts it - the library's own
+     *  get_bodytemp_from_wristtemp was disassembled and reimplemented, so this is the last
+     *  thing the temperature path still needs from here. */
     public static native double getTemperature();
 
-    /**
-     * Wrist reading and ambient in, body temperature out.
-     *
-     * The vendor's own path, and the reason a wrist reads 21 degrees without it. com.ic.work
-     * calls exactly this from its onSensorChanged, with the measured ambient where there is one
-     * and the constant 26.0 where there is not.
-     */
-    public static native double getBodyTempFromWristTemp(double wrist, double ambient);
 }

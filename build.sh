@@ -222,6 +222,18 @@ rm -rf "$TD3"
 # against something the server actually sent - a position in decimal degrees instead of
 # degrees-and-minutes is still a valid-looking fix, just a few hundred kilometres away.
 TD4=$(mktemp -d)
+# BodyTemp against the vendor library it replaces. Pure arithmetic and no Android, so it
+# compiles and runs here - which is the point of it being its own class.
+TD_TEMP="$(mktemp -d)"
+trap 'rm -rf "$TD_TEMP"' EXIT
+if javac -nowarn -d "$TD_TEMP" "$HERE/src/org/watchlauncher/BodyTemp.java" 2>/dev/null \
+   && javac -nowarn -cp "$TD_TEMP" -d "$TD_TEMP" "$HERE/test/BodyTempTest.java" 2>/dev/null; then
+    if ! java -cp "$TD_TEMP" BodyTempTest; then
+        echo "body temperature test FAILED:" >&2
+        exit 1
+    fi
+fi
+
 if javac -nowarn -d "$TD4" "$HERE/src/org/watchlauncher/BeehomeCodec.java" 2>/dev/null && javac -nowarn -cp "$TD4" -d "$TD4" "$HERE/test/BeehomeCodecTest.java" 2>/dev/null; then
     if ! java -cp "$TD4" BeehomeCodecTest > "$TD4/out"; then
         echo "beehome codec test FAILED:" >&2
