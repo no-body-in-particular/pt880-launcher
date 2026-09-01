@@ -753,15 +753,16 @@ public final class TrackerSources {
     private static final float BODY_MIN = 34f, BODY_MAX = 43f;
 
     public static float temperature(Context c) {
-        // The vendor's own conversion first. The thermometer reads the wrist, which is not a
-        // body temperature and never was; SensorInput.bodyTemperature has the derivation.
+        // The thermometer reads the wrist, which is not a body temperature and never was;
+        // SensorInput.bodyTemperature has the derivation.
+        //
+        // There used to be a second try here through the vendor's binder, because GXTS02S in
+        // the platform sensor list is a mirror sitting at last=<0.0,0.0,0.0> and registerListener
+        // on it returns that for ever. That client is gone with the rest of the vendor path, and
+        // it is no loss: every vitals cycle already carries a temp= from our own daemon and
+        // sends it, so this is the fallback for a TEMP# asked between cycles rather than the
+        // only route. When it has nothing, the last good reading stands.
         float v = SensorInput.bodyTemperature();
-        if (v < BODY_MIN || v > BODY_MAX) {
-            // The vendor's binder, for the same reason the pulse uses it: GXTS02S in the
-            // platform sensor list is a mirror sitting at last=<0.0,0.0,0.0>, and
-            // registerListener on it returns that for ever. VendorVitals has the account.
-            v = VendorVitals.temperature(c, 20000);
-        }
         if (v >= BODY_MIN && v <= BODY_MAX) lastTemp = v;
         else if (v > 0f) Log.i(TAG, "temperature " + v + " C is not a body; not reporting it");
         return lastTemp;

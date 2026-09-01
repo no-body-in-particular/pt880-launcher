@@ -71,7 +71,7 @@ final class OwnVitals {
     private OwnVitals() { }
 
     /** One measurement, or null if nothing trustworthy came out. */
-    static VendorVitals.Reading measure(Context ctx, boolean wantSpo2) {
+    static Vitals measure(Context ctx, boolean wantSpo2) {
         String line = ask(wantSpo2 ? "spo2" : "hr");
         if (line == null) return null;
 
@@ -81,22 +81,26 @@ final class OwnVitals {
             return null;
         }
 
-        VendorVitals.Reading r = new VendorVitals.Reading();
-        r.fromOwn = true;
+        Vitals r = new Vitals();
         r.heartRate = bpm;
 
-        // spo2rel, not spo2. The daemon stopped emitting an absolute saturation once R was shown
-        // to drift from 0.32 to 0.98 over eight hours on a motionless wrist - a threefold change
-        // in the ratio the whole method rests on, which makes any single anchor wrong by several
-        // points within a day.
+        // spo2rel, not spo2, and it is already a percentage: the daemon publishes
+        // 97 - 25*(R - baseline), clamped at 100, where 97 is SPO2_ASSUMED_REST in vitalsd.c.
         //
-        // What it emits instead is a movement away from this sensor's own recent baseline, on
-        // the reasoning that the drift is slow and a desaturation is not: an apnoea lasts tens of
-        // seconds and the instrument takes hours to wander that far. So a fall is real and worth
-        // seeing. The absolute number is an assumption - 97 for a healthy adult at rest - and is
-        // not a measurement of anyone's saturation. docs/vitals.md is explicit about this.
+        // It is named "rel" because of how it is arrived at rather than what it is. An absolute
+        // figure from R alone is not available - R drifted from 0.32 to 0.98 over eight hours on
+        // a motionless wrist, a threefold change in the ratio the whole method rests on - so the
+        // slow part is treated as this sensor's baseline and subtracted, and the textbook slope
+        // is applied to what is left. A fall is real and worth acting on; the anchor is an
+        // assumption about a healthy adult at rest, not a measurement of anyone's saturation.
+        // docs/vitals.md is explicit about this and the chart should be read in that light.
+        //
+        // Taken at whatever the daemon publishes rather than re-checked against a range here.
+        // vitalsd clamps above 100 and reports nothing below 70 - further from the baseline than
+        // that is the sensor rather than the blood - and a second threshold in this file could
+        // only disagree with the first.
         int ox = field(line, "spo2rel=");
-        if (ox >= 70 && ox <= 100) r.oxygen = ox;
+        if (ox > 0 && ox <= 100) r.oxygen = ox;
 
         double temp = dfield(line, "temp=");
         if (temp > 20.0 && temp < 45.0) r.temperature = temp;

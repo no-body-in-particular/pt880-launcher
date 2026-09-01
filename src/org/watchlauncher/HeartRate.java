@@ -175,7 +175,7 @@ public class HeartRate {
         if (own != null && own.isAlive()) return;
         own = new Thread(new Runnable() {
             public void run() {
-                final VendorVitals.Reading r = OwnVitals.measure(ctx, false);
+                final Vitals r = OwnVitals.measure(ctx, false);
                 ui.post(new Runnable() {
                     public void run() {
                         running = false;

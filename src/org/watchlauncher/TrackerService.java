@@ -403,9 +403,9 @@ public class TrackerService extends Service {
                         return;
                     }
 
-                    VendorVitals.Reading r = OwnVitals.measure(TrackerService.this, false);
+                    Vitals r = OwnVitals.measure(TrackerService.this, false);
 
-                    // Red only every fourth cycle, and only for what green cannot give.
+                    // Red only every RED_EVERY cycles, and only for what green cannot give.
                     //
                     // The condition here was "run red if green produced no pressure", which
                     // reads sensibly and is useless: green samples at 25 Hz and can never
@@ -419,45 +419,29 @@ public class TrackerService extends Service {
                     // sensor time back. A pressure every fortieth minute is enough for something
                     // that moves as slowly as blood pressure does, and the rate, which is what
                     // this watch is asked for, still comes every cycle from green.
-                    // Consumed whether or not a saturation comes of it. Leaving it set until
-                    // one does would light red every cycle for as long as the signal refused,
-                    // which is the expensive pass and the one the cadence exists to ration.
+
+                    // An oxygen cycle also asks for red, because green cannot produce a
+                    // saturation at all. Consumed whether or not one comes of it: leaving it set
+                    // until it did would light red every cycle for as long as the signal
+                    // refused, which is the expensive pass and the one the cadence rations.
                     final boolean wantOxygen = oxygenDue;
                     oxygenDue = false;
 
                     boolean wantShape = (redCycle++ % RED_EVERY) == 0;
                     if (wantShape || wantOxygen || r == null) {
-                        VendorVitals.Reading red = OwnVitals.measure(TrackerService.this, true);
+                        Vitals red = OwnVitals.measure(TrackerService.this, true);
                         if (red != null) {
                             // Green's rate wins where both found one: red ran for the shape.
                             if (r != null && r.heartRate > 0) red.heartRate = r.heartRate;
                             r = red;
                         }
                     }
-                    // Ours reports a saturation only when the pulse shape supports one, and
-                    // reports none at all while channel 1 carries two counts of signal - which
-                    // is most of the time on a still wrist. The vendor service measures an
-                    // absolute saturation and is the only source of one, so the oxygen cycle is
-                    // the one place worth paying its queue for.
-                    boolean askedVendor = false;
-                    if (wantOxygen && (r == null || r.oxygen <= 0)) {
-                        askedVendor = true;
-                        VendorVitals.Reading v =
-                                VendorVitals.measure(TrackerService.this, VITALS_TIMEOUT_MS);
-                        if (v != null && v.oxygen > 0) {
-                            if (r == null) {
-                                r = v;
-                            } else {
-                                r.oxygen = v.oxygen;
-                            }
-                        }
-                    }
-                    // Not twice. The vendor's queue is the slowest thing here and it has just
-                    // been asked; asking again on the same cycle would spend two minutes of lit
-                    // LEDs to get the same silence.
-                    if (r == null && !askedVendor) {
-                        r = VendorVitals.measure(TrackerService.this, VITALS_TIMEOUT_MS);
-                    }
+                    // There is no vendor fallback here any more. It used to ask com.ic.work
+                    // for an absolute saturation when ours declined, on the grounds that ours
+                    // was only relative - but ours is 97 minus the textbook slope applied to the
+                    // deviation from this sensor's own baseline, which is a percentage, and the
+                    // vendor's was a second scale on the same chart with no way to tell which
+                    // reading came from where. One source, whatever it costs in coverage.
                     if (r == null) {
                         vitalsMisses++;
                         // Nothing from the service. The platform sensor is not a fallback: it
@@ -466,31 +450,18 @@ public class TrackerService extends Service {
                         Log.w(TAG, "no vitals measurement (" + vitalsMisses + " in a row); "
                                 + "sending nothing rather than the cached value gh30x would "
                                 + "hand back, and sitting out " + skipCycles() + " cycles");
-                        if (vitalsMisses >= WEDGE_MISSES) recoverSensorService();
+                        if (vitalsMisses >= WEDGE_MISSES) recoverVitalsDaemon();
                         return;
                     }
                     vitalsMisses = 0;
                     lastVitalsOkAt = System.currentTimeMillis();
 
-                    // A reading with a pulse but neither a pressure nor an SpO2 is the wedge:
-                    // the driver answered and the service did not. See serviceSilent.
-                    //
-                    // Only the vendor's silence means that. Ours looks identical and is normal:
-                    // we report a pressure only when the pulse shape supports one, and we report
-                    // no saturation at all while channel 1 carries two counts of signal. Left
-                    // unqualified this fired every third measurement and force-stopped
-                    // com.ic.work each time, which is a running system being restarted for
-                    // behaving exactly as designed.
-                    if (!r.fromOwn && r.systolic <= 0 && r.oxygen <= 0 && r.heartRate > 0) {
-                        if (++serviceSilent >= SILENT_WEDGE) {
-                            Log.w(TAG, "the service has given neither a pressure nor an SpO2 for "
-                                    + serviceSilent + " measurements while the driver kept "
-                                    + "answering; that is the wedge");
-                            recoverSensorService();
-                        }
-                    } else {
-                        serviceSilent = 0;
-                    }
+                    // The wedge detector went with the vendor service it was about. It fired
+                    // on a reading that carried a pulse and neither a pressure nor an SpO2,
+                    // which for com.ic.work meant its queue had jammed and only a force-stop
+                    // would clear it. Ours looks identical and is normal: a pressure is reported
+                    // only when the pulse shape supports one, and no saturation at all until
+                    // there is a baseline to measure a deviation from.
 
                     String when = TrackerSources.stamp();
                     if (r.heartRate > 0) {
@@ -556,57 +527,25 @@ public class TrackerService extends Service {
     }
 
     /**
-     * Restart com.ic.work, which is the only way its work queue is ever cleared.
+     * Restart our vitals daemon, which is the only recovery left worth having.
      *
-     * It keeps one queue for both sensors with no timeout anywhere, so a measurement whose
-     * callback never arrives holds it for ever: every later request hangs, the optical sensor
-     * stays powered, and nothing comes back. protocol/README.md section 10 has the derivation,
-     * and its own conclusion is that it stays stuck "until the process restarts".
+     * This used to force-stop com.ic.work, whose one work queue had no timeout anywhere in it:
+     * a measurement whose callback never arrived held it for ever, and a restart was the only
+     * way to clear it. That service is not used any more and restarting it would do nothing.
      *
-     * So restart it. Done by hand once to confirm - force-stop, and the next measurement came
-     * back immediately - and there is no reason a watch should need a person for that. It is a
-     * system app other things bind on demand, so it returns when it is next wanted.
-     *
-     * Only after two misses in a row, so one wrist that would not give up a reading does not
-     * cost a process restart.
+     * vitalsd sits in the init slot the vendor daemon used to occupy, so init owns its lifetime
+     * and restarting it is a property away. Init brings it back on its own if it dies; this is
+     * for the other case, where it is running and has stopped answering.
      */
-    /**
-     * Consecutive measurements where the driver answered and the service did not.
-     *
-     * The wedge this counts does not look like a failure from here, which is why it went
-     * unnoticed for so long. The HAL stops delivering, so the service has nothing to report and
-     * contributes neither a pressure nor an SpO2 - but the driver keeps producing a pulse, so a
-     * reading still comes back and vitalsMisses resets to zero every cycle. On the server it
-     * shows as heart rate carrying on while blood pressure and SpO2 stop together, which is the
-     * shape to recognise:
-     *
-     *     blood pressure  last 13:40:38   77|117
-     *     SpO2            last 13:40:38   97
-     *     heart rate      13:44, 13:57 ... still going
-     *
-     * The HAL's own last= sticks at the final delivered triple, which is the confirmation.
-     */
-    private volatile int serviceSilent;
-
-    /** Three of them, about nine minutes. Long enough not to fire on one bad window. */
-    private static final int SILENT_WEDGE = 3;
-
-    private void recoverSensorService() {
-        Log.w(TAG, "the sensor service looks wedged; restarting com.ic.work");
-        // Force-stop leaves the package in the stopped state, where it receives no broadcasts
-        // and will not start itself. Starting it explicitly is what actually brings it back;
-        // without this the wedge was traded for an absence.
-        boolean stopped = shell("am force-stop com.ic.work");
-        boolean started = shell("am startservice -n com.ic.work/.SensorDataService");
-        if (stopped) {
+    private void recoverVitalsDaemon() {
+        Log.w(TAG, "the vitals daemon has stopped answering; restarting gh3011_daemon");
+        if (shell("setprop ctl.restart gh3011_daemon")) {
             vitalsMisses = 0;
-            serviceSilent = 0;
             vitalsSkipped = 0;
             lastMeasureAt = 0;
-            Log.i(TAG, "com.ic.work restarted" + (started ? "" : " but would not start again")
-                    + "; the next cycle will measure");
+            Log.i(TAG, "gh3011_daemon restarted; the next cycle will measure");
         } else {
-            Log.w(TAG, "could not restart com.ic.work; needs the root helper at "
+            Log.w(TAG, "could not restart gh3011_daemon; needs the root helper at "
                     + "/system/xbin/wsu");
         }
     }
