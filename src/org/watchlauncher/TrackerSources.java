@@ -572,6 +572,32 @@ public final class TrackerSources {
      * they had rather than a zero.
      */
     public static int steps(Context c) {
+        // The daemon first, because the framework has never answered.
+        //
+        // Both ways of asking the sensor framework were registered - a listener and a trigger -
+        // and neither has produced a number in five days. It is not the registration: the input
+        // device is enabled and delivered nothing at all across twenty-five seconds of walking,
+        // so the driver is where it stops.
+        //
+        // The chip underneath is counting fine. It is a DA217 at 2-0026 and its 0x0e/0x0f pair
+        // rose by 21 over a thirty second walk, holding steady when the wrist is still. Reading
+        // it needs root, which this process has not got and vitalsd has - the same reason the
+        // measurement lives there.
+        //
+        // The framework path stays underneath, still registered. If the driver is ever fixed it
+        // will start answering and cost nothing in the meantime, and it is the only source that
+        // survives vitalsd being absent.
+        // Asked for in the background, never on the caller's thread.
+        //
+        // This is called from inside the heartbeat, which is built on the tracker loop's own
+        // thread, and the daemon serves one request at a time behind a measurement that can hold
+        // it for eighty seconds. Asking directly stalled that loop: no heartbeat, no position
+        // frame, and - because the spool is emptied after both - no readings either, while the
+        // measurements themselves carried on filling it. A step count is not worth a minute of
+        // the connection's attention, so the last one answers and a refresh runs behind it.
+        refreshStepsAsync(c.getApplicationContext());
+        if (daemonSteps >= 0) return daemonSteps;
+
         if (!stepsListening) {
             if (lastSteps == 0) {
                 try {
@@ -581,12 +607,40 @@ public final class TrackerSources {
             }
             listenForSteps(c);
         } else if (lastSteps == 0) {
-            // Set up, and still nothing. Either path may have been refused at a bad moment - a
-            // trigger request lost to a busy driver disarms silently - so ask again rather than
-            // reporting zero every ten minutes for another five days.
             armStepTrigger(c.getApplicationContext());
         }
         return lastSteps;
+    }
+
+
+    /** The daemon's last answer, or -1 before it has given one. */
+    private static volatile int daemonSteps = -1;
+    private static volatile boolean stepsAsking = false;
+    private static volatile long stepsAskedAt = 0;
+
+    /** How stale the count may get before it is worth asking again. */
+    private static final long STEPS_REFRESH_MS = 60000;
+
+    private static void refreshStepsAsync(final Context app) {
+        long now = System.currentTimeMillis();
+        if (stepsAsking || now - stepsAskedAt < STEPS_REFRESH_MS) return;
+        stepsAsking = true;
+        stepsAskedAt = now;
+        new Thread(new Runnable() {
+            public void run() {
+                try {
+                    int n = OwnVitals.steps(app);
+                    if (n >= 0) {
+                        daemonSteps = n;
+                        record(app, n);
+                    }
+                } catch (Throwable t) {
+                    Log.w(TAG, "could not read the step counter", t);
+                } finally {
+                    stepsAsking = false;
+                }
+            }
+        }, "steps").start();
     }
 
     // ------------------------------------------------------------------ frames

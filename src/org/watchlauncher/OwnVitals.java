@@ -231,6 +231,19 @@ final class OwnVitals {
         return worn;
     }
 
+    /**
+     * Steps since the counter was last reset, or -1 if the daemon could not say.
+     *
+     * Read off the i2c bus rather than through SensorManager, which has never produced a number
+     * on this watch - see TrackerSources.steps for why. A cheap question: no LED, no measurement,
+     * two bytes.
+     */
+    static int steps(Context ctx) {
+        String line = ask("steps", WEAR_TIMEOUT_MS);
+        if (line == null) return -1;
+        return field(line, "steps=");
+    }
+
     /** Read {@code name=<decimal>} out of the reply, or -1. */
     static double dfield(String line, String name) {
         if (line == null) return -1;
