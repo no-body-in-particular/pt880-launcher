@@ -494,16 +494,7 @@ public final class TrackerSources {
             ok = sm.registerListener(new SensorEventListener() {
                 public void onSensorChanged(SensorEvent e) {
                     if (e.values == null || e.values.length == 0) return;
-                    int n = (int) e.values[0];
-                    if (n < 0 || n == lastSteps) return;
-                    lastSteps = n;
-                    // Kept, so a restart does not report zero until the wearer next moves.
-                    // The counter itself is since boot, so this is only ever a floor: a real
-                    // reboot resets it and the next event will be smaller, which is correct.
-                    try {
-                        app.getSharedPreferences("tracker", Context.MODE_PRIVATE)
-                                .edit().putInt(KEY_STEPS, n).apply();
-                    } catch (Throwable ignored) { /* the reading still stands */ }
+                    record(app, (int) e.values[0]);
                 }
 
                 public void onAccuracyChanged(Sensor s, int a) { }
@@ -511,8 +502,66 @@ public final class TrackerSources {
         } catch (Throwable t) {
             Log.w(TAG, "could not listen to " + found.getName(), t);
         }
-        stepsListening = ok;
-        Log.i(TAG, "step counter " + found.getName() + (ok ? ": listening" : ": would not register"));
+
+        // And the trigger path, because a standing registration is not enough on its own.
+        //
+        // dumpsys marks this sensor on-demand, which is Android's word for a one-shot trigger
+        // sensor, and those deliver through TriggerEventListener alone: registerListener on one
+        // produces nothing, ever, and returns true while doing it - so `ok` above is not evidence
+        // that anything will arrive. The same dumpsys shows the counter's last= column at zero,
+        // where gh30x_sensor, which has always requested both, carries real numbers. That is the
+        // difference between the pulse working and this not.
+        //
+        // Which of the two the driver honours is not worth deciding from here. HeartRate settled
+        // it by asking for both and letting the inert one be inert, and this now does the same.
+        // A trigger fires once and disarms, so it re-arms itself in the callback, and steps()
+        // re-arms as well whenever nothing has arrived yet - a request lost to a driver that was
+        // busy would otherwise be the end of it.
+        stepSensor = found;
+        stepTrigger = new TriggerEventListener() {
+            public void onTrigger(TriggerEvent e) {
+                if (e.values != null && e.values.length > 0) record(app, (int) e.values[0]);
+                armStepTrigger(app);
+            }
+        };
+        armStepTrigger(app);
+
+        stepsListening = ok || stepTriggerArmed;
+        Log.i(TAG, "step counter " + found.getName() + ": listener " + (ok ? "on" : "refused")
+                + ", trigger " + (stepTriggerArmed ? "armed" : "refused"));
+    }
+
+    /** The counter, kept so re-arming does not have to search the sensor list again. */
+    private static volatile Sensor stepSensor;
+    private static volatile TriggerEventListener stepTrigger;
+    private static volatile boolean stepTriggerArmed = false;
+
+    private static void armStepTrigger(Context app) {
+        Sensor s = stepSensor;
+        TriggerEventListener t = stepTrigger;
+        if (s == null || t == null) return;
+        SensorManager sm = (SensorManager) app.getSystemService(Context.SENSOR_SERVICE);
+        if (sm == null) return;
+        try {
+            stepTriggerArmed = sm.requestTriggerSensor(t, s);
+        } catch (Throwable ignored) {
+            // Not a trigger sensor after all, in which case the standing listener is the one
+            // that matters and this costs nothing.
+            stepTriggerArmed = false;
+        }
+    }
+
+    /** One count from either path, kept and persisted if it is new. */
+    private static void record(Context app, int n) {
+        if (n < 0 || n == lastSteps) return;
+        lastSteps = n;
+        // Kept, so a restart does not report zero until the wearer next moves. The counter
+        // itself is since boot, so this is only ever a floor: a real reboot resets it and the
+        // next value will be smaller, which is correct.
+        try {
+            app.getSharedPreferences("tracker", Context.MODE_PRIVATE)
+                    .edit().putInt(KEY_STEPS, n).apply();
+        } catch (Throwable ignored) { /* the reading still stands */ }
     }
 
     /**
@@ -531,6 +580,11 @@ public final class TrackerSources {
                 } catch (Throwable ignored) { /* nothing kept; zero is the honest answer */ }
             }
             listenForSteps(c);
+        } else if (lastSteps == 0) {
+            // Set up, and still nothing. Either path may have been refused at a bad moment - a
+            // trigger request lost to a busy driver disarms silently - so ask again rather than
+            // reporting zero every ten minutes for another five days.
+            armStepTrigger(c.getApplicationContext());
         }
         return lastSteps;
     }
