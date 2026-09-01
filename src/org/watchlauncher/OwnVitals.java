@@ -115,7 +115,7 @@ final class OwnVitals {
         // the conversion is for.
         double wrist = dfield(line, "temp=");
         float body = SensorInput.bodyFromWrist(wrist);
-        if (body >= SensorInput.BODY_MIN && body <= SensorInput.BODY_MAX) r.temperature = body;
+        if (body >= BodyTemp.PERSON_MIN_C && body <= BodyTemp.PERSON_MAX_C) r.temperature = body;
 
         int sbp = field(line, "sbp=");
         int dbp = field(line, "dbp=");

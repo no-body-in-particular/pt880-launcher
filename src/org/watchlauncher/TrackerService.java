@@ -327,38 +327,114 @@ public class TrackerService extends Service {
      * a watch on a table cannot do in any room anybody sits in - and a single no skipped the
      * cycle outright, so the readings stopped while the evidence that they should not have said
      * otherwise.
-     *
-     * An unconfirmed no is reported as -1, "would not say", which both callers already handle by
-     * measuring anyway or by looking at movement instead. So this needs nothing else to change.
-     *
-     * Three costs up to two measurements taken after a real removal, each holding the sensor for
-     * its timeout and finding nothing. That is the right way round: a missed removal is a gap in
-     * a log, and a false one stops the readings.
      */
     private static final int OFF_WRIST_CONFIRM = 3;
+
+    /**
+     * Skin at or above this is warm enough to argue with the detector.
+     *
+     * A wrist reads 33 to 35 on this thermopile and a room reads 20 to 26, so the gap being
+     * tested is enormous and the threshold does not have to be delicate. It sits below the
+     * lowest worn reading seen rather than in the middle of the gap, because being wrong here
+     * costs a re-test and being wrong the other way costs the readings.
+     *
+     * Warmth is not proof - a pocket supplies warmth, which is the whole reason the wear check
+     * moved off the thermometer and onto the sensor's own detector - so this never says "worn"
+     * on its own. It only buys a second opinion.
+     */
+    private static final double WRIST_WARM_C = 30.0;
+
+    /** How long to stop measuring once all three instruments agree the watch is off. */
+    private static final long OFF_WRIST_BACKOFF_MS = 10 * 60 * 1000L;
 
     private int offWristStreak;
 
     /**
-     * The wear detector, with a removal confirmed rather than taken on the first answer.
+     * Whether the last measurement found nothing either.
      *
-     * Shared by the vitals cycle and the wear report, on purpose: they run on different timers,
-     * and any positive from either is enough to say the watch is still on.
+     * The third instrument, and the only one that answers the question directly: a pulse is
+     * proof of a wrist, and off one the measurement fails on its own without being told to.
+     */
+    private boolean measurementAgreed;
+
+    /** When measuring may resume, once the three of them have agreed. */
+    private long wornBackoffUntil;
+
+    /**
+     * Is the watch off the wrist, according to everything available?
      *
-     * @return 1 worn, 0 off the wrist and confirmed, -1 unknown or not yet believed
+     * Three instruments, and a no from the first one alone means very little:
+     *
+     * <ol>
+     *   <li>the GH3011's wear detector, which is fast and was demonstrably wrong;
+     *   <li>the thermopile, which cannot tell a wrist from a warm pocket but can certainly tell
+     *       either from a table;
+     *   <li>the measurement itself, which finds no pulse off a wrist.
+     * </ol>
+     *
+     * So: a no that the thermometer contradicts buys a re-test, and is not counted at all until
+     * a measurement has failed too. A no that the thermometer agrees with is counted at once,
+     * because then two instruments already agree. Either way it takes {@link #OFF_WRIST_CONFIRM}
+     * of them, and a heart rate at any point resets the lot - see {@link #foundAPulse}.
+     *
+     * @return 1 worn, 0 off the wrist and agreed, -1 unknown or not yet believed
      */
     private int wornConfirmed() {
         int w = OwnVitals.worn(this);
-        if (w == 0) {
-            if (++offWristStreak < OFF_WRIST_CONFIRM) {
-                Log.i(TAG, "the wear detector says no (" + offWristStreak + " of "
-                        + OFF_WRIST_CONFIRM + "); not believing it yet");
+        if (w != 0) {
+            offWristStreak = 0;
+            return w;
+        }
+
+        double wrist = SensorInput.wristTemperature();
+        boolean warm = wrist >= WRIST_WARM_C;
+
+        if (warm) {
+            // Ask again. The detector answers in about a second, and the thermometer saying
+            // 34 while it says "no wrist" is the exact disagreement that was losing readings.
+            int again = OwnVitals.worn(this);
+            if (again != 0) {
+                Log.i(TAG, "the wear detector said no at " + wrist
+                        + " C skin; asked again and it says yes");
+                offWristStreak = 0;
+                return again;
+            }
+            offWristStreak++;
+            if (!measurementAgreed) {
+                // Two nos from one instrument, against a thermometer reading a body. Not
+                // enough: measure, and let the pulse settle it.
+                Log.i(TAG, "wear detector says no twice at " + wrist + " C skin, but no"
+                        + " measurement has failed yet; measuring anyway");
+                return -1;
+            }
+            if (offWristStreak < OFF_WRIST_CONFIRM) {
+                Log.i(TAG, "wear detector no (" + offWristStreak + " of " + OFF_WRIST_CONFIRM
+                        + ") at " + wrist + " C skin, and the last measurement found nothing");
                 return -1;
             }
             return 0;
         }
+
+        // The thermometer agrees. Skin at room temperature is not a wrist, whatever else is
+        // true, so this needs no corroboration beyond the usual count.
+        if (++offWristStreak < OFF_WRIST_CONFIRM) {
+            Log.i(TAG, "wear detector no (" + offWristStreak + " of " + OFF_WRIST_CONFIRM
+                    + ") at " + wrist + " C skin");
+            return -1;
+        }
+        return 0;
+    }
+
+    /** A measurement found a pulse: the watch is on a wrist and nothing else gets a vote. */
+    private void foundAPulse() {
         offWristStreak = 0;
-        return w;
+        measurementAgreed = false;
+        wornBackoffUntil = 0;
+    }
+
+    /** A measurement found nothing, which off a wrist is what happens. */
+    private void foundNothing() {
+        measurementAgreed = true;
     }
 
     private void measureVitalsAsync(boolean asked) {
@@ -440,9 +516,17 @@ public class TrackerService extends Service {
                     // detector - but they take a minute or more between them to get there with
                     // the LEDs lit the whole time. Only a definite no skips the cycle; -1 means
                     // the thermometer would not say, and then it is better to measure.
+                    long nowMs = SystemClock.elapsedRealtime();
+                    if (nowMs < wornBackoffUntil) {
+                        Log.i(TAG, "off the wrist by all three; not measuring for another "
+                                + ((wornBackoffUntil - nowMs) / 1000) + "s");
+                        return;
+                    }
                     if (wornConfirmed() == 0) {
-                        Log.i(TAG, "not on a wrist, confirmed; skipping this cycle without "
-                                + "measuring");
+                        wornBackoffUntil = nowMs + OFF_WRIST_BACKOFF_MS;
+                        Log.i(TAG, "detector, thermometer and the measurement all say off the "
+                                + "wrist; backing off for "
+                                + (OFF_WRIST_BACKOFF_MS / 60000) + " minutes");
                         return;
                     }
 
@@ -493,11 +577,13 @@ public class TrackerService extends Service {
                         Log.w(TAG, "no vitals measurement (" + vitalsMisses + " in a row); "
                                 + "sending nothing rather than the cached value gh30x would "
                                 + "hand back, and sitting out " + skipCycles() + " cycles");
+                        foundNothing();
                         if (vitalsMisses >= WEDGE_MISSES) recoverVitalsDaemon();
                         return;
                     }
                     vitalsMisses = 0;
                     lastVitalsOkAt = System.currentTimeMillis();
+                    if (r.heartRate <= 0) foundNothing();
 
                     // The wedge detector went with the vendor service it was about. It fired
                     // on a reading that carried a pulse and neither a pressure nor an SpO2,
@@ -508,6 +594,8 @@ public class TrackerService extends Service {
 
                     String when = TrackerSources.stamp();
                     if (r.heartRate > 0) {
+                        // A pulse is proof of a wrist, and outranks every other instrument.
+                        foundAPulse();
                         int bpm = calibratedPulse(r.heartRate);
                         sendAsync(BeehomeCodec.health(when, JK_PULSE, bpm));
                         TrackerLog.recordPulse(TrackerService.this, bpm,
@@ -535,8 +623,8 @@ public class TrackerService extends Service {
                     // wrist reading and publishes nothing it cannot convert - so this is the
                     // same test rather than a looser second one. It used to be 20 to 45, which
                     // is the band that let a wrist through in the first place.
-                    if (r.temperature >= SensorInput.BODY_MIN
-                            && r.temperature <= SensorInput.BODY_MAX) {
+                    if (r.temperature >= BodyTemp.PERSON_MIN_C
+                            && r.temperature <= BodyTemp.PERSON_MAX_C) {
                         sendAsync(BeehomeCodec.health(when, JK_TEMPERATURE,
                                                       (float) r.temperature));
                     }
@@ -1848,6 +1936,7 @@ public class TrackerService extends Service {
                     if (worn && !was) {
                         vitalsMisses = 0;
                         vitalsSkipped = 0;
+                        foundAPulse();          // clears the off-wrist backoff as well
                         Log.i(TAG, "worn again; measuring now rather than sitting out the "
                                 + "backoff");
                         measureVitalsAsync();

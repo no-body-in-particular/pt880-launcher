@@ -61,8 +61,25 @@ public final class BodyTemp {
      */
     public static final double AMBIENT_C = 26.0;
 
-    /** A body temperature is between these, and the vendor's own function agrees. */
+    /**
+     * The vendor's own bounds. Outside these its function returns 0, and so does this one.
+     *
+     * Not the same question as {@link #PERSON_MIN_C} below, and the two are easy to confuse:
+     * this is the range the conversion is willing to produce at all, and that is the range this
+     * launcher is willing to call somebody's temperature.
+     */
     public static final double MIN_C = 31.0, MAX_C = 42.0;
+
+    /**
+     * What this launcher will report as a person's temperature.
+     *
+     * Narrower than the conversion's own bounds at the bottom, and worked out the hard way: the
+     * test used to be 20 to 45, which let the raw wrist reading through, so 21 was filed as a
+     * body temperature. Nothing between 31 and 34 is a person either - it is a thermometer
+     * reporting a room, or a watch on a table warm enough for the curve to still answer - and
+     * reporting it as body heat is worse than reporting nothing.
+     */
+    public static final double PERSON_MIN_C = 34.0, PERSON_MAX_C = 43.0;
 
     private BodyTemp() { }
 

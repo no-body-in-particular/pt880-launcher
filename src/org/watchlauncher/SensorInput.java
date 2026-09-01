@@ -162,35 +162,38 @@ final class SensorInput {
      * for where its constants came from and how they were checked.
      */
     static float bodyTemperature() {
-        if (!LIB_OK) return 0f;
+        double wrist = wristTemperature();
+        if (wrist <= 0) return 0f;
+        double body = BodyTemp.fromWrist(wrist);
+        Log.i(TAG, String.format("wrist %.2f C -> body %.2f C", wrist, body));
+        return (float) body;
+    }
+
+    /**
+     * What the thermopile reads at the skin, unconverted, or 0 if it will not say.
+     *
+     * Wanted on its own by the wear check, which is asking a different question than
+     * "what is this person's temperature": a wrist sits around 33 to 35 and a room around 20 to
+     * 26, and that gap is enormous compared with anything the conversion argues about. The
+     * conversion would only get in the way there - it returns 0 for anything below about 28,
+     * which is exactly the range the wear check needs to be able to see.
+     */
+    static double wristTemperature() {
+        if (!LIB_OK) return 0;
         try {
-            if (ICJniUtils.isTemperatureDevAvailable() <= 0) return 0f;
+            if (ICJniUtils.isTemperatureDevAvailable() <= 0) return 0;
             ICJniUtils.enableTemperature();
             try {
                 double wrist = ICJniUtils.getTemperature();
-                if (wrist <= 0) return 0f;
-                double body = BodyTemp.fromWrist(wrist);
-                Log.i(TAG, String.format("wrist %.2f C -> body %.2f C", wrist, body));
-                return (float) body;
+                return wrist > 0 ? wrist : 0;
             } finally {
                 ICJniUtils.disableTemperature();
             }
         } catch (Throwable t) {
             Log.w(TAG, "the vendor library would not give a temperature", t);
-            return 0f;
+            return 0;
         }
     }
-
-    /**
-     * What counts as a body temperature at all.
-     *
-     * Was duplicated in TrackerSources, which is where it was worked out: a wrist sits a few
-     * degrees above the room, so 21 passed a 20-to-45 test and was filed as a body temperature.
-     * Nothing in that band below about 34 is a person - it is the thermometer reporting the
-     * room, or a watch on a table - and reporting it as body heat is worse than reporting
-     * nothing. One copy, next to the conversion it qualifies.
-     */
-    static final float BODY_MIN = 34f, BODY_MAX = 43f;
 
     /**
      * A wrist reading converted to a body temperature, or 0 if it cannot be.

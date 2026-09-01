@@ -754,7 +754,7 @@ public final class TrackerSources {
         // sends it, so this is the fallback for a TEMP# asked between cycles rather than the
         // only route. When it has nothing, the last good reading stands.
         float v = SensorInput.bodyTemperature();
-        if (v >= SensorInput.BODY_MIN && v <= SensorInput.BODY_MAX) lastTemp = v;
+        if (v >= BodyTemp.PERSON_MIN_C && v <= BodyTemp.PERSON_MAX_C) lastTemp = v;
         else if (v > 0f) Log.i(TAG, "temperature " + v + " C is not a body; not reporting it");
         return lastTemp;
     }
