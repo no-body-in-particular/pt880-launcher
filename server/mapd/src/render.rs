@@ -19,6 +19,9 @@ impl Canvas {
         }
     }
 
+    /// What was drawn, as palette indices, row-major.
+    pub fn pixels(&self) -> &[u8] { &self.px }
+
     #[inline]
     fn set(&mut self, x: i32, y: i32, c: u8) {
         if x >= 0 && y >= 0 && x < TILE_PX && y < TILE_PX {
@@ -228,6 +231,51 @@ fn encode(data: &[u8], depth: png::BitDepth, plte: &[u8]) -> Vec<u8> {
 }
 
 pub fn render_tile(c: &Country, z: u8, x: i32, y: i32) -> Vec<u8> {
+    render_px(c, z, x, y).to_png()
+}
+
+/// The same tile, stopping at the palette indices rather than going on to a
+/// PNG. The rain sheet composites onto a map and would otherwise encode 256
+/// tiles only to decode them again in the next breath.
+/// Whether a polygon is too small to put anything on the screen.
+///
+/// A pond is a pond at seventeen and a rounding error at ten, and the
+/// rasteriser costs the same either way - it walks the edges before finding
+/// out that every one of them lands on the same pixel. Over a whole country at
+/// ten that was thirteen seconds of drawing things nobody could see.
+fn subpixel(poly: &[(i32, i32)]) -> bool {
+    if poly.is_empty() {
+        return true;
+    }
+    let (mut x0, mut x1) = (i32::MAX, i32::MIN);
+    let (mut y0, mut y1) = (i32::MAX, i32::MIN);
+    for &(x, y) in poly {
+        x0 = x0.min(x);
+        x1 = x1.max(x);
+        y0 = y0.min(y);
+        y1 = y1.max(y);
+    }
+    x1 - x0 < 1 && y1 - y0 < 1
+}
+
+pub fn render_px(c: &Country, z: u8, x: i32, y: i32) -> Canvas {
+    render_px_at(c, z, x, y, z)
+}
+
+/// The tile, drawn at `z` but deciding what to include as if it were `detail`.
+///
+/// The two are the same for every tile the watch asks for, and the thresholds
+/// below - ground cover from 12, buildings from 14 - are about what is worth
+/// drawing at the size a tile will be looked at. The rain sheet breaks them
+/// apart: it covers a whole country, which at 12 is two and a half thousand
+/// tiles, but at 10 the thresholds would drop the coastline and leave the
+/// country unrecognisable under the rain. So it draws at 10 and asks for the
+/// detail of 12, which is the water and nothing else that costs anything.
+///
+/// Roads deliberately stay on `z`: they are already filtered by their own
+/// minzoom, and asking for a country's worth of them at 12 to draw at 10 would
+/// fetch an enormous number of ways only to smear them into one grey mass.
+pub fn render_px_at(c: &Country, z: u8, x: i32, y: i32, detail: u8) -> Canvas {
     let mut cv = Canvas::new();
     let (w, s, e, n) = tile_bbox(z, x, y);
 
@@ -244,7 +292,7 @@ pub fn render_tile(c: &Country, z: u8, x: i32, y: i32) -> Vec<u8> {
     // Ground cover, underneath everything. Context, never competing with the
     // route drawn on top of it.
     let mut poly: Vec<(i32, i32)> = Vec::with_capacity(64);
-    if z >= 12 {
+    if detail >= 12 {
         let (cells, big) = c.area_cells(w - mw, s - mh, e + mw, n + mh);
         // Water last, so a lake inside a wood draws as a lake rather than
         // whichever came back from the database first.
@@ -257,6 +305,9 @@ pub fn render_tile(c: &Country, z: u8, x: i32, y: i32) -> Vec<u8> {
                     }
                     poly.clear();
                     poly.extend(a.pts.iter().map(|p| (px_of(p.0), py_of(p.1))));
+                    if subpixel(&poly) {
+                        continue;
+                    }
                     cv.polygon(&poly, a.cls.clamp(1, 15) as u8);
                 }
             }
@@ -267,6 +318,9 @@ pub fn render_tile(c: &Country, z: u8, x: i32, y: i32) -> Vec<u8> {
                 }
                 poly.clear();
                 poly.extend(a.pts.iter().map(|p| (px_of(p.0), py_of(p.1))));
+                if subpixel(&poly) {
+                    continue;
+                }
                 cv.polygon(&poly, a.cls.clamp(1, 15) as u8);
             }
         }
@@ -275,7 +329,7 @@ pub fn render_tile(c: &Country, z: u8, x: i32, y: i32) -> Vec<u8> {
     // Buildings. imagefilledrectangle covers both endpoints, so a box drawn
     // from px0 to px1 is a pixel wider than it is - which at three pixels
     // across turned a city tile into one solid block of fill.
-    if z >= 14 {
+    if detail >= 14 {
         for cell in c.bldg_cells(w, s, e, n).iter() {
         for b in cell.iter() {
             if b[2] < w || b[0] > e || b[3] < s || b[1] > n {
@@ -324,5 +378,5 @@ pub fn render_tile(c: &Country, z: u8, x: i32, y: i32) -> Vec<u8> {
         }
     }
 
-    cv.to_png()
+    cv
 }

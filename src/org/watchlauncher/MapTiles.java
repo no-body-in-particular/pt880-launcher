@@ -887,6 +887,10 @@ public class MapTiles {
         if (name.equals(".style")) return true;
         if (name.equals("roads.graph")) return true;
         if (name.equals("route.bin")) return true;
+        // The rain forecast, for the same reason as the route: it is small,
+        // it is not a tile, and re-fetching it needs a network the cleanup may
+        // well have been run because there is not one.
+        if (name.equals("rain.gif")) return true;
         return false;
     }
 

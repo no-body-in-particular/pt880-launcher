@@ -13,6 +13,7 @@
 
 mod graph;
 mod alerts;
+mod rain;
 mod route_encode;
 mod mercator;
 mod palette;
@@ -128,6 +129,7 @@ fn header(k: &str, v: &str) -> Header {
     Header::from_bytes(k.as_bytes(), v.as_bytes()).unwrap()
 }
 
+
 fn wants_gzip(r: &Request) -> bool {
     r.headers().iter().any(|h| {
         h.field.equiv("Accept-Encoding") && h.value.as_str().contains("gzip")
@@ -135,9 +137,21 @@ fn wants_gzip(r: &Request) -> bool {
 }
 
 fn send_bytes(r: Request, body: Vec<u8>, mime: &str, gzip: bool) {
+    send_cached(r, body, mime, gzip, 2592000)
+}
+
+
+
+pub fn send_gif(r: Request, body: Vec<u8>) {
+    send_cached(r, body, "image/gif", false, 600)
+}
+
+/// The rain sheet, for a browser rather than the watch. Already compressed as
+/// a PNG, so gzip is left off it.
+fn send_cached(r: Request, body: Vec<u8>, mime: &str, gzip: bool, max_age: u32) {
     let mut headers = vec![
         header("Content-Type", mime),
-        header("Cache-Control", "public, max-age=2592000"),
+        header("Cache-Control", &format!("public, max-age={}", max_age)),
     ];
     let body = if gzip && body.len() > 512 {
         let mut e = GzEncoder::new(Vec::new(), Compression::new(6));
@@ -163,7 +177,7 @@ fn send_bytes(r: Request, body: Vec<u8>, mime: &str, gzip: bool) {
     ));
 }
 
-fn send_text(r: Request, s: &str) {
+pub fn send_text(r: Request, s: &str) {
     let body = s.as_bytes().to_vec();
     let len = body.len();
     let _ = r.respond(Response::new(
@@ -175,7 +189,7 @@ fn send_text(r: Request, s: &str) {
     ));
 }
 
-fn send_status(r: Request, code: u16, msg: &str) {
+pub fn send_status(r: Request, code: u16, msg: &str) {
     let body = msg.as_bytes().to_vec();
     let len = body.len();
     let _ = r.respond(Response::new(
@@ -416,6 +430,8 @@ fn handle(app: &App, r: Request) {
 
         "alerts.php" => graph::alerts(app, r, &q),
 
+        "rain.php" => rain::handle(rain::cache(), r, &q),
+
         "health" => send_text(r, "ok\n"),
 
         _ => send_status(r, 404, "no such endpoint"),
@@ -423,6 +439,47 @@ fn handle(app: &App, r: Request) {
 }
 
 fn main() {
+    // A one-off, run by hand: draw the country the rain sheet is laid over and
+    // write it out, so it can be committed and compiled in. The picture is the
+    // Netherlands coastline, which does not change, and rendering it from the
+    // store costs thirteen seconds - once per process, but thirteen seconds
+    // somebody waits for, and only on a machine that has the store at all.
+    //
+    //     mapd --make-base src/netherlands-base.png
+    //
+    // Print the box it covers and put it in rain.rs beside the include_bytes,
+    // because an image and the coordinates it was drawn for that disagree is a
+    // map that is wrong everywhere by a little.
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() == 3 && args[1] == "--make-base" {
+        let root = PathBuf::from(
+            std::env::var("MAP_ROOT").unwrap_or_else(|_| "/var/www/hiawatha/map".into()),
+        );
+        let app = App {
+            stores: store::Stores::new(root.join("data")),
+            tiles: root.join("tiles"),
+            data: root.join("data"),
+            disk_cache: false,
+            osrm: String::new(),
+            routing: std::sync::atomic::AtomicUsize::new(0),
+            recent: std::sync::Mutex::new(Vec::new()),
+        };
+        match rain::make_base(&app) {
+            Some((png, bx, w, h)) => {
+                std::fs::write(&args[2], &png).expect("write base");
+                eprintln!(
+                    "wrote {} - {}x{}, {} bytes\nbox: ({:.5}, {:.5}, {:.5}, {:.5})",
+                    args[2], w, h, png.len(), bx.0, bx.1, bx.2, bx.3
+                );
+            }
+            None => {
+                eprintln!("no netherlands store under {}", root.display());
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     let root = std::env::var("MAP_ROOT").unwrap_or_else(|_| "/var/www/hiawatha/map".into());
     let addr = std::env::var("MAP_ADDR").unwrap_or_else(|_| "127.0.0.1:8088".into());
     let root = PathBuf::from(root);

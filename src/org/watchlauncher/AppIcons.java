@@ -40,6 +40,7 @@ public class AppIcons extends View {
     public static final int HOME = 15;
     public static final int HEART = 16;
     public static final int MAP = 17;
+    public static final int RAIN = 18;
 
     private static final float D = 24f;
 
@@ -96,6 +97,7 @@ public class AppIcons extends View {
             case HOME:      home(canvas); break;
             case HEART:     heart(canvas); break;
             case MAP:       map(canvas); break;
+            case RAIN:      rain(canvas); break;
             default:        device(canvas); break;
         }
         canvas.restore();
@@ -313,6 +315,21 @@ public class AppIcons extends View {
         c.drawPath(path, p);
         c.drawLine(9f, 3.5f, 9f, 17.5f, p);
         c.drawLine(15f, 6.5f, 15f, 20.5f, p);
+    }
+
+    /** A cloud with three drops under it. */
+    private void rain(Canvas c) {
+        stroke(2f);
+        path.reset();
+        path.moveTo(6.5f, 13.5f);
+        path.cubicTo(3.2f, 13.5f, 3.2f, 8.8f, 6.8f, 8.9f);
+        path.cubicTo(7.4f, 5.0f, 13.0f, 4.6f, 13.9f, 8.2f);
+        path.cubicTo(17.8f, 7.2f, 20.2f, 11.4f, 17.4f, 13.5f);
+        path.close();
+        c.drawPath(path, p);
+        c.drawLine(8.5f, 16.5f, 7.5f, 19.5f, p);
+        c.drawLine(12.0f, 16.5f, 11.0f, 20.0f, p);
+        c.drawLine(15.5f, 16.5f, 14.5f, 19.5f, p);
     }
 
     private void device(Canvas c) {

@@ -17,6 +17,7 @@ it, is in [pt880-root](https://github.com/no-body-in-particular/pt880-root).
   Tue 25 Aug
 
   ♪  Music
+  ☂  Rain
   ᛒ  Bluetooth
   ▣  Camera
   ☎  Call
@@ -46,6 +47,7 @@ buttons.
 | | |
 |---|---|
 | **Music** | The player from `apps/watchplayer`, moved in whole: same `MusicService`, same filesystem walk, same transport gestures. |
+| **Rain** | The next 24 hours of rain over the Netherlands, played as an animation. Only appears where there is data for it — see below. |
 | **Bluetooth** | Scan, pair, connect, forget. Pairs headphones over A2DP and keyboards over HID. Names devices that will not name themselves — see below. |
 | **Camera** | Viewfinder, shutter, self-timer, review. Saves to `/sdcard/DCIM/Camera`. |
 | **Call** | Dials from `contacts.txt`, answers incoming calls, and reads the system call log. |
@@ -373,6 +375,64 @@ The APK is ~1.9 MB, and nearly all of that is the vendor database.
     assets/oui.db        57,858 IEEE vendor prefixes
     native/wsu.c         the setuid helper
     tools/               the database builder
+
+## Rain
+
+A **Rain** row on the launcher: Buienradar's next twenty-four hours, drawn over
+a map of the country, an hour a frame.
+
+```
+ 10:42                      84% [|||]
+ ─────────────────────────────────────
+
+       [ the animation, scaled
+         to fit, centred      ]
+
+  A:play   B:+1h   hold B:-1h
+```
+
+Buienradar's radar page extrapolates the last few frames and is honest for
+about two hours. This uses their `rain48hour` product instead — a weather
+model, run hourly — because the question a watch gets asked is not "is it
+raining" but "will it be raining when I set off".
+
+### The watch does none of it
+
+The server fetches the run, reads the intensity out of the source's colour
+ramp, draws it over a map of the Netherlands and returns one animated GIF. The
+watch downloads that and plays it. That is the whole of this side: about 200
+lines, most of them about fitting a picture on a screen.
+
+It began the other way round — the server packed a grid of intensities and the
+watch drew them over its own cached tiles, which meant a wire format, an
+encoder, a parser and a palette that had to agree across two languages. That
+version could say **"rain here in 3 h"** for the exact spot the watch was
+standing on, which this one cannot: it can only show the country and let you
+find yourself on it. It was dropped anyway. The picture very nearly answers the
+question by being looked at, and a tenth of the code answers it.
+
+At 200 pixels wide the file is about 62 kB for a whole day, which is one
+request every quarter of an hour at most and nothing at all when the forecast
+on the card is still fresh. It is kept at `/sdcard/maps/rain.gif` and the tile
+cleanup spares it, for the same reason it spares the last route: re-fetching it
+needs a network that may well be the reason the cleanup ran.
+
+Drawn with `android.graphics.Movie`, which is the only GIF decoder API 19 has.
+It needs a software canvas, which this app already is — `hardwareAccelerated`
+is off in the manifest and has been since long before this screen.
+
+### Only where it works
+
+The source covers the Netherlands and no other country, so the row is only on
+the launcher when the watch is in it. A row that is always present but only
+ever works in one place reads as broken everywhere else rather than as absent.
+
+The test is the last country the map settled on, kept in preferences when it
+resolves — not a bounding box against the last fix, which would be a second
+definition of the Netherlands to keep in step with the server's, and would be
+consulting a fix that may be hours old or missing. A watch that has never had a
+fix counts as yes: the map is blank there too, and the first thing a new device
+does should not be to offer less than it has.
 
 ## Map and navigation
 

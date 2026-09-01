@@ -1064,6 +1064,10 @@ public class MapScreen extends Screen implements LocationListener {
                         if (f.length < 5) return;
                         country = f[0];
                         Log.i("watchmap", "country = " + country);
+                        // Kept, because the launcher has to decide whether to
+                        // offer the rain row before anything has been opened
+                        // and with no network to ask over.
+                        Rain.noteCountry(shell, country);
                         loadAlerts(country);
                         try {
                             cMinX = Double.parseDouble(f[1]);

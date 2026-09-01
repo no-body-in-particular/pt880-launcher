@@ -32,29 +32,57 @@ public class LauncherScreen extends ListScreen {
      *  in one method and a switch in another, so a row can never open the app
      *  above it. */
     private static final String[] NAMES =
-            {"Map", "Music", "Sports", "Bluetooth", "Camera", "Call", "Terminal"};
+            {"Map", "Rain", "Music", "Sports", "Bluetooth", "Camera", "Call", "Terminal"};
     private static final int[] GLYPHS = {
-        AppIcons.MAP, AppIcons.MUSIC, AppIcons.HEART, AppIcons.BLUETOOTH,
+        AppIcons.MAP, AppIcons.RAIN, AppIcons.MUSIC, AppIcons.HEART, AppIcons.BLUETOOTH,
         AppIcons.CAMERA, AppIcons.CALL, AppIcons.TERMINAL,
     };
+
+    /**
+     * Which rows are on the launcher right now.
+     *
+     * Rain only where there is rain to fetch. The source covers the
+     * Netherlands and no other country, and a row that is always present but
+     * only ever works in one place reads as broken everywhere else rather than
+     * as absent -- see {@link Rain#here}.
+     *
+     * Both {@link #items} and {@link #onPick} go through this, which is the
+     * same reason the table above is one table: a row must never open the app
+     * next to it.
+     */
+    private int[] shown() {
+        int[] pick = new int[NAMES.length];
+        int n = 0;
+        for (int i = 0; i < NAMES.length; i++) {
+            if (NAMES[i].equals("Rain") && !Rain.here(shell)) continue;
+            pick[n++] = i;
+        }
+        int[] out = new int[n];
+        System.arraycopy(pick, 0, out, 0, n);
+        return out;
+    }
 
     @Override
     protected List<Item> items() {
         List<Item> l = list();
-        for (int i = 0; i < NAMES.length; i++) {
-            l.add(new Item(NAMES[i], null, GLYPHS[i]));
+        int[] rows = shown();
+        for (int i = 0; i < rows.length; i++) {
+            l.add(new Item(NAMES[rows[i]], null, GLYPHS[rows[i]]));
         }
         return l;
     }
 
     @Override
     protected void onPick(int index) {
-        Screen s = open(NAMES[index]);
+        int[] rows = shown();
+        if (index < 0 || index >= rows.length) return;
+        Screen s = open(NAMES[rows[index]]);
         if (s != null) shell.push(s);
     }
 
     private static Screen open(String name) {
         if (name.equals("Map")) return new MapScreen();
+        if (name.equals("Rain")) return new RainScreen();
         if (name.equals("Music")) return new MusicScreen();
         if (name.equals("Sports")) return new SportsScreen();
         if (name.equals("Bluetooth")) return new BtScreen();
@@ -90,6 +118,7 @@ public class LauncherScreen extends ListScreen {
         if (app == null) return null;
         String a = app.trim().toLowerCase(Locale.US);
         if (a.equals("map") || a.equals("nav")) return new MapScreen();
+        if (a.equals("rain") || a.equals("weather")) return new RainScreen();
         if (a.equals("music") || a.equals("player")) return new MusicScreen();
         if (a.equals("sports") || a.equals("sport")) return new SportsScreen();
         if (a.equals("bluetooth") || a.equals("bt")) return new BtScreen();

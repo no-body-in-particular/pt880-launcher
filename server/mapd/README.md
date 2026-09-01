@@ -88,10 +88,16 @@ worth pointing at an OSRM you run. The default is the project's demo server,
 which is explicitly not offered for production use: it rate-limits, it makes
 no uptime promise, and it sees every destination the watch is sent to.
 
-## Going back
+## There is no going back
 
-The PHP is still in `/var/www/hiawatha/map` and still works. Comment out the
-`ReverseProxy = ^/map/` line in hiawatha.conf and reload.
+This used to say the PHP was still in `/var/www/hiawatha/map` and still
+worked, and that commenting out the `ReverseProxy` line would fall back to it.
+Both halves stopped being true on 30 August, when the deployed copies were
+deleted - after a fix was made to `route.php`, deployed, and did nothing
+whatever, because that file had not answered a request in months. A fallback
+nobody exercises is not a fallback. What is left in that directory is the
+import and tile-building side, which is a different job and is not what the
+watch talks to.
 
 ## Endpoints
 
@@ -105,48 +111,74 @@ URLs compiled in, and a rename would be a flag day for no benefit.
 | `country.php` | which country covers a position, or every country present |
 | `graph.php` | a routing graph, whole or cut to a bounding box |
 | `route.php` | a route, proxied from OSRM and cached a day |
+| `rain.php` | tomorrow's rain over a box, hour by hour |
 | `health` | for checking it is up |
 
 A country need not be named: tile numbers are global, so `mapd` works out
 which database to render from by where the request is asking about.
 
-## TODO: WRT2, the roundabout exit
+## WRT2, the roundabout exit
 
-`server/map/route.php` in pt880-root gained this on 30 August (`ca8dfb8`) and **mapd did not**,
-which means it is not live: hiawatha has `ReverseProxy = ^/map/ 0
-http://127.0.0.1:8088`, so every `/map/` request the watch makes is answered
-here, and the PHP is the fallback path that nothing currently uses. A route
-fetched from the running server today is still `WRT1`.
+Done, and this section used to be a TODO saying it was not. `route_encode.rs`
+emits `WRT2` with the exit byte after the turn byte, and the cache key carries
+`.v2.bin` so the WRT1 files written before the change cannot be read back - the
+51 of those still in `tiles/routes` are unreachable by name and older than the
+one-day freshness window twice over.
 
-That matters more than a missing feature, because the launcher half has landed
-too (`1e45ff0`, "Say which exit to take at a roundabout"). A watch that expects
-WRT2 against a server still sending WRT1 reads an 11 byte step as 12: the first
-step parses, and every step after it is garbage. The compatibility note on the
-PHP commit - "the watch still reads WRT1, so a server that has not been updated
-keeps working" - covers old watch against new server, not this direction. So the
-launcher build is deliberately not published until this is done.
+Verify after a deploy with a route fetch: the first four bytes are the format,
+and the header is big-endian.
 
-The change, in `src/route_encode.rs`:
+## Rain
 
-- The steps vector is `Vec<(u8, u16, f64, f64)>` at line 58; it needs an exit
-  byte: `Vec<(u8, u8, u16, f64, f64)>`.
-- The exit is already in hand. This parses OSRM's own JSON, so alongside
-  `maneuver.type` and `maneuver.modifier` there is `maneuver.exit` - read it as
-  `m.get("exit").and_then(|v| v.as_u64()).unwrap_or(0).min(255) as u8`.
-- Take it whenever OSRM offers it rather than only for the types that map to a
-  roundabout turn code. The PHP does the same, for the reason given there: a
-  rotary that came through as a plain left is still a rotary and the number is
-  still right.
-- `b"WRT1"` becomes `b"WRT2"` at line 92, the exit byte is pushed straight after
-  the turn byte in the loop at line 97, and the capacity hint at line 91 goes
-  from `steps.len() * 11` to `* 12`.
-- The module doc at the top of the file states the layout and should say
-  `u8 turn  u8 exit  u16 metres  i32 lat  i32 lon`.
+`/rain.php` returns the next 24 hours of rain over the Netherlands as an
+animated GIF: 24 frames, an hour each, held a second apiece. `px` sets the
+width and the height follows the shape of the country -- the watch asks for
+200, a browser gets 340.
 
-If mapd caches encoded routes anywhere, the key needs a version marker for the
-same reason the PHP added `.v2.bin` - otherwise yesterday's WRT1 files keep
-being served and the exits appear whenever the cache turns over.
+That is the whole endpoint. There is no `fmt`, no position, no options. It
+briefly had four answers behind a `fmt` parameter -- a packed grid for the
+watch, a contact sheet, a text listing and an HTML page -- and they all went:
+the watch shows this same GIF, and one rendering of a forecast is one thing to
+keep working rather than four.
 
-Deploy is `cargo build --release`, `install -m755 target/release/mapd
-/usr/local/bin/mapd`, `rc-service mapd restart`. Verify with a route fetch: the
-first four bytes should read WRT2, and the header is big-endian.
+The radar everyone knows extrapolates the last few frames and is honest for
+about two hours. This is Buienradar's `rain48hour` product instead -- a weather
+model, run hourly, valid to two days -- because the question a watch is asked
+is not "is it raining" but "will it be raining when I set off".
+
+`src/rain.rs` carries the derivation: which endpoints, why the timestamps are
+UTC, and where the georeference comes from and how it was checked. The short
+version:
+
+| | |
+|---|---|
+| Frames | 24, hourly, first at run+2h |
+| Source grid | 1058x915 stretched into 54.8..49.5 N, 0..10 E, Web Mercator |
+| Answer | 340 px wide, 147 kB; at 200 px, 62 kB |
+| Held | one run, 23 MB, refreshed in the background every ten minutes |
+
+### What it costs
+
+The map under the rain is `src/netherlands-base.png`, drawn once by
+`mapd --make-base` and compiled in. Rendering it from the road store instead
+took **13 seconds** -- a country at that zoom is a couple of hundred tiles and
+each asks for the ground cover across twenty kilometres, overlapping its
+neighbours heavily -- and it had to be paid again on every restart, to draw a
+coastline that does not change between deploys. Compiled in, a cold request is
+0.19 s.
+
+Frames are written as differences: everything unchanged since the previous
+frame is left transparent and the one before shows through. The country is
+identical in all 24, so this is nearly the whole picture, and it takes the file
+from 1.7 MB to 147 kB.
+
+The palette is chosen by a quantiser rather than by counting. Counting does not
+work here: the map is scaled down by averaging, which turns 32 flat colours
+into thousands of near-identical dark ones, and those are far and away the most
+numerous -- they take the whole palette and the rain arrives grey.
+
+### Attribution
+
+Buienradar's terms for the free data ask for the source to be credited. It is
+drawn onto the frames themselves rather than served beside them, so it cannot
+be separated from the picture by saving it and sending it on.

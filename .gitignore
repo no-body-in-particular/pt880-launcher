@@ -6,3 +6,7 @@
 # pins a checksum against, and having it in the tree is how you check that the
 # published one is the one this source builds.
 build/
+
+# Cargo's build directory for server/mapd. 236 MB, entirely derived, and it
+# arrived untracked when mapd moved into this repo without anything saying so.
+server/mapd/target/
