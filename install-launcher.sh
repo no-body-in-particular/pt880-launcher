@@ -30,7 +30,7 @@ VITALSD_SHA256="9cfa0bc9c2bb13cecae985665abae04ba020e891f18decb874fb27f0f84b1d2b
 PPGD_SHA256="4a38bd1ad3f3666988280b7e7044e11579dfe4d8cfa30acc3d4f647dacb108a4"
 ADTWEAR_SHA256="0906e7bc2877f943d68315b2ed803d6e7966194fa4e2890b38c366b9d0bbeb82"
 
-APK_SHA256="e3b37ff7a2752dea020b5d5ccf3bb1b566cac9ac1468d90c923468584a64edfb"
+APK_SHA256="e41de3547d79048f81e3db11d0f1d93a3ceaaf0a6769926bb9297921bdac2122"
 
 say() { printf '\n== %s\n' "$*"; }
 die() { printf '\nerror: %s\n' "$*" >&2; exit 1; }

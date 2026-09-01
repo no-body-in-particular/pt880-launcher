@@ -197,6 +197,39 @@ final class SensorInput {
     /** What com.ic.work passes when it has no ambient reading of its own. */
     private static final double AMBIENT_C = 26.0;
 
+    /**
+     * What counts as a body temperature at all.
+     *
+     * Was duplicated in TrackerSources, which is where it was worked out: a wrist sits a few
+     * degrees above the room, so 21 passed a 20-to-45 test and was filed as a body temperature.
+     * Nothing in that band below about 34 is a person - it is the thermometer reporting the
+     * room, or a watch on a table - and reporting it as body heat is worse than reporting
+     * nothing. One copy, next to the conversion it qualifies.
+     */
+    static final float BODY_MIN = 34f, BODY_MAX = 43f;
+
+    /**
+     * A wrist reading converted to a body temperature, or 0 if it cannot be.
+     *
+     * The same conversion {@link #bodyTemperature} applies, split out for readings that arrive
+     * from somewhere other than this class. vitalsd measures the same thermopile and says so on
+     * every line it sends - "it is a wrist and not a body, so converting it is the launcher's
+     * business, not this daemon's" - and the launcher was not doing it. Every temperature from a
+     * vitals cycle went to the server as the wrist reading it was: 31 to 35 where the converted
+     * path was reporting 36 and a half, on the same watch on the same afternoon, which reads as
+     * a person getting steadily colder all day.
+     */
+    static float bodyFromWrist(double wristC) {
+        if (!LIB_OK || wristC <= 0) return 0f;
+        try {
+            double body = ICJniUtils.getBodyTempFromWristTemp(wristC, AMBIENT_C);
+            return (float) body;
+        } catch (Throwable t) {
+            Log.w(TAG, "the vendor library would not convert a wrist temperature", t);
+            return 0f;
+        }
+    }
+
     /** Whether libICJniUtils.so loaded. Checked once; a missing library is not an error here. */
     private static final boolean LIB_OK = loadLib();
 

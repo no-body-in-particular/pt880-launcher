@@ -488,7 +488,12 @@ public class TrackerService extends Service {
                     // temperature stopped being sent at all. It is a field of the reading we
                     // already have; the separate reading was always the more awkward way to get
                     // it, and this one costs nothing.
-                    if (r.temperature > 20.0 && r.temperature < 45.0) {
+                    // Already a body temperature and already ranged - OwnVitals converts the
+                    // wrist reading and publishes nothing it cannot convert - so this is the
+                    // same test rather than a looser second one. It used to be 20 to 45, which
+                    // is the band that let a wrist through in the first place.
+                    if (r.temperature >= SensorInput.BODY_MIN
+                            && r.temperature <= SensorInput.BODY_MAX) {
                         sendAsync(BeehomeCodec.health(when, JK_TEMPERATURE,
                                                       (float) r.temperature));
                     }

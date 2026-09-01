@@ -102,8 +102,20 @@ final class OwnVitals {
         int ox = field(line, "spo2rel=");
         if (ox > 0 && ox <= 100) r.oxygen = ox;
 
-        double temp = dfield(line, "temp=");
-        if (temp > 20.0 && temp < 45.0) r.temperature = temp;
+        // A wrist, converted to a body. vitalsd says so on the line it sends - it measures the
+        // thermopile and leaves the conversion here on purpose - and this did not do it, so
+        // every vitals cycle reported the wrist reading as a body temperature. Against the
+        // converted path on the same watch on the same afternoon that was 31 to 35 where the
+        // other said 36 and a half; a wrist at 33 is an ordinary wrist and a body at 33 is
+        // hypothermia, and the chart showed the second.
+        //
+        // Nothing is published when the conversion is not available. It leans on the vendor
+        // library, and a plausible-looking number arrived at by adding a constant would be the
+        // same mistake in the other direction - the offset is not constant, it is most of what
+        // the conversion is for.
+        double wrist = dfield(line, "temp=");
+        float body = SensorInput.bodyFromWrist(wrist);
+        if (body >= SensorInput.BODY_MIN && body <= SensorInput.BODY_MAX) r.temperature = body;
 
         int sbp = field(line, "sbp=");
         int dbp = field(line, "dbp=");
