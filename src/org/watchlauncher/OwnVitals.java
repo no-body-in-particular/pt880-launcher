@@ -99,7 +99,25 @@ final class OwnVitals {
         // vitalsd clamps above 100 and reports nothing below 70 - further from the baseline than
         // that is the sensor rather than the blood - and a second threshold in this file could
         // only disagree with the first.
-        int ox = field(line, "spo2rel=");
+        // spo2= if the daemon could produce one, spo2rel= otherwise.
+        //
+        // spo2= is an actual saturation now rather than a movement away from a baseline. It uses
+        // the vendor's own curve, 110 - 25R, read out of their binary - FUN_00020040 evaluates
+        // the quadratic and FUN_0001f8c0 fills its coefficients with 0, -25 and 110 - applied to
+        // the ratio averaged across passes rather than to one measurement, which is also what
+        // they do.
+        //
+        // It appears only when the pulse behind it was big enough to divide by, which on this
+        // sensor is a minority of measurements: perfusion at the wrist varies by more than a
+        // factor of ten across a day, and below about thirty counts of pulse a single ADC count
+        // moves the ratio further than a six point desaturation does. spo2rel is the fallback
+        // and says what it always said - a movement from this sensor's own recent baseline.
+        // spo2abs=, not spo2=. ppgd emits a spo2= of its own, always zero, earlier in the same
+        // line - and field() takes the first match, so reading spo2= here would have found that
+        // zero every time and silently fallen through to the relative value. The same collision
+        // wrote a sleep sample's count as the gain until yesterday.
+        int ox = field(line, "spo2abs=");
+        if (ox <= 0) ox = field(line, "spo2rel=");
         if (ox > 0 && ox <= 100) r.oxygen = ox;
 
         // A wrist, converted to a body. vitalsd says so on the line it sends - it measures the
