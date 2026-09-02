@@ -58,8 +58,18 @@ public class SleepScore {
     /** Rolling median window, in minutes. */
     private static final int MEDIAN_WINDOW_MIN = 5;
 
-    /** The shortest run of stillness that counts as a bout, in minutes. */
-    private static final int MIN_BOUT_MIN = 30;
+    /**
+     * The shortest run of stillness that counts as a bout, in minutes.
+     *
+     * Fifteen, not thirty. The method this follows uses five, and thirty was chosen here to be
+     * conservative - but conservative in one direction only: every bout it refuses is sleep that
+     * did not happen as far as the rest of the arithmetic is concerned, because the sleep period
+     * itself is bounded by the first and last bout.
+     *
+     * Measured across five nights, thirty gives 0, 0, 230, 35 and 41 minutes; fifteen gives 30,
+     * 20, 394, 269 and 504. The nights it was scoring at forty minutes were eight hours long.
+     */
+    private static final int MIN_BOUT_MIN = 15;
 
     /** Gaps shorter than this inside the sleep period are absorbed. */
     private static final int MERGE_GAP_MIN = 60;
@@ -74,6 +84,9 @@ public class SleepScore {
     private static final int WAKE_MERGE_MIN = 5;
 
     /** Threshold = 10th percentile of the angle changes, times this. */
+    /** A silence longer than this is not observation, so nothing is claimed across it. */
+    private static final int MAX_GAP_SEC = 900;
+
     private static final double THRESHOLD_SCALE = 15.0;
     private static final double THRESHOLD_MIN_DEG = 0.13;
     private static final double THRESHOLD_MAX_DEG = 0.50;
@@ -137,12 +150,26 @@ public class SleepScore {
         for (int i = 1; i < n; i++) change[i] = Math.abs(smooth[i] - smooth[i - 1]);
 
         // 4. the threshold, from the night's own distribution.
-        r.p10Deg = percentile(change, 10);
+        // Seconds, once, so every duration below is real time rather than a count of rows.
+        long[] atSec = new long[n];
+        for (int i = 0; i < n; i++) atSec[i] = epochs.get(i).at / 1000L;
+
+        // 4. the threshold, from the changes that are actually changes.
+        //
+        // The tenth percentile of every change is zero on every night measured here - a wearer is
+        // still for more than a tenth of any record, and a rolling median of a still stretch
+        // repeats exactly - so this multiplied zero by fifteen and landed on its floor every time.
+        // The adaptive step has never adapted: five nights all scored at 0.13 degrees, a figure
+        // calibrated for five-second epochs and applied to epochs of five minutes.
+        //
+        // Taking the percentile among the non-zero changes measures the same thing the method
+        // intends - how much this night's angle moves when it moves at all.
+        r.p10Deg = percentileNonZero(change, 10);
         double t = clamp(r.p10Deg * THRESHOLD_SCALE);
 
         // 5. runs of stillness long enough to be a bout.
         boolean[] still = new boolean[n];
-        List<int[]> bouts = bouts(change, still, t, minBout);
+        List<int[]> bouts = bouts(change, still, t, atSec, MIN_BOUT_MIN * 60, MAX_GAP_SEC);
 
         if (bouts.isEmpty() && t < THRESHOLD_MAX_DEG) {
             // Nothing at the strict end. Rather than report a night of no
@@ -152,7 +179,7 @@ public class SleepScore {
             // every 5 leaves more movement inside each epoch, so the floor
             // being too tight here is expected rather than surprising.
             t = THRESHOLD_MAX_DEG;
-            bouts = bouts(change, still, t, minBout);
+            bouts = bouts(change, still, t, atSec, MIN_BOUT_MIN * 60, MAX_GAP_SEC);
             r.relaxed = !bouts.isEmpty();
         }
         r.thresholdDeg = t;
@@ -163,13 +190,14 @@ public class SleepScore {
         }
 
         // 6. the sleep period, absorbing short gaps between bouts.
+        // The period runs from the first bout to the last, in time.
+        //
+        // This used to replace the period with whichever single segment was longer whenever the
+        // gap between them exceeded the merge window - so a night broken by an hour awake was
+        // reported as its bigger half, and the rest simply did not happen. Time between bouts
+        // inside the period is counted below as waking, which is what it is.
         int from = bouts.get(0)[0];
-        int to = bouts.get(0)[1];
-        for (int i = 1; i < bouts.size(); i++) {
-            int[] b = bouts.get(i);
-            if (b[0] - to <= mergeGap) to = b[1];
-            else if (b[1] - b[0] > to - from) { from = b[0]; to = b[1]; }
-        }
+        int to = bouts.get(bouts.size() - 1)[1];
 
         // Inside the period, still is sleep and moving is wake.
         int sleepEpochs = 0, wakeEpochs = 0;
@@ -185,9 +213,18 @@ public class SleepScore {
         r.valid = true;
         r.onsetAt = epochs.get(from).at;
         r.wakeAt = epochs.get(to).at;
-        r.sptMin = ((to - from + 1) * r.epochSec) / 60;
-        r.tstMin = (sleepEpochs * r.epochSec) / 60;
-        r.wasoMin = (wakeEpochs * r.epochSec) / 60;
+        // Each row stands for the time until the next one, capped so a silence is not counted as
+        // sleep. Multiplying a row count by a median gap was what made a run of six rows read as
+        // thirty minutes whether it covered thirty minutes or four hours.
+        long sleepSec = 0, wakeSec = 0;
+        for (int i = from; i <= to; i++) {
+            long span = (i < to) ? (atSec[i + 1] - atSec[i]) : r.epochSec;
+            if (span > MAX_GAP_SEC) span = MAX_GAP_SEC;
+            if (still[i]) sleepSec += span; else wakeSec += span;
+        }
+        r.sptMin = (int) ((sleepSec + wakeSec) / 60);
+        r.tstMin = (int) (sleepSec / 60);
+        r.wasoMin = (int) (wakeSec / 60);
         r.wakeups = wakeBouts;
         r.efficiencyPct = (r.sptMin > 0)
                 ? (int) Math.round(100.0 * r.tstMin / r.sptMin) : 0;
@@ -244,28 +281,51 @@ public class SleepScore {
     /** Runs of epochs below the threshold, lasting at least minBout. Fills
      *  {@code still} as it goes, since the caller needs it afterwards to tell
      *  sleep from wake inside the period. */
-    private static List<int[]> bouts(double[] change, boolean[] still,
-                                     double t, int minBout) {
+    /**
+     * Runs of stillness, measured in seconds rather than in rows.
+     *
+     * This counted rows and multiplied by a median gap, which assumes every row is the same
+     * distance from the last. They are not: the night's log now carries the recorder's bursts and
+     * the samples a measurement leaves behind, at different cadences, and even before that it had
+     * holes where the service was killed. A run of six rows was read as thirty minutes whether it
+     * covered thirty minutes or four hours.
+     *
+     * A gap longer than maxGapSec ends the run rather than being counted inside it. Nothing was
+     * observed across that silence, and a bout is a claim about what the wrist was doing.
+     */
+    private static List<int[]> bouts(double[] change, boolean[] still, double t,
+                                     long[] atSec, int minBoutSec, int maxGapSec) {
         int n = change.length;
         for (int i = 0; i < n; i++) still[i] = change[i] < t;
 
         List<int[]> out = new ArrayList<int[]>();
-        int start = -1;
-        for (int i = 0; i < n; i++) {
-            if (still[i]) {
-                if (start < 0) start = i;
-            } else if (start >= 0) {
-                if (i - start >= minBout) out.add(new int[]{start, i - 1});
-                start = -1;
-            }
+        int i = 0;
+        while (i < n) {
+            if (!still[i]) { i++; continue; }
+            int j = i;
+            while (j + 1 < n && still[j + 1] && (atSec[j + 1] - atSec[j]) <= maxGapSec) j++;
+            if (atSec[j] - atSec[i] >= minBoutSec) out.add(new int[]{i, j});
+            i = j + 1;
         }
-        if (start >= 0 && n - start >= minBout) out.add(new int[]{start, n - 1});
         return out;
     }
 
     /** The typical gap between epochs, so a night logged at a different
      *  cadence -- or with holes where the service was killed -- still scores
      *  against real time rather than an assumed 30 seconds. */
+    /** The percentile among the changes that are non-zero - see the note where this is used. */
+    static double percentileNonZero(double[] v, int pct) {
+        int n = 0;
+        for (int i = 0; i < v.length; i++) if (v[i] > 1e-9) n++;
+        if (n == 0) return 0;
+        double[] nz = new double[n];
+        n = 0;
+        for (int i = 0; i < v.length; i++) if (v[i] > 1e-9) nz[n++] = v[i];
+        Arrays.sort(nz);
+        int at = (int) Math.floor((pct / 100.0) * (nz.length - 1));
+        return nz[at];
+    }
+
     static int medianGapSec(List<SleepLog.Epoch> e) {
         int n = e.size();
         if (n < 2) return 0;

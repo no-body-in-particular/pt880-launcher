@@ -126,8 +126,51 @@ final class OwnVitals {
             r.diastolic = dbp;
         }
 
+        recordSleepSample(ctx, line);
+
         Log.i(TAG, "own measurement: " + r + "  [" + line.trim() + "]");
         return r;
+    }
+
+    /**
+     * Keep the accelerometer this measurement was already watching.
+     *
+     * The sleep recorder samples five seconds every five minutes on an alarm of its own, and only
+     * writes to the night's log in some states of its cadence machine - so the file the scorer
+     * reads holds 119 rows across a fifteen hour night, in clusters with hours between them. That
+     * is circular: rows are written once sleep is suspected and sleep is scored from the rows, so
+     * a night that starts unnoticed is never recorded to be noticed.
+     *
+     * A measurement watches the same accelerometer end to end for thirty to eighty seconds, every
+     * three minutes, and threw all of it away. Writing it costs no wakeup and no LED - it has
+     * already happened - and gives the scorer continuous coverage that does not depend on the
+     * recorder having guessed right about when the night began.
+     *
+     * The axes arrive normalised so a resting wrist reads 1.0, which is what the scorer's angle
+     * wants and what makes it independent of this driver's counts per g.
+     */
+    private static void recordSleepSample(Context ctx, String line) {
+        int n = field(line, "n=");
+        if (n <= 0) return;
+
+        double ax = dfield(line, "ax=");
+        double ay = dfield(line, "ay=");
+        double az = dfield(line, "az=");
+        double sd = dfield(line, "asd=");
+        double enmo = dfield(line, "aenmo=");
+        double range = dfield(line, "arange=");
+
+        // All three axes at zero is the buffer never being filled rather than a motionless
+        // wearer - gravity alone makes it impossible - and perfect stillness is exactly what the
+        // scorer reads as the soundest sleep there is.
+        if (ax == 0 && ay == 0 && az == 0) return;
+        if (sd < 0 || enmo < 0 || range < 0) return;
+
+        try {
+            SleepLog.append(ctx, System.currentTimeMillis(), ax, ay, az, sd, enmo, range, n);
+        } catch (Throwable t) {
+            Log.w(TAG, "could not record the sleep sample", t);
+        }
     }
 
     private static String ask(String request) {
