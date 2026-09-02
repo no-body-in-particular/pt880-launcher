@@ -150,7 +150,10 @@ final class OwnVitals {
      * wants and what makes it independent of this driver's counts per g.
      */
     private static void recordSleepSample(Context ctx, String line) {
-        int n = field(line, "n=");
+        // an=, not n=. A reading carries gain=2323, and "n=" matches inside it - so the sample
+        // count came out as the gain, which is a plausible-looking number in a column nobody
+        // reads twice. Field names here have to be ones no other field ends with.
+        int n = field(line, "an=");
         if (n <= 0) return;
 
         double ax = dfield(line, "ax=");
