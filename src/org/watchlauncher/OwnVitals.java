@@ -116,8 +116,16 @@ final class OwnVitals {
         // line - and field() takes the first match, so reading spo2= here would have found that
         // zero every time and silently fallen through to the relative value. The same collision
         // wrote a sleep sample's count as the gain until yesterday.
-        int ox = field(line, "spo2abs=");
-        if (ox <= 0) ox = field(line, "spo2rel=");
+        // spo2abs is deliberately not read.
+        //
+        // It was, and it displayed 86% for a wearer whose fingertip meter read 98 to 99 at the
+        // same moment - from three accumulated passes carrying four times the pulse the gate
+        // asks for, so not a marginal reading that slipped through. The ratio behind it moves
+        // across the whole physiological range between one pass and the next, which averaging
+        // makes steady rather than correct. vitalsd no longer emits the field unless SPO2ABS is
+        // set, and this does not look for it either: two independent places to switch it on is
+        // the right number for a figure that alarming.
+        int ox = field(line, "spo2rel=");
         if (ox > 0 && ox <= 100) r.oxygen = ox;
 
         // A wrist, converted to a body. vitalsd says so on the line it sends - it measures the
