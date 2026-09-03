@@ -84,48 +84,26 @@ final class OwnVitals {
         Vitals r = new Vitals();
         r.heartRate = bpm;
 
-        // spo2=, and nothing else.
+        // No saturation. The sensor cannot measure one and neither could the vendor.
         //
-        // Three fields used to carry this and none of them reached the chart. spo2rel= was a
-        // movement away from the sensor's own recent baseline, anchored on an assumption about a
-        // healthy adult at rest, and it needed a baseline built over many measurements before it
-        // would appear at all - in practice it never did. spo2abs= was withdrawn after displaying
-        // 86% for a wearer whose fingertip meter read 98 at the same moment. And spo2= itself was
-        // declared zero in ppgd and never assigned, so anything looking for a saturation found the
-        // zero, stopped, and published nothing. A live reply read
-        //     hr=60 ac1=117 ac2=117 r=1.015 spo2=0
-        // while this file carried four paragraphs on how to interpret a number that never arrived.
+        // Five tracking runs against a finger meter, the last with a genuine wavelength pair on the
+        // vendor's own scale, firm contact, a still wearer and a twelve point desaturation: the
+        // ratio stayed inside 0.119 and wandered independently of the wearer's breathing. The
+        // vendor's own daemon, run through the same test with their curve and their coefficients,
+        // reported exactly 98 in 189 of 196 reports.
         //
-        // There is one field now and it holds the vendor's own curve for this watch applied to our
-        // ratio. The coefficients are not fitted here: they are the host parameter block their
-        // daemon hands its library, ids 0x2030 to 0x2035, three 32-bit values at a scale of ten
-        // thousand, overriding defaults of 0, -25 and 110 that sit in their binary as three floats.
+        // The reason is in the datasheet: three LED drivers and one photodiode, and the library
+        // confirms two logic channels permuted over three physical LEDs. Wrist oximetry needs
+        // several photodiodes at different spacings to separate arterial from venous pulsation, and
+        // with one detector there are two numbers and more than two unknowns. What the ratio
+        // actually measures is a venous-and-arterial mixture: stable, repeatable to 0.004 at rest,
+        // on the right scale, and inert.
         //
-        // The gate is theirs too, and it lives in ppgd: their saturation mode will not accept a
-        // pulse below thirty-four counts, and under that a single ADC count moves the ratio further
-        // than a six point desaturation does. Both channels must clear it; otherwise the field
-        // stays zero and nothing is published, which is the behaviour that matters most here.
+        // The vendor reached the same conclusion. RUN_MODE_SPO2_DET is behind a flag that is zero
+        // on this watch and the sensor HAL only ever sends commands 4, 5 and 6, so nothing on this
+        // product has ever asked the daemon for a saturation.
         //
-        // READ THIS BEFORE TRUSTING THE NUMBER. It does not track a desaturation.
-        //
-        // Tested properly on the fixed gain loop: sixteen passes, four breath holds, the wearer
-        // still throughout, amplitudes of 80 to 120 counts against the vendor's floor of 34. A
-        // finger meter went from 99 down to 91 - eight points - and this figure sat between 96 and
-        // 98 for the whole run. The ratio moved 0.145 where following that swing needed 0.523, and
-        // its standard deviation at rest is 0.038, so a good part of even that is scatter.
-        //
-        // The conclusion needs no timing and no fitting: the meter moved eight points, the ratio
-        // had four clear chances to follow it, and it did not. No divisor or curve repairs that,
-        // because a calibration maps one number onto another and cannot make a number that does not
-        // move start moving.
-        //
-        // So what is published is a roughly constant 97 with noise on it, sitting near this
-        // wearer's resting value because the divisor was fitted to put it there. It is kept because
-        // the owner of the watch asked for it after being shown this result. It is NOT a safety
-        // signal: it will not fall when the wearer does. vitals/docs/gh3011.md has the whole trail,
-        // including why the pulse is too small to carry a ratio in the first place.
-        int ox = field(line, "spo2=");
-        if (ox > 0 && ox <= 100) r.oxygen = ox;
+        // vitals/docs/gh3011.md leads with the evidence. Do not reintroduce this field.
 
         // A wrist, converted to a body. vitalsd says so on the line it sends - it measures the
         // thermopile and leaves the conversion here on purpose - and this did not do it, so

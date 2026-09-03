@@ -605,6 +605,15 @@ public class TrackerService extends Service {
                                 .getInt(KEY_CAL_BPL, 0), 30, 200);
                         if (dia < sys) sendBatched(BeehomeCodec.bloodPressure(when, sys, dia));
                     }
+                    // No saturation is sent: OwnVitals no longer sets it and the sensor cannot
+                    // measure one. Five tracking runs against a finger meter, the last through a
+                    // twelve point desaturation with a genuine wavelength pair and firm contact,
+                    // moved the ratio not at all; the vendor's own daemon reported a flat 98
+                    // through the same test and ships the feature disabled. See
+                    // vitals/docs/gh3011.md.
+                    //
+                    // The red-and-infrared cycle that used to feed it stays, because the pressure
+                    // reading takes its pulse shape from the same pass.
                     if (r.oxygen > 0) {
                         sendBatched(BeehomeCodec.health(when, JK_OXYGEN, r.oxygen));
                     }
