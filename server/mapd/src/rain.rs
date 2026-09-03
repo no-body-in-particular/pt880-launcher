@@ -403,20 +403,48 @@ fn glyph(ch: u8) -> [u8; 7] {
     }
 }
 
-fn text(buf: &mut [u8], w: usize, h: usize, x0: usize, y0: usize, s: &str, c: [u8; 3]) {
+/// Draw `s` with the five by seven font scaled by `num`/`den`, nearest
+/// neighbour.
+///
+/// A bitmap font has no sizes in between, so a non-integer scale has to
+/// duplicate some rows and columns and not others - at 3/2, every other one.
+/// That leaves the strokes slightly uneven, which at this size reads as a
+/// heavier font rather than as a defect, and it is the only way to get a size
+/// between seven and fourteen pixels out of seven rows of bitmap without
+/// carrying a font crate for eleven glyphs.
+///
+/// At 1/1 this is exactly the original: the scaled indices reduce to the
+/// source ones and the advances to six and four.
+fn text_scaled(
+    buf: &mut [u8],
+    w: usize,
+    h: usize,
+    x0: usize,
+    y0: usize,
+    s: &str,
+    c: [u8; 3],
+    num: usize,
+    den: usize,
+) {
+    let gw = 5 * num / den;
+    let gh = 7 * num / den;
+
     let mut x = x0;
     for &ch in s.as_bytes() {
         if ch == b' ' {
-            x += 4;
+            x += 4 * num / den;
             continue;
         }
         let g = glyph(ch);
-        for (row, bits) in g.iter().enumerate() {
-            for col in 0..5 {
+        for oy in 0..gh {
+            // Back to the source row and column this output pixel came from.
+            let bits = g[(oy * den / num).min(6)];
+            for ox in 0..gw {
+                let col = (ox * den / num).min(4);
                 if bits & (1 << (4 - col)) == 0 {
                     continue;
                 }
-                let (px, py) = (x + col, y0 + row);
+                let (px, py) = (x + ox, y0 + oy);
                 if px < w && py < h {
                     let o = (py * w + px) * 3;
                     buf[o] = c[0];
@@ -425,8 +453,26 @@ fn text(buf: &mut [u8], w: usize, h: usize, x0: usize, y0: usize, s: &str, c: [u
                 }
             }
         }
-        x += 6;
+        x += 6 * num / den;
     }
+}
+
+/// Width `s` would occupy at that scale, for deciding whether it fits.
+fn text_w(s: &str, num: usize, den: usize) -> usize {
+    s.as_bytes()
+        .iter()
+        .map(|&ch| {
+            if ch == b' ' {
+                4 * num / den
+            } else {
+                6 * num / den
+            }
+        })
+        .sum()
+}
+
+fn text(buf: &mut [u8], w: usize, h: usize, x0: usize, y0: usize, s: &str, c: [u8; 3]) {
+    text_scaled(buf, w, h, x0, y0, s, c, 1, 1);
 }
 
 /// The map under the rain, drawn once and used by every panel.
@@ -586,6 +632,26 @@ fn base_image() -> &'static (Vec<u8>, usize, usize) {
 /// Averaged rather than sampled: this is always a reduction - 600 wide down to
 /// a couple of hundred - and taking one pixel in three of a road network one
 /// pixel wide drops most of it and makes the rest crawl as the size changes.
+/// Lift the stored base towards visible.
+///
+/// The base PNG was dimmed to three quarters when it was drawn, so that rain
+/// would read on top of it. That is too far for a watch: the land sits around
+/// (17,36,23) against a (6,8,12) background, under twenty levels apart, and on
+/// a small screen in daylight the country simply is not there. The whole image
+/// averages 21 of 255.
+///
+/// A gain rather than a blend towards white. A blend raises the background by
+/// as much as the land and flattens the very difference that makes a coastline
+/// readable; a gain widens it - at 2x the land goes to (34,72,46) while the
+/// background only reaches (12,16,24), so the shape gains contrast as well as
+/// brightness. Saturating because a few of the brightest pixels (the base tops
+/// out at 170) would otherwise wrap round to black.
+const BASE_GAIN: u32 = 2;
+
+fn lift(v: u32) -> u8 {
+    (v * BASE_GAIN).min(255) as u8
+}
+
 fn base_scaled(w: usize, h: usize) -> Vec<u8> {
     let (src, sw, sh) = base_image();
     let mut out = vec![0u8; w * h * 3];
@@ -606,9 +672,9 @@ fn base_scaled(w: usize, h: usize) -> Vec<u8> {
                 }
             }
             let o = (y * w + x) * 3;
-            out[o] = (r / n.max(1)) as u8;
-            out[o + 1] = (g / n.max(1)) as u8;
-            out[o + 2] = (b / n.max(1)) as u8;
+            out[o] = lift(r / n.max(1));
+            out[o + 1] = lift(g / n.max(1));
+            out[o + 2] = lift(b / n.max(1));
         }
     }
     out
@@ -648,8 +714,33 @@ fn animation(run: &Run, pw: usize, now: i64) -> Vec<u8> {
     for (i, img) in frames.iter_mut().enumerate() {
         let ahead = (run.frames[i].valid - now + 3599).div_euclid(3600).max(0);
         let lab = format!("{}Z  +{}h", hhmm(run.frames[i].valid), ahead);
+
+        // Their terms for the free data ask for the source to be credited.
+        // There is no page around this any more, so it goes on the frames -
+        // where it also cannot be separated from the data by being saved and
+        // sent on, which a line of HTML could.
+        let src = "buienradar.nl";
+        let credit = pw > src.len() * 6 + 40;
+        let credit_x = pw.saturating_sub(src.len() * 6 + 3);
+
+        // The hour is the one thing on these frames anybody actually reads, and
+        // at the source font it is seven pixels tall on a watch held at arm's
+        // length. Drawn half again the size, in plain white rather than the
+        // near-white the other labels use.
+        //
+        // Half again, not double, because the row has to keep clear of the
+        // credit: at 3/2 the longest label ("HH:MMZ  +24h") is 108px, which
+        // still fits beside the credit at the 200px the watch asks for. `px`
+        // goes down to 60 though, and there the bigger font would run straight
+        // through the credit - so anything too narrow falls back to the small
+        // one rather than overprinting.
+        let room = (if credit { credit_x } else { pw }).saturating_sub(5);
+        let (lnum, lden) = if text_w(&lab, 3, 2) <= room { (3, 2) } else { (1, 1) };
+        let lab_h = 7 * lnum / lden;
+
         // A dark bar behind it, so a white cloud underneath cannot swallow it.
-        for y in ph.saturating_sub(13)..ph {
+        // Two rows above the glyphs and four below, so it grows with the text.
+        for y in ph.saturating_sub(lab_h + 6)..ph {
             for x in 0..pw {
                 let o = (y * pw + x) * 3;
                 img[o] = img[o] / 4;
@@ -657,18 +748,14 @@ fn animation(run: &Run, pw: usize, now: i64) -> Vec<u8> {
                 img[o + 2] = img[o + 2] / 4;
             }
         }
-        text(img, pw, ph, 3, ph.saturating_sub(11), &lab, [225, 231, 245]);
+        text_scaled(img, pw, ph, 3, ph.saturating_sub(lab_h + 4), &lab,
+                    [255, 255, 255], lnum, lden);
         // Which model run this is. A forecast with no age on it cannot be
         // told from one that stopped updating three days ago.
         text(img, pw, ph, 3, 3, &format!("run {}Z", hhmm(run.run)), [120, 128, 145]);
-        // Their terms for the free data ask for the source to be credited.
-        // There is no page around this any more, so it goes on the frames -
-        // where it also cannot be separated from the data by being saved and
-        // sent on, which a line of HTML could.
-        let src = "buienradar.nl";
-        if pw > src.len() * 6 + 40 {
-            text(img, pw, ph, pw - src.len() * 6 - 3, ph.saturating_sub(11), src,
-                 [150, 158, 175]);
+        // Sat on the same baseline as the hour, whatever size that ended up.
+        if credit {
+            text(img, pw, ph, credit_x, ph.saturating_sub(11), src, [150, 158, 175]);
         }
     }
 
