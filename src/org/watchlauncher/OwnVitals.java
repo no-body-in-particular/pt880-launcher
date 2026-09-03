@@ -106,12 +106,24 @@ final class OwnVitals {
         // than a six point desaturation does. Both channels must clear it; otherwise the field
         // stays zero and nothing is published, which is the behaviour that matters most here.
         //
-        // Read it knowing what is not established. The divisor between their ratio and ours was
-        // measured against their daemon twice, and both comparisons were taken while our gain loop
-        // was hunting - which puts a DC step into both channels at once and drives the ratio
-        // towards one. So this lands in the right place on this wearer at rest, 96 to 98 against a
-        // meter reading 97 to 99, and there is no evidence yet that it tracks a change: the one
-        // attempt to test that was contaminated by the same fault. vitals/docs/gh3011.md has it all.
+        // READ THIS BEFORE TRUSTING THE NUMBER. It does not track a desaturation.
+        //
+        // Tested properly on the fixed gain loop: sixteen passes, four breath holds, the wearer
+        // still throughout, amplitudes of 80 to 120 counts against the vendor's floor of 34. A
+        // finger meter went from 99 down to 91 - eight points - and this figure sat between 96 and
+        // 98 for the whole run. The ratio moved 0.145 where following that swing needed 0.523, and
+        // its standard deviation at rest is 0.038, so a good part of even that is scatter.
+        //
+        // The conclusion needs no timing and no fitting: the meter moved eight points, the ratio
+        // had four clear chances to follow it, and it did not. No divisor or curve repairs that,
+        // because a calibration maps one number onto another and cannot make a number that does not
+        // move start moving.
+        //
+        // So what is published is a roughly constant 97 with noise on it, sitting near this
+        // wearer's resting value because the divisor was fitted to put it there. It is kept because
+        // the owner of the watch asked for it after being shown this result. It is NOT a safety
+        // signal: it will not fall when the wearer does. vitals/docs/gh3011.md has the whole trail,
+        // including why the pulse is too small to carry a ratio in the first place.
         int ox = field(line, "spo2=");
         if (ox > 0 && ox <= 100) r.oxygen = ox;
 
