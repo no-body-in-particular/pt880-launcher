@@ -84,48 +84,35 @@ final class OwnVitals {
         Vitals r = new Vitals();
         r.heartRate = bpm;
 
-        // spo2rel, not spo2, and it is already a percentage: the daemon publishes
-        // 97 - 25*(R - baseline), clamped at 100, where 97 is SPO2_ASSUMED_REST in vitalsd.c.
+        // spo2=, and nothing else.
         //
-        // It is named "rel" because of how it is arrived at rather than what it is. An absolute
-        // figure from R alone is not available - R drifted from 0.32 to 0.98 over eight hours on
-        // a motionless wrist, a threefold change in the ratio the whole method rests on - so the
-        // slow part is treated as this sensor's baseline and subtracted, and the textbook slope
-        // is applied to what is left. A fall is real and worth acting on; the anchor is an
-        // assumption about a healthy adult at rest, not a measurement of anyone's saturation.
-        // docs/vitals.md is explicit about this and the chart should be read in that light.
+        // Three fields used to carry this and none of them reached the chart. spo2rel= was a
+        // movement away from the sensor's own recent baseline, anchored on an assumption about a
+        // healthy adult at rest, and it needed a baseline built over many measurements before it
+        // would appear at all - in practice it never did. spo2abs= was withdrawn after displaying
+        // 86% for a wearer whose fingertip meter read 98 at the same moment. And spo2= itself was
+        // declared zero in ppgd and never assigned, so anything looking for a saturation found the
+        // zero, stopped, and published nothing. A live reply read
+        //     hr=60 ac1=117 ac2=117 r=1.015 spo2=0
+        // while this file carried four paragraphs on how to interpret a number that never arrived.
         //
-        // Taken at whatever the daemon publishes rather than re-checked against a range here.
-        // vitalsd clamps above 100 and reports nothing below 70 - further from the baseline than
-        // that is the sensor rather than the blood - and a second threshold in this file could
-        // only disagree with the first.
-        // spo2= if the daemon could produce one, spo2rel= otherwise.
+        // There is one field now and it holds the vendor's own curve for this watch applied to our
+        // ratio. The coefficients are not fitted here: they are the host parameter block their
+        // daemon hands its library, ids 0x2030 to 0x2035, three 32-bit values at a scale of ten
+        // thousand, overriding defaults of 0, -25 and 110 that sit in their binary as three floats.
         //
-        // spo2= is an actual saturation now rather than a movement away from a baseline. It uses
-        // the vendor's own curve, 110 - 25R, read out of their binary - FUN_00020040 evaluates
-        // the quadratic and FUN_0001f8c0 fills its coefficients with 0, -25 and 110 - applied to
-        // the ratio averaged across passes rather than to one measurement, which is also what
-        // they do.
+        // The gate is theirs too, and it lives in ppgd: their saturation mode will not accept a
+        // pulse below thirty-four counts, and under that a single ADC count moves the ratio further
+        // than a six point desaturation does. Both channels must clear it; otherwise the field
+        // stays zero and nothing is published, which is the behaviour that matters most here.
         //
-        // It appears only when the pulse behind it was big enough to divide by, which on this
-        // sensor is a minority of measurements: perfusion at the wrist varies by more than a
-        // factor of ten across a day, and below about thirty counts of pulse a single ADC count
-        // moves the ratio further than a six point desaturation does. spo2rel is the fallback
-        // and says what it always said - a movement from this sensor's own recent baseline.
-        // spo2abs=, not spo2=. ppgd emits a spo2= of its own, always zero, earlier in the same
-        // line - and field() takes the first match, so reading spo2= here would have found that
-        // zero every time and silently fallen through to the relative value. The same collision
-        // wrote a sleep sample's count as the gain until yesterday.
-        // spo2abs is deliberately not read.
-        //
-        // It was, and it displayed 86% for a wearer whose fingertip meter read 98 to 99 at the
-        // same moment - from three accumulated passes carrying four times the pulse the gate
-        // asks for, so not a marginal reading that slipped through. The ratio behind it moves
-        // across the whole physiological range between one pass and the next, which averaging
-        // makes steady rather than correct. vitalsd no longer emits the field unless SPO2ABS is
-        // set, and this does not look for it either: two independent places to switch it on is
-        // the right number for a figure that alarming.
-        int ox = field(line, "spo2rel=");
+        // Read it knowing what is not established. The divisor between their ratio and ours was
+        // measured against their daemon twice, and both comparisons were taken while our gain loop
+        // was hunting - which puts a DC step into both channels at once and drives the ratio
+        // towards one. So this lands in the right place on this wearer at rest, 96 to 98 against a
+        // meter reading 97 to 99, and there is no evidence yet that it tracks a change: the one
+        // attempt to test that was contaminated by the same fault. vitals/docs/gh3011.md has it all.
+        int ox = field(line, "spo2=");
         if (ox > 0 && ox <= 100) r.oxygen = ox;
 
         // A wrist, converted to a body. vitalsd says so on the line it sends - it measures the
