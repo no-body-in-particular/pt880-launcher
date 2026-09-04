@@ -71,12 +71,32 @@ public class SleepService extends Service implements SensorEventListener {
      *  does not close the night and split it across two files. */
     private static final int STOP_AFTER_MOVING_MIN = 20;
 
-    /** Below this the wrist is not doing anything. ENMO is the vector
-     *  magnitude less one g: sensor noise on a still wrist sits well under
-     *  this, sitting at a desk is around it, walking is many times it.
-     *  A guess until a real night says otherwise, which is why the watcher
-     *  keeps its own log. */
-    private static final double STILL_ENMO = 0.015;
+    /**
+     * Below this the wrist is not doing anything. ENMO is the vector magnitude less one g:
+     * sensor noise on a still wrist sits well under this, sitting at a desk is around it, walking
+     * is many times it.
+     *
+     * This was 0.015 and described as a guess until a real night said otherwise. Two nights and
+     * the days around them have now said so. Sleeping, this wrist reads a median ENMO of about
+     * 0.001; awake and about, 0.010 to 0.030. 0.015 sits inside the waking range rather than
+     * between the two, so it called 64% of waking epochs still - and a stillness run that only
+     * has to survive thirty minutes then completes in the middle of an afternoon. Replayed over
+     * 2-3 September it did exactly that five times: 13:32, 16:41, 17:34, 10:00 and 16:29.
+     *
+     * That is the failure the pulse margin was added to catch, and the pulse can only catch it
+     * when there is a pulse - without one the bar is thirty minutes of stillness and nothing
+     * else. Moving the threshold treats the cause instead:
+     *
+     *     0.015    5 daytime onsets    keeps 96.7% of known sleep epochs
+     *     0.010    2                   96.7%
+     *     0.005    0                   95.6%
+     *     0.003    0                   94.4%
+     *
+     * 0.005 is the loosest value that produces none, and gives up a point of sleep to get there.
+     * Overnight onsets still fire fifteen times across the two nights, so nothing is being
+     * starved of chances to start.
+     */
+    private static final double STILL_ENMO = 0.005;
 
     /**
      * And the arm may not have changed angle by more than this, when the question is meaningful.
