@@ -200,6 +200,22 @@ if javac -nowarn -d "$TD2" "$HERE/src/org/watchlauncher/Circadian.java" 2>/dev/n
 fi
 rm -rf "$TD2"
 
+# When stillness becomes sleep and when movement ends it. SleepRules touches no Android class
+# so the cases that cost whole nights - an afternoon of sitting scored as a night, a night that
+# started and never ended - can be driven here instead of found one night at a time.
+TD_SLEEP=$(mktemp -d)
+if javac -nowarn -d "$TD_SLEEP" "$HERE/src/org/watchlauncher/SleepRules.java" 2>/dev/null \
+   && javac -nowarn -cp "$TD_SLEEP" -d "$TD_SLEEP" "$HERE/test/SleepRulesTest.java" 2>/dev/null; then
+    if ! java -cp "$TD_SLEEP" SleepRulesTest > "$TD_SLEEP/out"; then
+        echo "sleep rules test FAILED:" >&2
+        cat "$TD_SLEEP/out" >&2
+        rm -rf "$TD_SLEEP"
+        exit 1
+    fi
+    tail -1 "$TD_SLEEP/out"
+fi
+rm -rf "$TD_SLEEP"
+
 # Speed and time to arrival. Drive touches no Android class so that the cases
 # that actually bite - stopped at a light, a fix that teleports, the watch
 # waking an hour later - can be driven here rather than discovered on a road.
