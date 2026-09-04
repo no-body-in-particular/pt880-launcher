@@ -565,7 +565,7 @@ public class SleepService extends Service implements SensorEventListener {
         if (!still && run >= needed) {
             SleepLog.setState(this, SleepLog.WATCHING);
             sendFlag(0, now);
-            scoreAndSend();
+            scoreAndSend(now);
             return WATCH_INTERVAL_MS;
         }
         SleepLog.setRun(this, run);
@@ -604,17 +604,40 @@ public class SleepService extends Service implements SensorEventListener {
     /** Score the night that just ended and push it to the tracker server, on
      *  its own thread -- this reads a file, runs a rolling median over it and
      *  then opens a socket, none of which belongs in a service callback. */
-    private void scoreAndSend() {
+    private void scoreAndSend(final long wokeAt) {
         final Context ctx = getApplicationContext();
         new Thread(new Runnable() {
             public void run() {
                 try {
-                    String night = SleepLog.latestNight();
-                    if (night == null) return;
+                    // The night that just ended, not whichever file sorts highest.
+                    //
+                    // latestNight() takes the largest name in the directory, which is only the
+                    // night that ended if nothing later exists. An afternoon nap writes a file
+                    // named for today while a night that ended this morning is named for
+                    // yesterday, so the nap wins and this morning's night is never scored - and
+                    // once lastScored moves past it, never will be. The wake moment names its own
+                    // night and needs no guessing.
+                    String night = SleepLog.nightOf(wokeAt);
                     if (night.equals(SleepLog.lastScored(ctx))) return;
 
                     java.util.List<SleepLog.Epoch> epochs = SleepLog.read(night);
-                    int minutes = (epochs.size() * (int) (INTERVAL_MS / 1000)) / 60;
+                    if (epochs.size() < 2) return;
+
+                    // How much time the epochs actually cover, not how much they would cover if
+                    // none had been missed.
+                    //
+                    // This counted every epoch as INTERVAL_MS, which is what the logger asks for
+                    // and not what it gets: bursts are dropped when the accelerometer hands back
+                    // an empty buffer or one of our own measurements has the daemon, and last
+                    // night's file came out at a median gap of about two minutes rather than
+                    // thirty seconds. At that spacing the estimate is four times short, so a real
+                    // hundred-minute night reads as twenty-five and is discarded as a nap.
+                    //
+                    // The span between the first and last epoch cannot drift that way, and it is
+                    // the same quantity the scorer works in - it takes its own epoch length from
+                    // the median gap rather than assuming one.
+                    long span = epochs.get(epochs.size() - 1).at - epochs.get(0).at;
+                    int minutes = (int) (span / 60000L);
                     if (minutes < MIN_SCORABLE_MIN) return;   // a nap, not a night
 
                     SleepScore.Result r = SleepScore.score(epochs);
