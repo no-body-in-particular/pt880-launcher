@@ -27,10 +27,6 @@ public class BootReceiver extends BroadcastReceiver {
         // every alarm it owned, so the server's alarm clocks need putting back either way.
         AlarmClock.rearm(c);
 
-        // Also above the sleep-logging check, and for the same reason: the music sync daemon
-        // is nothing to do with sleep, and a reboot is the only thing that ever stops it.
-        MusicSync.start(c);
-
         if (!SleepLog.enabled(c)) return;
 
         boolean rebooted = in == null || in.getAction() == null

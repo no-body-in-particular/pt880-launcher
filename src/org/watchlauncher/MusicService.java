@@ -97,11 +97,11 @@ public class MusicService extends Service
      * Re-read the library and report where {@code stay} ended up, or -1 if it
      * is no longer there.
      *
-     * musicsync rewrites /sdcard/Music while this service is running -- that is
-     * its whole job -- so an index into the previous scan means nothing once it
-     * has. The file is the only thing worth carrying across a scan, and every
-     * reload goes through here so the track someone is listening to stays under
-     * the cursor even when the list around it moved.
+     * Files under /sdcard/Music are added and removed while this service is
+     * running, so an index into the previous scan means nothing afterwards. The
+     * file is the only thing worth carrying across a scan, and every reload goes
+     * through here so the track someone is listening to stays under the cursor
+     * even when the list around it moved.
      */
     private int reload(Library.Track stay) {
         String path = (stay == null) ? null : stay.file.getAbsolutePath();
@@ -130,8 +130,8 @@ public class MusicService extends Service
 
     /**
      * A track would not open. Re-read the library first, because the usual
-     * reason on this watch is that musicsync deleted the file while its name
-     * was still on screen, and then move on -- but only when the file really
+     * reason on this watch is that the file went away while its name was still
+     * on screen, and then move on -- but only when it really
      * has gone. Skipping on every error would run through the whole folder in
      * a second the first time a decoder simply disliked something, so a track
      * that is still on disk stops here and says so.
@@ -214,9 +214,9 @@ public class MusicService extends Service
     }
 
     /**
-     * Skipping is the other moment the library gets re-read. musicsync may
-     * have added or removed tracks since the last scan, and the entire point
-     * of a skip is to land on something that is actually there.
+     * Skipping is the other moment the library gets re-read. Tracks may have
+     * been added or removed since the last scan, and the entire point of a
+     * skip is to land on something that is actually there.
      */
     public void next() {
         Library.Track from = current();
