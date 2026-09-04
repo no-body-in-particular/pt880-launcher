@@ -515,7 +515,27 @@ public class SleepService extends Service implements SensorEventListener {
             int needSecs = (pulseKnown ? START_AFTER_STILL_MIN
                                        : START_AFTER_STILL_MIN_NO_BPM) * 60;
 
-            if (still && held >= needSecs && (!pulseKnown || pulseSaysSleep)) {
+            boolean ready = still && held >= needSecs && (!pulseKnown || pulseSaysSleep);
+
+            // A watch on a bedside table is the stillest thing in the house.
+            //
+            // With a pulse to hand there is nothing to check: a rate is proof of a wrist. Without
+            // one this was thirty minutes of stillness and nothing else, which a watch that has
+            // been taken off satisfies perfectly and forever - and taking it off is exactly the
+            // thing people do at the end of a night, so the failure lands where it does the most
+            // damage. This wearer's own log has the case: the watch came off at 08:08 and went
+            // back on at 08:28, twenty minutes that look like flawless sleep from the
+            // accelerometer alone.
+            //
+            // So ask the sensor, but only here - the check costs a second and lights the LED, and
+            // this is the one branch where the answer changes anything. A detector that cannot
+            // answer returns -1, and that is not evidence of an empty wrist, so it passes.
+            if (ready && !pulseKnown && OwnVitals.worn(this) == 0) {
+                Log.i(TAG, "still for " + (held / 60) + " min but the watch is off the wrist; not sleep");
+                ready = false;
+            }
+
+            if (ready) {
                 Log.i(TAG, "asleep: " + (held / 60) + " min still"
                         + (pulseKnown ? ", pulse " + bpm + " against a resting " + resting
                                       : ", no recent pulse so the long bout was required"));
