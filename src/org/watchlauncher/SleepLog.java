@@ -259,6 +259,22 @@ public class SleepLog {
      * stability and the regularity index are about how alike the days are,
      * and a single day is alike to nothing.
      */
+    /**
+     * A night's own log, and not the watcher's.
+     *
+     * Both live in this directory and both end in .csv, and every enumeration here used to take
+     * the lot. That is not a near miss: "watch-" begins with a letter and a night begins with a
+     * digit, so a watcher file sorts above every real night and latestNight returned one every
+     * single time. The scorer has never once been handed an actual night.
+     *
+     * What it scored instead was a file of five-minute watcher bursts, which is why a night came
+     * out as thirty minutes and why sleepScoreSent reads "watch-2026-09-01" - a night id with a
+     * prefix in it, which was the visible symptom for weeks.
+     */
+    private static boolean isNightFile(String name) {
+        return name.endsWith(".csv") && !name.startsWith("watch-");
+    }
+
     public static java.util.List<String> recentNights(int want) {
         java.util.List<String> out = new java.util.ArrayList<String>();
         File[] kids = new File(DIR).listFiles();
@@ -266,7 +282,7 @@ public class SleepLog {
         java.util.List<String> names = new java.util.ArrayList<String>();
         for (int i = 0; i < kids.length; i++) {
             String n = kids[i].getName();
-            if (n.endsWith(".csv")) names.add(n.substring(0, n.length() - 4));
+            if (isNightFile(n)) names.add(n.substring(0, n.length() - 4));
         }
         java.util.Collections.sort(names);
         int from = Math.max(0, names.size() - want);
@@ -282,7 +298,7 @@ public class SleepLog {
         String best = null;
         for (int i = 0; i < kids.length; i++) {
             String n = kids[i].getName();
-            if (!n.endsWith(".csv")) continue;
+            if (!isNightFile(n)) continue;
             String night = n.substring(0, n.length() - 4);
             if (best == null || night.compareTo(best) > 0) best = night;
         }
