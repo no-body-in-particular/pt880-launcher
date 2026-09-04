@@ -125,6 +125,20 @@ public class SleepRulesTest {
         check("and cannot take it below zero",
                 SleepRules.moved(10, 300, true) == 0, "");
 
+        // --- the pulse gate must sit above the sleeping range, not inside the waking one -----
+        // Measured on this wearer: asleep median 48, awake and sedentary median 54. A margin of
+        // 8 on a resting estimate of 47.5 puts the gate at 55.5, which passes both.
+        check("a sleeping pulse passes the gate",
+                SleepRules.pulseSaysSleep(48, 47), "median asleep against resting 47");
+        check("a sedentary waking pulse does not",
+                !SleepRules.pulseSaysSleep(54, 47), "median awake against resting 47");
+        check("the old margin of 8 would have passed it",
+                54 <= 47 + 8, "which is why it was 62% wrong");
+        check("no pulse cannot answer the question",
+                !SleepRules.pulseSaysSleep(0, 47), "");
+        check("no resting estimate cannot either",
+                !SleepRules.pulseSaysSleep(48, 0), "");
+
         System.out.println(fails == 0 ? "sleep rules: all checks passed"
                                       : "sleep rules: " + fails + " FAILED");
         if (fails > 0) System.exit(1);

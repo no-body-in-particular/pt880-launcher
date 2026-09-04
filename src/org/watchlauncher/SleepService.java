@@ -101,17 +101,8 @@ public class SleepService extends Service implements SensorEventListener {
      */
     private static final long CONFIRM_INTERVAL_MS = 30000;
 
-    /**
-     * How close to its owner's resting pulse a wrist has to be before stillness counts as sleep.
-     *
-     * Stillness alone is not sleep-specific and never was. The watcher's own log caught it
-     * declaring sleep at 14:40 on an afternoon, which is what became a "35 minute night" on the
-     * server: sitting still after lunch looks exactly like sleeping to an accelerometer.
-     *
-     * A pulse tells them apart, and there is now a verified one every three minutes. Asleep this
-     * wrist reads 51-55; sedentary and awake it reads 60-85. The margin sits inside that gap.
-     */
-    private static final int SLEEP_BPM_MARGIN = 8;
+    /** How close to its owner's resting pulse a wrist must be before stillness counts as sleep -
+     *  see {@link SleepRules#SLEEP_BPM_MARGIN}, which carries the measurements behind the value. */
 
     /** A pulse older than this says nothing about what the wrist is doing now. */
     private static final long BPM_FRESH_MS = 12 * 60 * 1000;
@@ -505,7 +496,7 @@ public class SleepService extends Service implements SensorEventListener {
             int bpm = TrackerLog.recentBpm(this, fresh);
             int resting = SleepLog.restingBpm(this);
             boolean pulseKnown = bpm > 0 && resting > 0;
-            boolean pulseSaysSleep = pulseKnown && bpm <= resting + SLEEP_BPM_MARGIN;
+            boolean pulseSaysSleep = SleepRules.pulseSaysSleep(bpm, resting);
             int needSecs = (pulseKnown ? START_AFTER_STILL_MIN
                                        : START_AFTER_STILL_MIN_NO_BPM) * 60;
 
@@ -583,7 +574,7 @@ public class SleepService extends Service implements SensorEventListener {
         {
             int wakeBpm = TrackerLog.recentBpm(this, BPM_FRESH_MS);
             int wakeResting = SleepLog.restingBpm(this);
-            if (wakeBpm > 0 && wakeResting > 0 && wakeBpm > wakeResting + SLEEP_BPM_MARGIN)
+            if (wakeBpm > 0 && wakeResting > 0 && !SleepRules.pulseSaysSleep(wakeBpm, wakeResting))
                 needed = needed / 2;
         }
 

@@ -42,6 +42,39 @@ public final class SleepRules {
      *  watcher's own interval: the wrist may have been off, or the alarm delayed. */
     public static final int STEP_CAP_SEC = 300;
 
+    /**
+     * How far above its resting rate a pulse may sit and still be sleep.
+     *
+     * This was 8, on a comment reading "asleep this wrist reads 51-55; sedentary and awake it
+     * reads 60-85". Measured against a wearer who called out their own times, neither range is
+     * right: asleep is 44-72 with a median of 48, awake and sedentary is 43-103 with a median of
+     * 54. The two overlap heavily and the gap the margin was sized for is not there.
+     *
+     * With the resting estimate at 47.5, a margin of 8 puts the gate at 55.5 - inside the waking
+     * range rather than above it, so it admitted almost everything:
+     *
+     *     margin  gate   sleep passes   waking wrongly passes
+     *        4    51.5      81%              37%
+     *        5    52.5      86%              42%
+     *        8    55.5      95%              62%
+     *
+     * Five, because the check is not one-shot: it is asked again on every burst for as long as
+     * the wrist stays still, so a reading that fails delays an onset rather than losing a night,
+     * while one that wrongly passes starts an afternoon that runs for hours. And it is a second
+     * line now - with the stillness threshold corrected no daytime onset survives to reach this
+     * test at all - so it is worth keeping honest rather than loose.
+     */
+    public static final int SLEEP_BPM_MARGIN = 5;
+
+    /**
+     * Whether a pulse is close enough to its resting rate for stillness to be sleep.
+     * A rate or a resting estimate of zero means the question cannot be asked.
+     */
+    public static boolean pulseSaysSleep(int bpm, int restingBpm) {
+        if (bpm <= 0 || restingBpm <= 0) return false;
+        return bpm <= restingBpm + SLEEP_BPM_MARGIN;
+    }
+
     private SleepRules() { }
 
     /**
