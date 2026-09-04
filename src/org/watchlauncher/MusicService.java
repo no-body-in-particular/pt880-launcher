@@ -42,6 +42,10 @@ public class MusicService extends Service
     private int index = 0;
     private boolean playing = false;
     private String note = "";
+    /** Consecutive tracks that would not open. Bounds the skipping that a
+     *  folder emptied out under us would otherwise turn into a run through the
+     *  whole library. The first track that plays resets it. */
+    private int loadFailures = 0;
     private Listener listener;
     private PowerManager.WakeLock wake;
     private AudioManager audio;
@@ -82,12 +86,78 @@ public class MusicService extends Service
     // ---- library ----------------------------------------------------------
 
     public void rescan() {
-        int keep = index;
-        tracks = Library.scan();
-        if (keep >= tracks.size()) keep = 0;
-        index = keep;
+        int at = reload(current());
+        index = (at >= 0) ? at : 0;
+        if (index >= tracks.size()) index = 0;
         note = tracks.isEmpty() ? "No music found" : "";
         changed();
+    }
+
+    /**
+     * Re-read the library and report where {@code stay} ended up, or -1 if it
+     * is no longer there.
+     *
+     * musicsync rewrites /sdcard/Music while this service is running -- that is
+     * its whole job -- so an index into the previous scan means nothing once it
+     * has. The file is the only thing worth carrying across a scan, and every
+     * reload goes through here so the track someone is listening to stays under
+     * the cursor even when the list around it moved.
+     */
+    private int reload(Library.Track stay) {
+        String path = (stay == null) ? null : stay.file.getAbsolutePath();
+        tracks = Library.scan();
+        if (path != null) {
+            for (int i = 0; i < tracks.size(); i++) {
+                if (tracks.get(i).file.getAbsolutePath().equals(path)) return i;
+            }
+        }
+        return -1;
+    }
+
+    private Library.Track current() {
+        if (index < 0 || index >= tracks.size()) return null;
+        return tracks.get(index);
+    }
+
+    /** The library emptied out underneath us. */
+    private void noMusic() {
+        index = 0;
+        note = "No music found";
+        playing = false;
+        release();
+        changed();
+    }
+
+    /**
+     * A track would not open. Re-read the library first, because the usual
+     * reason on this watch is that musicsync deleted the file while its name
+     * was still on screen, and then move on -- but only when the file really
+     * has gone. Skipping on every error would run through the whole folder in
+     * a second the first time a decoder simply disliked something, so a track
+     * that is still on disk stops here and says so.
+     */
+    private void onLoadFailed(Library.Track failed) {
+        int was = index;
+        int at = reload(failed);
+
+        if (tracks.isEmpty()) { noMusic(); return; }
+
+        if (at >= 0) {                 // still on disk: a real decode problem
+            index = at;
+            changed();
+            return;
+        }
+
+        if (++loadFailures > tracks.size()) {
+            loadFailures = 0;
+            note = "Nothing here will play";
+            changed();
+            return;
+        }
+
+        // Gone. The slot it used to hold is the closest thing to "where we
+        // were" that survived the scan.
+        playIndex(was);
     }
 
     public List<Library.Track> tracks() { return tracks; }
@@ -143,16 +213,34 @@ public class MusicService extends Service
         changed();
     }
 
-    public void next() { if (!tracks.isEmpty()) playIndex(index + 1); }
+    /**
+     * Skipping is the other moment the library gets re-read. musicsync may
+     * have added or removed tracks since the last scan, and the entire point
+     * of a skip is to land on something that is actually there.
+     */
+    public void next() {
+        Library.Track from = current();
+        int was = index;
+        int at = reload(from);
+        if (tracks.isEmpty()) { noMusic(); return; }
+        playIndex(at < 0 ? was : at + 1);
+    }
+
     public void prev() {
-        if (tracks.isEmpty()) return;
-        if (position() > 3000) { playIndex(index); return; }   // restart current first
-        playIndex(index - 1);
+        Library.Track from = current();
+        int was = index;
+        // Restarting the track already playing is not a skip, and scanning the
+        // card to do it would be a scan for nothing.
+        if (position() > 3000 && from != null) { playIndex(was); return; }
+        int at = reload(from);
+        if (tracks.isEmpty()) { noMusic(); return; }
+        playIndex(at < 0 ? was : at - 1);
     }
 
     private void openAndStart() {
         release();
-        Library.Track t = tracks.get(index);
+        Library.Track t = current();
+        if (t == null) { noMusic(); return; }
         try {
             mp = new MediaPlayer();
             mp.setAudioStreamType(AudioManager.STREAM_MUSIC);
@@ -166,10 +254,15 @@ public class MusicService extends Service
             wake.acquire();
             audio.registerMediaButtonEventReceiver(mediaButtons);
             updateNotification();
+            loadFailures = 0;
         } catch (Exception e) {
             note = "Cannot play " + t.title;
             playing = false;
             release();
+            // Most likely the file is simply not there any more. onLoadFailed
+            // re-reads the library and reports the result, so nothing below.
+            onLoadFailed(t);
+            return;
         }
         changed();
     }
@@ -184,10 +277,11 @@ public class MusicService extends Service
     public void onCompletion(MediaPlayer m) { next(); }
 
     public boolean onError(MediaPlayer m, int what, int extra) {
+        Library.Track t = current();
         note = "Decode error";
         release();
         playing = false;
-        changed();
+        onLoadFailed(t);
         return true;
     }
 
