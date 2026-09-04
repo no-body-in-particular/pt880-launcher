@@ -556,12 +556,45 @@ public class SleepService extends Service implements SensorEventListener {
             return still ? CONFIRM_INTERVAL_MS : WATCH_INTERVAL_MS;
         }
 
-        int run = still ? 0 : SleepLog.run(this) + 1;
+        // Seconds of movement, not a count of bursts - the same correction the onset test above
+        // already carries, and for the same reason.
+        //
+        // This was `still ? 0 : run + 1` against a bar of forty, which is twenty minutes only if a
+        // burst really arrives every thirty seconds. It does not. Bursts are dropped when the
+        // accelerometer returns an empty buffer or one of our own measurements has the daemon, and
+        // by day that is most of them: last night's file holds 31 epochs in the 05:00 hour and 11
+        // in the 08:00 one. At eleven an hour, forty bursts is three and a half hours.
+        //
+        // And they must be consecutive, which no waking morning is - sitting down to eat or read
+        // lands a still burst and the count returns to nought. Between the two the night never
+        // closed at all: 381 epochs spread from noon to noon at a median gap of two minutes, which
+        // is the fine cadence running all day for 3.2 hours of sleep, at about a sixth of the
+        // processor against a sixtieth for watching.
+        //
+        // So accumulate time, credit a gap only as far as the watcher's own interval, and let
+        // stillness pay it back rather than erase it. Replayed over last night this closes at
+        // 08:50, against a wearer who took the watch off at 08:08.
+        int step = (int) (Math.min(sinceLast, WATCH_INTERVAL_MS) / 1000);
+        int run = still ? Math.max(0, SleepLog.run(this) - step)
+                        : SleepLog.run(this) + step;
 
         // Logging. Every burst is kept, movement or not -- the scorer needs
         // the wake epochs as much as the sleep ones to measure WASO.
         SleepLog.append(this, now, mx, my, mz, sd, enmo, range, samples);
-        int needed = (STOP_AFTER_MOVING_MIN * 60) / (int) (INTERVAL_MS / 1000);
+        int needed = STOP_AFTER_MOVING_MIN * 60;
+
+        // A pulse that has left its resting range is the surer signal of the two.
+        //
+        // Starting a night asks the pulse whether stillness really is sleep; ending one did not
+        // ask at all, which left the accelerometer to decide alone in exactly the case it is
+        // worst at. When the rate says plainly awake, half the movement is enough.
+        {
+            int wakeBpm = TrackerLog.recentBpm(this, BPM_FRESH_MS);
+            int wakeResting = SleepLog.restingBpm(this);
+            if (wakeBpm > 0 && wakeResting > 0 && wakeBpm > wakeResting + SLEEP_BPM_MARGIN)
+                needed = needed / 2;
+        }
+
         if (!still && run >= needed) {
             SleepLog.setState(this, SleepLog.WATCHING);
             sendFlag(0, now);
@@ -633,11 +666,21 @@ public class SleepService extends Service implements SensorEventListener {
                     // thirty seconds. At that spacing the estimate is four times short, so a real
                     // hundred-minute night reads as twenty-five and is discarded as a nap.
                     //
-                    // The span between the first and last epoch cannot drift that way, and it is
-                    // the same quantity the scorer works in - it takes its own epoch length from
-                    // the median gap rather than assuming one.
-                    long span = epochs.get(epochs.size() - 1).at - epochs.get(0).at;
-                    int minutes = (int) (span / 60000L);
+                    // The plain span from first to last epoch is not it either. A night file runs
+                    // noon to noon by construction, so an afternoon nap and the small hours land
+                    // in the same one, and the span then includes the whole evening between them.
+                    //
+                    // So add up the gaps and cap each at the watcher's own interval. A dropped
+                    // burst is credited the few minutes it really was, and the hours between two
+                    // separate bouts are credited five - the same cap and the same reasoning the
+                    // stillness accumulator uses, where a gap is not evidence of anything.
+                    long covered = 0;
+                    for (int i = 1; i < epochs.size(); i++) {
+                        long gap = epochs.get(i).at - epochs.get(i - 1).at;
+                        if (gap < 0) continue;
+                        covered += Math.min(gap, WATCH_INTERVAL_MS);
+                    }
+                    int minutes = (int) (covered / 60000L);
                     if (minutes < MIN_SCORABLE_MIN) return;   // a nap, not a night
 
                     SleepScore.Result r = SleepScore.score(epochs);
