@@ -469,7 +469,9 @@ public class SleepService extends Service implements SensorEventListener {
         SleepLog.setLastAngle(this, angle);
 
         if (state == SleepLog.WATCHING) {
-            SleepLog.appendWatch(this, now, mx, my, mz, sd, enmo, range, samples);
+            SleepLog.appendWatch(this, now, mx, my, mz, sd, enmo, range, samples,
+                    TrackerLog.recentBpm(this, BPM_FRESH_MS),
+                    TrackerLog.recentTemp(this, BPM_FRESH_MS));
 
             // Seconds of stillness rather than a count of bursts, because the cadence changes
             // underneath it: six bursts means half an hour at the coarse rate and three minutes
@@ -563,7 +565,9 @@ public class SleepService extends Service implements SensorEventListener {
 
         // Logging. Every burst is kept, movement or not -- the scorer needs
         // the wake epochs as much as the sleep ones to measure WASO.
-        SleepLog.append(this, now, mx, my, mz, sd, enmo, range, samples);
+        SleepLog.append(this, now, mx, my, mz, sd, enmo, range, samples,
+                TrackerLog.recentBpm(this, BPM_FRESH_MS),
+                TrackerLog.recentTemp(this, BPM_FRESH_MS));
         int needed = STOP_AFTER_MOVING_MIN * 60;
 
         // A pulse that has left its resting range is the surer signal of the two.

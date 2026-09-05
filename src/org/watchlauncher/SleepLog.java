@@ -18,7 +18,7 @@ import java.util.Locale;
  * The overnight accelerometer log: one file a night, one line every burst.
  *
  * <pre>
- * millis,meanX,meanY,meanZ,sdMag,enmo,range,samples
+ * millis,meanX,meanY,meanZ,sdMag,enmo,range,samples,bpm,tempC
  * </pre>
  *
  * Axes are in g, already averaged over the burst. More is recorded than the
@@ -68,6 +68,19 @@ public class SleepLog {
         public double x, y, z;
         public double sd, enmo, range;
         public int samples;
+
+        /** The most recent measured pulse, or 0 if none was fresh enough to attach.
+         *
+         * Not measured for the log - it is whatever the vitals path last recorded, which is
+         * free to read. Written because every question worth asking of a night needs it and it
+         * was not here: checking the pulse gate, or telling deep sleep from light, meant
+         * scraping the rate off the tracker's own charts and re-aligning it by timestamp. */
+        public int bpm;
+
+        /** The last body temperature measured, or 0 if none was fresh. Skin temperature falls
+         *  through the night and rises before waking, which is a sleep signal nothing here
+         *  reads yet - and could not, while it was not being written down. */
+        public double tempC;
 
         /** The arm's angle to the horizontal, which is what van Hees's method
          *  watches for change in. */
@@ -327,8 +340,8 @@ public class SleepLog {
 
     public static synchronized void append(Context c, long at,
             double x, double y, double z, double sd, double enmo,
-            double range, int samples) {
-        appendTo(fileFor(nightOf(at)), at, x, y, z, sd, enmo, range, samples);
+            double range, int samples, int bpm, double tempC) {
+        appendTo(fileFor(nightOf(at)), at, x, y, z, sd, enmo, range, samples, bpm, tempC);
     }
 
     /**
@@ -343,14 +356,14 @@ public class SleepLog {
      */
     public static synchronized void appendWatch(Context c, long at,
             double x, double y, double z, double sd, double enmo,
-            double range, int samples) {
+            double range, int samples, int bpm, double tempC) {
         appendTo(new File(DIR, "watch-" + nightOf(at) + ".csv"),
-                at, x, y, z, sd, enmo, range, samples);
+                at, x, y, z, sd, enmo, range, samples, bpm, tempC);
     }
 
     private static synchronized void appendTo(File f, long at,
             double x, double y, double z, double sd, double enmo,
-            double range, int samples) {
+            double range, int samples, int bpm, double tempC) {
         FileWriter w = null;
         try {
             File dir = new File(DIR);
@@ -358,13 +371,13 @@ public class SleepLog {
             boolean fresh = !f.exists();
             w = new FileWriter(f, true);
             if (fresh) {
-                w.write("# millis,meanX,meanY,meanZ,sdMag,enmo,range,samples"
+                w.write("# millis,meanX,meanY,meanZ,sdMag,enmo,range,samples,bpm,tempC"
                         + "  (g, burst means)\n");
             }
             w.write(at + ","
                     + fmt(x) + "," + fmt(y) + "," + fmt(z) + ","
                     + fmt(sd) + "," + fmt(enmo) + "," + fmt(range) + ","
-                    + samples + "\n");
+                    + samples + "," + bpm + "," + fmt(tempC) + "\n");
         } catch (Exception e) {
             // A night with a hole in it is still worth scoring; losing the
             // whole log because one write failed is not.
@@ -402,6 +415,9 @@ public class SleepLog {
                     e.enmo = Double.parseDouble(p[5]);
                     e.range = Double.parseDouble(p[6]);
                     e.samples = Integer.parseInt(p[7].trim());
+                    // Older nights have no pulse column; 0 reads as "not known" either way.
+                    e.bpm = (p.length > 8) ? Integer.parseInt(p[8].trim()) : 0;
+                    e.tempC = (p.length > 9) ? Double.parseDouble(p[9].trim()) : 0;
                     out.add(e);
                 } catch (Exception ex) {
                     /* one malformed line does not spoil the night */

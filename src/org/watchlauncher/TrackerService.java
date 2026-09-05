@@ -633,6 +633,10 @@ public class TrackerService extends Service {
                             && r.temperature <= BodyTemp.PERSON_MAX_C) {
                         sendBatched(BeehomeCodec.health(when, JK_TEMPERATURE,
                                                       (float) r.temperature));
+                        // Kept as well as sent, so the sleep log can carry it without paying
+                        // eight seconds for a reading of its own - see TrackerLog.recentTemp.
+                        TrackerLog.recordTemp(TrackerService.this, r.temperature,
+                                System.currentTimeMillis());
                     }
                 } catch (Throwable t) {
                     Log.w(TAG, "vitals measurement failed", t);

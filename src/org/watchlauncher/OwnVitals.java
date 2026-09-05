@@ -173,7 +173,9 @@ final class OwnVitals {
         if (sd < 0 || enmo < 0 || range < 0) return;
 
         try {
-            SleepLog.append(ctx, System.currentTimeMillis(), ax, ay, az, sd, enmo, range, n);
+            SleepLog.append(ctx, System.currentTimeMillis(), ax, ay, az, sd, enmo, range, n,
+                    TrackerLog.recentBpm(ctx, 12 * 60 * 1000L),
+                    TrackerLog.recentTemp(ctx, 12 * 60 * 1000L));
         } catch (Throwable t) {
             Log.w(TAG, "could not record the sleep sample", t);
         }

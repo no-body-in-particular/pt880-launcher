@@ -70,6 +70,8 @@ public class TrackerLog {
 
     private static final String K_BPM = "log_bpm";
     private static final String K_BPM_AT = "log_bpm_at";
+    private static final String K_TEMP = "log_temp";
+    private static final String K_TEMP_AT = "log_temp_at";
 
     private final Context ctx;
 
@@ -219,6 +221,38 @@ public class TrackerLog {
         } catch (Throwable t) {
             return 0;
         }
+    }
+
+    /**
+     * The last body temperature measured, for whoever wants it without paying for a reading.
+     *
+     * The thermopile takes about eight seconds and the sleep log wants a value every burst, so
+     * this keeps what the vitals path already measured. Skin temperature falls through the
+     * night and climbs again before waking - on 4 September it ran 36.1 through the small hours
+     * and rose to 37.2 in the hour before the watch came off - which is a sleep signal nothing
+     * here reads yet, and could not read while it was not being written down.
+     */
+    public static double recentTemp(Context c, long freshMs) {
+        if (c == null) return 0;
+        try {
+            SharedPreferences p = TrackerService.prefs(c);
+            float v = p.getFloat(K_TEMP, 0f);
+            long at = p.getLong(K_TEMP_AT, 0);
+            if (v <= 0 || at <= 0) return 0;
+            long age = System.currentTimeMillis() - at;
+            return (age >= 0 && age <= freshMs) ? v : 0;
+        } catch (Throwable t) {
+            return 0;
+        }
+    }
+
+    public static void recordTemp(Context c, double celsius, long at) {
+        if (c == null || at <= 0) return;
+        if (celsius < 20 || celsius > 45) return;
+        try {
+            TrackerService.prefs(c).edit().putFloat(K_TEMP, (float) celsius)
+                    .putLong(K_TEMP_AT, at).commit();
+        } catch (Throwable t) { /* a convenience, not worth failing over */ }
     }
 
     public static void recordPulse(Context c, int value, long at) {
