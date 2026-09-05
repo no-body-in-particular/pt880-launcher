@@ -414,7 +414,7 @@ public class SportsScreen extends Screen implements HeartRate.Listener {
             int n = up.sendScore(cfg, r);
             if (up.problem() != null) return up.problem();
             if (n == 0) return "no reply";
-            SleepLog.markScored(shell, night);
+            SleepLog.markScored(shell, night, r.tstMin);
 
             // And the rhythm across the recent nights, if there are enough of
             // them. Two weeks is what the measures want: interdaily stability

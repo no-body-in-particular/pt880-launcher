@@ -634,7 +634,6 @@ public class SleepService extends Service implements SensorEventListener {
                     // once lastScored moves past it, never will be. The wake moment names its own
                     // night and needs no guessing.
                     String night = SleepLog.nightOf(wokeAt);
-                    if (night.equals(SleepLog.lastScored(ctx))) return;
 
                     java.util.List<SleepLog.Epoch> epochs = SleepLog.read(night);
                     if (epochs.size() < 2) return;
@@ -669,17 +668,29 @@ public class SleepService extends Service implements SensorEventListener {
                     SleepScore.Result r = SleepScore.score(epochs);
                     if (!r.valid) return;
 
+                    // A night may be scored more than once, but only upwards.
+                    //
+                    // A night is named for its noon-to-noon window, so an evening doze and the
+                    // sleep after midnight share one name. Refusing a name that had been sent
+                    // meant the first score consumed the night: on 4 September one went out at
+                    // 00:05 for the afternoon and the 9.4 hours starting at 23:13 were never
+                    // scored. Send again when there is more sleep than last time, and add only
+                    // the difference to the running day total so nothing is counted twice.
+                    boolean again = night.equals(SleepLog.lastScored(ctx));
+                    int already = again ? SleepLog.lastScoredTst(ctx) : 0;
+                    if (again && r.tstMin <= already) return;
+
                     // The day's running total, counted against the day the
                     // sleep ended -- so a nap this afternoon adds to last
                     // night rather than starting a new figure.
-                    int dayTotal = SleepLog.addDayMinutes(ctx, r.wakeAt, r.tstMin);
+                    int dayTotal = SleepLog.addDayMinutes(ctx, r.wakeAt, r.tstMin - already);
 
                     RootShell root = new RootShell();
                     try {
                         TrackerConfig cfg = new TrackerConfig(ctx, root);
                         cfg.load();
                         SleepUpload up = new SleepUpload();
-                        if (up.sendScore(cfg, r) > 0) SleepLog.markScored(ctx, night);
+                        if (up.sendScore(cfg, r) > 0) SleepLog.markScored(ctx, night, r.tstMin);
                         up.sendOne(cfg, SleepUpload.TYPE_DAY_TOTAL, dayTotal, r.wakeAt);
                     } finally {
                         root.close();

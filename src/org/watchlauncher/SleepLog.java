@@ -51,6 +51,7 @@ public class SleepLog {
     private static final String PREF_FLAG_AT = "sleepFlagAt";
     private static final String PREF_BURST_AT = "sleepBurstAt";
     private static final String PREF_RESTING = "sleepRestingBpm";
+    private static final String PREF_SCORED_TST = "sleepScoreSentTst";
 
     /** Watching for sleep to start: a burst every few minutes, nothing kept. */
     public static final int WATCHING = 0;
@@ -91,13 +92,30 @@ public class SleepLog {
         prefs(c).edit().putBoolean(PREF_ON, on).commit();
     }
 
-    /** The last night whose score was uploaded, so it is not sent twice. */
+    /**
+     * The last night whose score was uploaded, and how much sleep that score claimed.
+     *
+     * The night alone was not enough. A night is named for the noon-to-noon window it falls in,
+     * so an evening doze and the sleep that follows midnight share one name - and the first
+     * score sent consumed it, after which the real night was skipped as already done. That is
+     * what happened on 4 September: a score went out at 00:05 covering the afternoon, and the
+     * 9.4 hours that began at 23:13 were never scored at all.
+     *
+     * So the amount is kept too, and a later score for the same night is sent when it has found
+     * more sleep than the one before it. The server takes the newer figure for the night; only
+     * the difference is added to the running day total, so nothing is counted twice.
+     */
     public static String lastScored(Context c) {
-        return prefs(c).getString(PREF_SENT, null);
+        return prefs(c).getString(PREF_SENT, "");
     }
 
-    public static void markScored(Context c, String night) {
-        prefs(c).edit().putString(PREF_SENT, night).commit();
+    public static int lastScoredTst(Context c) {
+        return prefs(c).getInt(PREF_SCORED_TST, 0);
+    }
+
+    public static void markScored(Context c, String night, int tstMin) {
+        prefs(c).edit().putString(PREF_SENT, night)
+                       .putInt(PREF_SCORED_TST, tstMin).commit();
     }
 
     /** When the live sleeping flag was last pushed, so it can be resent on a
