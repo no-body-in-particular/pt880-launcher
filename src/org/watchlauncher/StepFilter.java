@@ -47,6 +47,21 @@ public final class StepFilter {
      */
     public static final int MAX_RATE_PER_MIN = 140;
 
+    /**
+     * What the counter rose by between two readings.
+     *
+     * The chip counts since boot, so a reading lower than the one before it means the watch
+     * restarted and the counter began again - the rise is then the whole of the new reading,
+     * which is what has been walked since the reboot. Before anything has been seen there is no
+     * rise at all: crediting the counter's entire history as one increment would hand a fresh
+     * install several thousand steps it did not watch anybody take.
+     */
+    public static int rise(int rawWas, int rawNow) {
+        if (rawNow < 0) return 0;
+        if (rawWas < 0) return 0;
+        return (rawNow < rawWas) ? rawNow : rawNow - rawWas;
+    }
+
     private StepFilter() { }
 
     /**

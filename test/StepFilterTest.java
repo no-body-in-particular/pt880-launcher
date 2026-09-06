@@ -79,6 +79,17 @@ public class StepFilterTest {
         check("no elapsed time credits nothing",
                 StepFilter.credit(100, 0, 60, RESTING) == 0, "");
 
+        // --- the counter restarts when the watch does ------------------------------------
+        // Its own reading is since boot, so a fall is a reboot rather than steps being undone.
+        check("an ordinary rise is the difference",
+                StepFilter.rise(1200, 1250) == 50, "");
+        check("a reading below the last is a reboot",
+                StepFilter.rise(5000, 30) == 30, "credit what was walked since it");
+        check("nothing seen yet credits nothing",
+                StepFilter.rise(-1, 4000) == 0, "not four thousand on a fresh install");
+        check("a counter that has not moved rises by nothing",
+                StepFilter.rise(1200, 1200) == 0, "");
+
         System.out.println(fails == 0 ? "step filter: all checks passed"
                                       : "step filter: " + fails + " FAILED");
         if (fails > 0) System.exit(1);

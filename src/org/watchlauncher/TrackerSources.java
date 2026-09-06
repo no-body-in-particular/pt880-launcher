@@ -575,92 +575,72 @@ public final class TrackerSources {
      * day outright, and nothing can be recomputed afterwards. Subtracting a remembered total is
      * recoverable from the numbers themselves.
      */
-    private static final String KEY_STEP_BASE = "client_step_base";
+
     private static final String KEY_STEP_RAW  = "client_step_raw";
     private static final String KEY_STEP_DAY  = "client_step_day";
     private static final String KEY_STEP_DAY0 = "client_step_day_start";
 
     /**
-     * The running total with the vibration taken out of it - see {@link StepFilter}.
+     * Steps today, with the vibration taken out and the counter's own restarts absorbed.
      *
-     * The chip counts road vibration as steps, so half of one measured day arrived at cadences
-     * nobody can walk with a resting pulse underneath them. This keeps its own total alongside
-     * the chip's: each rise is offered to the filter and only what survives is added.
+     * Three things at once, because they cannot be done separately. The chip's counter is since
+     * boot and resets when the watch does; what it counts includes road vibration; and the figure
+     * the tracker wants is steps so far today. Filtering has to happen on the rise between two
+     * readings - that is the only place a rate exists to judge - while the day boundary has to
+     * apply to the filtered total, or midnight looks like a counter restart and the day never
+     * resets. Splitting them is what broke this the first time it was written.
      *
-     * The chip's raw total is still what the reboot carry-over tracks, because that is the
-     * quantity that resets; this sits on top and never goes down.
+     * The chip's raw value drives the restart test alone. Everything reported is built from the
+     * filtered total, which only ever rises, and the day's figure is that total less wherever it
+     * stood when the day turned over.
      */
-    private static final String KEY_RAW_SEEN = "client_raw_steps_seen";
     private static final String KEY_KEPT = "client_steps_kept";
     private static final String KEY_RAW_AT = "client_raw_steps_at";
-
-    private static synchronized int believable(Context app, int rawNow) {
-        SharedPreferences p;
-        try {
-            p = app.getSharedPreferences("tracker", Context.MODE_PRIVATE);
-        } catch (Throwable t) {
-            return rawNow;   // no memory to filter against; the raw figure is better than none
-        }
-        int seen = p.getInt(KEY_RAW_SEEN, -1);
-        int kept = p.getInt(KEY_KEPT, 0);
-        long at = p.getLong(KEY_RAW_AT, 0);
-        long now = System.currentTimeMillis();
-
-        if (seen < 0 || rawNow < seen || at <= 0) {
-            // First sight, or the counter went backwards - start from here rather than crediting
-            // the whole history as one enormous increment.
-            p.edit().putInt(KEY_RAW_SEEN, rawNow).putInt(KEY_KEPT, kept)
-                    .putLong(KEY_RAW_AT, now).apply();
-            return kept;
-        }
-
-        int credit = StepFilter.credit(rawNow - seen, now - at,
-                TrackerLog.recentBpm(app, BPM_FOR_STEPS_MS), SleepLog.restingBpm(app));
-        kept += credit;
-        p.edit().putInt(KEY_RAW_SEEN, rawNow).putInt(KEY_KEPT, kept)
-                .putLong(KEY_RAW_AT, now).apply();
-        return kept;
-    }
 
     /** A pulse older than this says nothing about what the wrist was doing while it counted. */
     private static final long BPM_FOR_STEPS_MS = 12 * 60 * 1000;
 
-    private static int carryOverReboot(Context app, int rawNow) {
+    private static synchronized int stepsToday(Context app, int rawNow) {
+        SharedPreferences p;
         try {
-            android.content.SharedPreferences p =
-                    app.getSharedPreferences("tracker", Context.MODE_PRIVATE);
-            int base = p.getInt(KEY_STEP_BASE, 0);
-            int rawWas = p.getInt(KEY_STEP_RAW, 0);
-
-            if (rawNow < rawWas) {
-                base += rawWas;
-                Log.i(TAG, "the step counter restarted at " + rawNow + "; carrying " + base
-                        + " forward");
-            }
-            int total = base + rawNow;
-
-            // Local midnight, from the watch's own calendar rather than a fixed number of
-            // seconds, so a timezone change or a leap does not land the boundary mid-afternoon.
-            java.util.Calendar cal = java.util.Calendar.getInstance();
-            String today = cal.get(java.util.Calendar.YEAR) + "-"
-                    + cal.get(java.util.Calendar.DAY_OF_YEAR);
-            String was = p.getString(KEY_STEP_DAY, null);
-            int dayStart = p.getInt(KEY_STEP_DAY0, 0);
-
-            if (!today.equals(was)) {
-                dayStart = total;
-                Log.i(TAG, "a new day; counting steps from " + total);
-            }
-            // A total below the day's start means the base was lost rather than time moving,
-            // and a negative step count helps nobody.
-            if (dayStart > total) dayStart = total;
-
-            p.edit().putInt(KEY_STEP_BASE, base).putInt(KEY_STEP_RAW, rawNow)
-                    .putString(KEY_STEP_DAY, today).putInt(KEY_STEP_DAY0, dayStart).apply();
-            return total - dayStart;
+            p = app.getSharedPreferences("tracker", Context.MODE_PRIVATE);
         } catch (Throwable t) {
-            return rawNow;
+            return rawNow;   // nowhere to keep the running total; the raw figure beats nothing
         }
+
+        int rawWas = p.getInt(KEY_STEP_RAW, -1);
+        long at = p.getLong(KEY_RAW_AT, 0);
+        int kept = p.getInt(KEY_KEPT, 0);
+        long now = System.currentTimeMillis();
+
+        // What the counter rose by. A fall means the watch rebooted and it started again, so the
+        // rise is the whole of the new reading; no reading at all yet means nothing to credit,
+        // rather than crediting the counter's entire history as one increment.
+        int inc = (at <= 0) ? 0 : StepFilter.rise(rawWas, rawNow);
+
+        if (inc > 0) {
+            kept += StepFilter.credit(inc, now - at,
+                    TrackerLog.recentBpm(app, BPM_FOR_STEPS_MS), SleepLog.restingBpm(app));
+        }
+
+        // Local midnight, from the watch's own calendar rather than a fixed number of seconds, so
+        // a timezone change or a leap does not land the boundary mid-afternoon.
+        java.util.Calendar cal = java.util.Calendar.getInstance();
+        String today = cal.get(java.util.Calendar.YEAR) + "-"
+                + cal.get(java.util.Calendar.DAY_OF_YEAR);
+        int dayStart = p.getInt(KEY_STEP_DAY0, 0);
+        if (!today.equals(p.getString(KEY_STEP_DAY, null))) {
+            dayStart = kept;
+            Log.i(TAG, "a new day; counting steps from " + kept);
+        }
+        // A start above the total means the total was lost rather than time moving, and a
+        // negative step count helps nobody.
+        if (dayStart > kept) dayStart = kept;
+
+        p.edit().putInt(KEY_STEP_RAW, rawNow).putInt(KEY_KEPT, kept)
+                .putLong(KEY_RAW_AT, now).putString(KEY_STEP_DAY, today)
+                .putInt(KEY_STEP_DAY0, dayStart).apply();
+        return kept - dayStart;
     }
 
     private static void record(Context app, int n) {
@@ -742,7 +722,7 @@ public final class TrackerSources {
                 try {
                     int n = OwnVitals.steps(app);
                     if (n >= 0) {
-                        daemonSteps = believable(app, carryOverReboot(app, n));
+                        daemonSteps = stepsToday(app, n);
                         record(app, daemonSteps);
                     }
                 } catch (Throwable t) {
