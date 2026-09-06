@@ -367,6 +367,10 @@ public class SleepService extends Service implements SensorEventListener {
 
     public void onSensorChanged(SensorEvent e) {
         if (e.values == null || e.values.length < 3) return;
+        // Only from the accelerometer this registered for. The watch carries five sensors and
+        // the step counter is the one that is always active; a stray event from another of them
+        // lands its own units in these sums and nothing downstream can tell.
+        if (accel != null && e.sensor != null && e.sensor != accel) return;
         double x = e.values[0] / G, y = e.values[1] / G, z = e.values[2] / G;
         double mag = Math.sqrt(x * x + y * y + z * z);
 
@@ -417,7 +421,7 @@ public class SleepService extends Service implements SensorEventListener {
             // minutes.
             //
             // So drop it. A missing burst is honest and the scorer already copes with gaps.
-            if (mx == 0 && my == 0 && mz == 0) {
+            if (!SleepRules.measuredAWrist(mx, my, mz)) {
                 // Come back sooner than the usual interval. Whatever had the sensor - almost
                 // always one of our own measurements - will not have it for long, and the
                 // alternative is a hole the length of the interval every time one collides.
@@ -425,8 +429,9 @@ public class SleepService extends Service implements SensorEventListener {
                 // spin: the night of 31 August lost four hours to a single empty burst that
                 // was then not retried until the next alarm.
                 next = EMPTY_RETRY_MS;
-                Log.i(TAG, "burst read nothing from the accelerometer (" + n
-                        + " samples, all zero); no line written, retrying in "
+                Log.i(TAG, "burst was not acceleration (" + n + " samples, mean "
+                        + String.format("%.3f,%.3f,%.3f", mx, my, mz)
+                        + "); no line written, retrying in "
                         + (EMPTY_RETRY_MS / 1000) + "s");
             } else {
                 next = decide(now, mx, my, mz, sd, enmo, range, n);

@@ -75,6 +75,37 @@ public final class SleepRules {
         return bpm <= restingBpm + SLEEP_BPM_MARGIN;
     }
 
+    /**
+     * Did this burst measure a wrist?
+     *
+     * Gravity is not optional. Whatever a watch is doing - still, moving, face down on a table -
+     * the mean of its acceleration over five seconds is about one g, because the earth is always
+     * pulling. A burst whose mean vector is not is not a still wearer and not a busy one; it is
+     * the sensor, or the path to it, handing back something that is not acceleration.
+     *
+     * This was an all-zeroes test, which catches only the case where the buffer was never filled.
+     * It missed the one that mattered. The night log for 6 September carries rows reading
+     *
+     *     meanX 3722   meanY 0.430   meanZ -0.189   n 2055
+     *     meanX 6090   meanY 0.447   meanZ  0.028   n 2386
+     *
+     * where the watcher's own file, the same day and the same wrist, reads -0.089, 1.057,
+     * -0.0015 with n=80. A mean of 3722 g is not a wrist, and n over two thousand inside a five
+     * second burst is 411 samples a second from an accelerometer dumpsys reports as maxRate 200.
+     *
+     * It mattered because of what the scorer does next: the arm angle is atan2(z, hypot(x, y)),
+     * and with x in the thousands that is zero for every row of the night. The angle test - the
+     * whole of van Hees's method - has been reading a constant, and a walk went into the log
+     * looking like the stillest sleep of the day.
+     *
+     * The band is wide on purpose. Real bursts sit near 1.00 and this only has to catch what is
+     * not acceleration at all.
+     */
+    public static boolean measuredAWrist(double mx, double my, double mz) {
+        double mag = Math.sqrt(mx * mx + my * my + mz * mz);
+        return mag > 0.5 && mag < 2.0;
+    }
+
     private SleepRules() { }
 
     /**

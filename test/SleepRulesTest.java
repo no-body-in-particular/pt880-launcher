@@ -139,6 +139,21 @@ public class SleepRulesTest {
         check("no resting estimate cannot either",
                 !SleepRules.pulseSaysSleep(48, 0), "");
 
+        // --- a burst has to be acceleration before it is anything else --------------------
+        // Real rows from 6 September, night log against watcher file, same wrist same day.
+        check("a real burst is about one gravity",
+                SleepRules.measuredAWrist(-0.089, 1.057, -0.0015), "the watcher's own row");
+        check("a mean of 3722 g is not a wrist",
+                !SleepRules.measuredAWrist(3722.0, 0.430, -0.189), "");
+        check("nor 6090",
+                !SleepRules.measuredAWrist(6090.0, 0.447, 0.028), "");
+        check("nor 2112, which read as the stillest sleep of the day",
+                !SleepRules.measuredAWrist(2112.0, 0.780, 0.546), "");
+        check("an unfilled buffer is still caught",
+                !SleepRules.measuredAWrist(0, 0, 0), "the case the old test covered");
+        check("a watch face down on a table is kept",
+                SleepRules.measuredAWrist(0.02, -0.01, -0.999), "still a wrist reading");
+
         System.out.println(fails == 0 ? "sleep rules: all checks passed"
                                       : "sleep rules: " + fails + " FAILED");
         if (fails > 0) System.exit(1);
