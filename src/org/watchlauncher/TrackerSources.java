@@ -1,6 +1,7 @@
 package org.watchlauncher;
 
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.hardware.Sensor;
@@ -579,6 +580,51 @@ public final class TrackerSources {
     private static final String KEY_STEP_DAY  = "client_step_day";
     private static final String KEY_STEP_DAY0 = "client_step_day_start";
 
+    /**
+     * The running total with the vibration taken out of it - see {@link StepFilter}.
+     *
+     * The chip counts road vibration as steps, so half of one measured day arrived at cadences
+     * nobody can walk with a resting pulse underneath them. This keeps its own total alongside
+     * the chip's: each rise is offered to the filter and only what survives is added.
+     *
+     * The chip's raw total is still what the reboot carry-over tracks, because that is the
+     * quantity that resets; this sits on top and never goes down.
+     */
+    private static final String KEY_RAW_SEEN = "client_raw_steps_seen";
+    private static final String KEY_KEPT = "client_steps_kept";
+    private static final String KEY_RAW_AT = "client_raw_steps_at";
+
+    private static synchronized int believable(Context app, int rawNow) {
+        SharedPreferences p;
+        try {
+            p = app.getSharedPreferences("tracker", Context.MODE_PRIVATE);
+        } catch (Throwable t) {
+            return rawNow;   // no memory to filter against; the raw figure is better than none
+        }
+        int seen = p.getInt(KEY_RAW_SEEN, -1);
+        int kept = p.getInt(KEY_KEPT, 0);
+        long at = p.getLong(KEY_RAW_AT, 0);
+        long now = System.currentTimeMillis();
+
+        if (seen < 0 || rawNow < seen || at <= 0) {
+            // First sight, or the counter went backwards - start from here rather than crediting
+            // the whole history as one enormous increment.
+            p.edit().putInt(KEY_RAW_SEEN, rawNow).putInt(KEY_KEPT, kept)
+                    .putLong(KEY_RAW_AT, now).apply();
+            return kept;
+        }
+
+        int credit = StepFilter.credit(rawNow - seen, now - at,
+                TrackerLog.recentBpm(app, BPM_FOR_STEPS_MS), SleepLog.restingBpm(app));
+        kept += credit;
+        p.edit().putInt(KEY_RAW_SEEN, rawNow).putInt(KEY_KEPT, kept)
+                .putLong(KEY_RAW_AT, now).apply();
+        return kept;
+    }
+
+    /** A pulse older than this says nothing about what the wrist was doing while it counted. */
+    private static final long BPM_FOR_STEPS_MS = 12 * 60 * 1000;
+
     private static int carryOverReboot(Context app, int rawNow) {
         try {
             android.content.SharedPreferences p =
@@ -696,7 +742,7 @@ public final class TrackerSources {
                 try {
                     int n = OwnVitals.steps(app);
                     if (n >= 0) {
-                        daemonSteps = carryOverReboot(app, n);
+                        daemonSteps = believable(app, carryOverReboot(app, n));
                         record(app, daemonSteps);
                     }
                 } catch (Throwable t) {

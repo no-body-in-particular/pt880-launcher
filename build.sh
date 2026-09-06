@@ -216,6 +216,21 @@ if javac -nowarn -d "$TD_SLEEP" "$HERE/src/org/watchlauncher/SleepRules.java" 2>
 fi
 rm -rf "$TD_SLEEP"
 
+# Which of the pedometer's steps the wearer actually took. StepFilter touches no Android class,
+# so the day that prompted it - half its steps counted from a car seat - drives the test.
+TD_STEP=$(mktemp -d)
+SF="$HERE/src/org/watchlauncher/SleepRules.java $HERE/src/org/watchlauncher/StepFilter.java"
+if javac -nowarn -d "$TD_STEP" $SF 2>/dev/null && javac -nowarn -cp "$TD_STEP" -d "$TD_STEP" "$HERE/test/StepFilterTest.java" 2>/dev/null; then
+    if ! java -cp "$TD_STEP" StepFilterTest > "$TD_STEP/out"; then
+        echo "step filter test FAILED:" >&2
+        cat "$TD_STEP/out" >&2
+        rm -rf "$TD_STEP"
+        exit 1
+    fi
+    tail -1 "$TD_STEP/out"
+fi
+rm -rf "$TD_STEP"
+
 # Speed and time to arrival. Drive touches no Android class so that the cases
 # that actually bite - stopped at a light, a fix that teleports, the watch
 # waking an hour later - can be driven here rather than discovered on a road.
