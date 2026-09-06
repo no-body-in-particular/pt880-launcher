@@ -74,6 +74,9 @@ public class SleepScore {
     /** Gaps shorter than this inside the sleep period are absorbed. */
     private static final int MERGE_GAP_MIN = 60;
 
+    /** Bouts further apart than this belong to separate sleeps rather than one broken night. */
+    private static final int SESSION_GAP_MIN = 45;
+
     /** An awakening has to last this long to be counted as one. Movement
      *  flickers either side of the threshold, so without this a single trip to
      *  the bathroom is reported as nine separate awakenings. Minutes of wake
@@ -100,6 +103,10 @@ public class SleepScore {
         public int sptMin;            // sleep period: onset to final waking
         public int tstMin;            // total sleep inside that period
         public int wasoMin;           // wake after sleep onset
+
+        /** Sleep across every session of the day, not only the main period. A second sleep is
+         *  still sleep; it just is not the night, and the day total wants both. */
+        public int allSleepMin;
         public int wakeups;           // separate wake bouts inside the period
         public int efficiencyPct;     // tst / spt
 
@@ -118,6 +125,17 @@ public class SleepScore {
          *  published range was used instead. The night still scored, but the
          *  number is the looser of the two the method sanctions. */
         public boolean relaxed;
+    }
+
+    /** Seconds of sleep between two epochs, capped per row so a silence is not counted. */
+    private static long sleepSecIn(boolean[] still, long[] atSec, int from, int to, int epochSec) {
+        long sleep = 0;
+        for (int i = from; i <= to; i++) {
+            long span = (i < to) ? (atSec[i + 1] - atSec[i]) : epochSec;
+            if (span > MAX_GAP_SEC) span = MAX_GAP_SEC;
+            if (still[i]) sleep += span;
+        }
+        return sleep;
     }
 
     private SleepScore() { }
@@ -198,8 +216,41 @@ public class SleepScore {
         // gap between them exceeded the merge window - so a night broken by an hour awake was
         // reported as its bigger half, and the rest simply did not happen. Time between bouts
         // inside the period is counted below as waking, which is what it is.
-        int from = bouts.get(0)[0];
-        int to = bouts.get(bouts.size() - 1)[1];
+        // The main sleep period, not everything between the first bout and the last.
+        //
+        // A night file runs noon to noon, so first-to-last spans whatever else the day held. On
+        // 5-6 September that gave a sleep period of 20.4 hours: an afternoon at a desk, an
+        // evening, and two sleeps, all inside one period whose still epochs were then added up
+        // as total sleep. It reported 12.2 hours against a wearer who had slept about eight.
+        //
+        // Bouts closer together than SESSION_GAP_MIN belong to one sleep - a night broken by an
+        // hour awake is still one night, which is what the previous version of this was right to
+        // insist on. Beyond that gap it is a separate sleep, and the period is the session with
+        // the most sleep in it. Everything else the day held is still counted, but into
+        // allSleepMin rather than into this period.
+        //
+        // Against the same night: 01:16-05:48 at 93% and 07:03-11:00 at 81%, 7.8 hours between
+        // them, where the wearer said "one to five, then eight-ish to twelve, about eight hours".
+        List<int[]> sessions = new ArrayList<int[]>();
+        int sFrom = bouts.get(0)[0], sTo = bouts.get(0)[1];
+        for (int b = 1; b < bouts.size(); b++) {
+            if (atSec[bouts.get(b)[0]] - atSec[sTo] > SESSION_GAP_MIN * 60) {
+                sessions.add(new int[]{sFrom, sTo});
+                sFrom = bouts.get(b)[0];
+            }
+            sTo = bouts.get(b)[1];
+        }
+        sessions.add(new int[]{sFrom, sTo});
+
+        int from = sessions.get(0)[0], to = sessions.get(0)[1];
+        long bestSleep = -1;
+        r.allSleepMin = 0;
+        for (int k = 0; k < sessions.size(); k++) {
+            int a = sessions.get(k)[0], b = sessions.get(k)[1];
+            long sleep = sleepSecIn(still, atSec, a, b, r.epochSec);
+            r.allSleepMin += (int) (sleep / 60);
+            if (sleep > bestSleep) { bestSleep = sleep; from = a; to = b; }
+        }
 
         // Inside the period, still is sleep and moving is wake.
         int sleepEpochs = 0, wakeEpochs = 0;

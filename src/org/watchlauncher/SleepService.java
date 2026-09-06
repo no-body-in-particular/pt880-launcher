@@ -682,19 +682,22 @@ public class SleepService extends Service implements SensorEventListener {
                     // the difference to the running day total so nothing is counted twice.
                     boolean again = night.equals(SleepLog.lastScored(ctx));
                     int already = again ? SleepLog.lastScoredTst(ctx) : 0;
-                    if (again && r.tstMin <= already) return;
+                    if (again && r.allSleepMin <= already) return;
 
                     // The day's running total, counted against the day the
                     // sleep ended -- so a nap this afternoon adds to last
                     // night rather than starting a new figure.
-                    int dayTotal = SleepLog.addDayMinutes(ctx, r.wakeAt, r.tstMin - already);
+                    // The day total counts every sleep of the day, not only the main period -
+                    // a second sleep is still sleep. The night's own figures stay the main
+                    // period's, which is what an efficiency or a WASO means.
+                    int dayTotal = SleepLog.addDayMinutes(ctx, r.wakeAt, r.allSleepMin - already);
 
                     RootShell root = new RootShell();
                     try {
                         TrackerConfig cfg = new TrackerConfig(ctx, root);
                         cfg.load();
                         SleepUpload up = new SleepUpload();
-                        if (up.sendScore(cfg, r) > 0) SleepLog.markScored(ctx, night, r.tstMin);
+                        if (up.sendScore(cfg, r) > 0) SleepLog.markScored(ctx, night, r.allSleepMin);
                         up.sendOne(cfg, SleepUpload.TYPE_DAY_TOTAL, dayTotal, r.wakeAt);
                     } finally {
                         root.close();
