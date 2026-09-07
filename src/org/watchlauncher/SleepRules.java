@@ -138,13 +138,35 @@ public final class SleepRules {
     }
 
     /**
-     * Seconds of stillness while watching for sleep. Movement ends the run outright.
+     * Seconds of stillness while watching for sleep. Movement spends the run down, not out.
      *
-     * Asymmetric with {@link #moved} on purpose: a wrist that moves is awake now, whereas a
-     * sleeper who lies still for a minute in the morning has not gone back to sleep.
+     * This reset to zero on any moving burst, on the reasoning that a wrist which moves is awake
+     * now. A sleeper who turns over is not, and a five second burst catches that turn. Measured
+     * on a night whose sleep is not in doubt - pulse 46 against a resting 48 - the hours the
+     * wearer spent asleep still read as moving a quarter of the time:
+     *
+     *     hour 03   88% still     hour 04   74% still     hour 06   83% still
+     *
+     * Thirty minutes with no moving burst at all almost never happens at those rates. The
+     * detector fired once in a night holding three sleeps, and logged twenty-one minutes of it.
+     *
+     * Spending the run down a step per moving burst accumulates whenever more than half the
+     * bursts are still and decays otherwise, which is the line worth drawing: the hours above
+     * are sleep and a sofa at half and half is not. On that night it found the afternoon nap
+ * and the first night bout, where the reset found only the latter.
+     *
+     * Half a step was tried first and is too loose: at exactly half still it still creeps to
+ * the bar, just slowly, and a quiet evening reaches it in two hours with a pulse close enough
+     * to resting to pass the gate. Requiring a majority is a rule that states itself.
+     * free to disagree with afterwards.
+     *
+     * The validation is partial, and worth saying so. The watcher keeps its own log only while
+     * it is not logging a night, so a night it detected correctly is invisible to a replay - the
+     * evidence can show sleep this missed, never sleep it already caught.
      */
     public static int held(int heldSec, int stepSec, boolean still) {
-        return still ? heldSec + stepSec : 0;
+        int next = still ? heldSec + stepSec : heldSec - stepSec;
+        return next < 0 ? 0 : next;
     }
 
     /**

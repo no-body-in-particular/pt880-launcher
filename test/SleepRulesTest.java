@@ -53,6 +53,17 @@ public class SleepRulesTest {
         return -1;
     }
 
+    /** Does a stretch that is still in (every-1)/every of its bursts reach the onset bar? */
+    static boolean thirtyMinutesOfMostlyStill(int every) {
+        int held = 0;
+        for (int i = 0; i < 400; i++) {
+            boolean still = (i % every != 0);
+            held = SleepRules.held(held, 30, still);
+            if (held >= START_SEC) return true;
+        }
+        return false;
+    }
+
     /** A stretch of one value. */
     static double[] flat(int n, double v) {
         double[] a = new double[n];
@@ -118,8 +129,14 @@ public class SleepRulesTest {
                 SleepRules.credit(30 * 1000L) == 30, "");
 
         // --- movement ends a stillness run outright, stillness only decays a movement one -----
-        check("movement clears the stillness run",
-                SleepRules.held(1500, 30, false) == 0, "");
+        check("movement spends the stillness run down, not out",
+                SleepRules.held(1500, 30, false) == 1470, "a sleeper who turns over is asleep");
+        check("and cannot take it below zero",
+                SleepRules.held(10, 300, false) == 0, "");
+        check("three quarters still reaches the bar",
+                thirtyMinutesOfMostlyStill(4), "one moving burst in four");
+        check("but half and half does not",
+                !thirtyMinutesOfMostlyStill(2), "an evening on a sofa");
         check("stillness only pays back the movement run",
                 SleepRules.moved(1200, 30, true) == 1170, "");
         check("and cannot take it below zero",
