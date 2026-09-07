@@ -309,9 +309,31 @@ final class OwnVitals {
     }
 
     /** Read {@code name=<decimal>} out of the reply, or -1. */
+    /**
+     * Where a field begins, matching whole names rather than any substring.
+     *
+     * indexOf finds a name inside a longer one, and these replies are full of longer ones. It has
+     * now cost two bugs. First "n=" matched inside "gain=2323", so a sample count came back as
+     * the gain; the fix was to rename the field to "an=", which walked straight into "gsmean=" -
+     * and "ax=" into "gsmax=". A night of sleep was logged with a mean X acceleration of 2118,
+     * because that is what the accelerometer statistic beside it happened to read, and the arm
+     * angle computed from it was zero for every row.
+     *
+     * Renaming fields is not the fix; there is always another collision. A field starts at the
+     * beginning of the line or after a space, and nowhere else.
+     */
+    private static int fieldAt(String line, String name) {
+        int i = 0;
+        while ((i = line.indexOf(name, i)) >= 0) {
+            if (i == 0 || line.charAt(i - 1) == ' ') return i;
+            i += name.length();
+        }
+        return -1;
+    }
+
     static double dfield(String line, String name) {
         if (line == null) return -1;
-        int at = line.indexOf(name);
+        int at = fieldAt(line, name);
         if (at < 0) return -1;
         int i = at + name.length(), start = i;
         // A leading minus, because an axis sum is negative whenever the wrist is the other way
@@ -333,7 +355,7 @@ final class OwnVitals {
     /** Read {@code name=<integer>} out of the reply, or -1. */
     static int field(String line, String name) {
         if (line == null) return -1;
-        int at = line.indexOf(name);
+        int at = fieldAt(line, name);
         if (at < 0) return -1;
         int i = at + name.length(), v = 0, digits = 0;
         while (i < line.length() && Character.isDigit(line.charAt(i))) {
