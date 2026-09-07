@@ -175,6 +175,9 @@ public class SleepService extends Service implements SensorEventListener {
     private double minMag = Double.MAX_VALUE, maxMag = -Double.MAX_VALUE;
     private boolean sampling = false;
 
+    /** When that burst began, so one that never finishes costs an epoch and not a night. */
+    private long samplingAt = 0;
+
     // ---------------------------------------------------------------- schedule
 
     /** Arm the next burst. Called after every burst, and when logging starts. */
@@ -198,6 +201,13 @@ public class SleepService extends Service implements SensorEventListener {
                 PendingIntent.FLAG_UPDATE_CURRENT);
     }
 
+    /**
+     * The longest a burst can take: the daemon's wait, then the listener fallback behind it,
+     * and a little for the hand-off. The wake lock has to cover all of it or the watch sleeps
+     * in the middle and the burst lands whenever something else happens to wake it.
+     */
+    private static final long BURST_WORST_MS = (BURST_MS + 10000) + BURST_MS + 5000;
+
     /** Held across the hand-off from the alarm receiver into this service, so
      *  the watch cannot fall asleep between the two. */
     static synchronized void holdWakeLock(Context c) {
@@ -206,9 +216,24 @@ public class SleepService extends Service implements SensorEventListener {
             wake = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "watchlauncher.sleep");
             wake.setReferenceCounted(false);
         }
-        // Never longer than one burst: a wake lock leaked overnight would flatten
-        // the battery, which is a worse outcome than a missing epoch.
-        if (!wake.isHeld()) wake.acquire(BURST_MS + 5000);
+        // Long enough for the burst that is actually taken, which is not the same as BURST_MS.
+        //
+        // This held for BURST_MS + 5000, ten seconds, while the daemon path waits up to
+        // BURST_MS + 10000 for a reply. So the lock expired mid-call, the watch deep-slept, and
+        // both the daemon thread and the postDelayed stop froze - Handler delays run on
+        // uptimeMillis, which does not advance while the processor is down. The burst finished
+        // only when the next alarm woke the watch, by which time that alarm had already been
+        // dropped for finding one in progress.
+        //
+        // The cadence shows it plainly. Of 151 epochs logged at a nominal thirty seconds, five
+        // arrived inside forty-five and the median gap was 175 seconds; the accelerometer
+        // listener, left registered across the stall, put three thousand samples into what the
+        // file calls a five second burst. And the scorer reads arm angle between consecutive
+        // epochs, so at three minutes apart it measures the gap rather than the sleeper.
+        //
+        // Still bounded, and for the same reason as before: a lock leaked overnight flattens the
+        // battery, which is worse than a missing epoch. It just has to outlast the wait.
+        if (!wake.isHeld()) wake.acquire(BURST_WORST_MS);
     }
 
     private static synchronized void releaseWakeLock() {
@@ -228,7 +253,16 @@ public class SleepService extends Service implements SensorEventListener {
             return START_NOT_STICKY;
         }
 
-        if (sampling) return START_NOT_STICKY;      // a burst is already running
+        // A burst already running, unless it has been running impossibly long.
+        //
+        // sampling is cleared in finishBurst, and finishBurst can be waiting on a callback the
+        // processor is not awake to run. Once that happened every later alarm returned here and
+        // did nothing, so one stalled burst cost the rest of the night rather than one epoch.
+        if (sampling && System.currentTimeMillis() - samplingAt < BURST_WORST_MS * 2) {
+            return START_NOT_STICKY;
+        }
+        if (sampling) Log.i(TAG, "the last burst never finished; starting another");
+        samplingAt = System.currentTimeMillis();
         sampling = true;
 
         // Arm the next burst before taking this one, not after.
