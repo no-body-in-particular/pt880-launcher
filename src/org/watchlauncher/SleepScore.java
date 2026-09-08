@@ -189,7 +189,7 @@ public class SleepScore {
 
         // 5. runs of stillness long enough to be a bout.
         boolean[] still = new boolean[n];
-        List<int[]> bouts = bouts(change, enmo, still, t, atSec, MIN_BOUT_MIN * 60, MAX_GAP_SEC);
+        List<int[]> bouts = bouts(change, enmo, still, t, atSec, MIN_BOUT_MIN * 60, MAX_GAP_SEC, r.epochSec);
 
         if (bouts.isEmpty() && t < THRESHOLD_MAX_DEG) {
             // Nothing at the strict end. Rather than report a night of no
@@ -199,7 +199,7 @@ public class SleepScore {
             // every 5 leaves more movement inside each epoch, so the floor
             // being too tight here is expected rather than surprising.
             t = THRESHOLD_MAX_DEG;
-            bouts = bouts(change, enmo, still, t, atSec, MIN_BOUT_MIN * 60, MAX_GAP_SEC);
+            bouts = bouts(change, enmo, still, t, atSec, MIN_BOUT_MIN * 60, MAX_GAP_SEC, r.epochSec);
             r.relaxed = !bouts.isEmpty();
         }
         r.thresholdDeg = t;
@@ -366,19 +366,43 @@ public class SleepScore {
      * from. Reading it here costs nothing and is the difference between a number and a claim.
      */
     private static List<int[]> bouts(double[] change, double[] enmo, boolean[] still, double t,
-                                     long[] atSec, int minBoutSec, int maxGapSec) {
+                                     long[] atSec, int minBoutSec, int maxGapSec, int epochSec) {
         int n = change.length;
         for (int i = 0; i < n; i++)
             still[i] = change[i] < t && enmo[i] < SleepRules.STILL_ENMO;
+
+        /* A bout survives movement shorter than an awakening.
+         *
+         * This ended a bout at the first moving epoch, which asks for unbroken stillness at epoch
+         * resolution. A sleeper does not provide it. Measured over one night, 44% of epochs read
+         * still and the median unbroken run of them was a single epoch - so fifteen consecutive
+         * minutes essentially never occurred, and a seventeen hour stretch of logging at 74%
+         * stillness and a pulse of 52 scored as 101 minutes of sleep in four bouts of about half
+         * an hour.
+         *
+         * How long movement has to last before it is waking is already decided in this file:
+         * WAKE_MERGE_MIN, five minutes, is the distance inside which two wake bouts are called the
+         * same awakening. Movement shorter than that does not end a sleep bout either. Nothing new
+         * is invented here; the same number is simply applied on both sides of the question.
+         *
+         * The same night, with that: 342 minutes over four sessions, the longest running 00:10 to
+         * 07:33. The bout still ends at its last still epoch, so absorbed movement counts as wake
+         * inside the period rather than being quietly turned into sleep.
+         */
+        int tolerate = Math.max(1, (WAKE_MERGE_MIN * 60) / epochSec);
 
         List<int[]> out = new ArrayList<int[]>();
         int i = 0;
         while (i < n) {
             if (!still[i]) { i++; continue; }
-            int j = i;
-            while (j + 1 < n && still[j + 1] && (atSec[j + 1] - atSec[j]) <= maxGapSec) j++;
-            if (atSec[j] - atSec[i] >= minBoutSec) out.add(new int[]{i, j});
-            i = j + 1;
+            int j = i, last = i, missed = 0;
+            while (j + 1 < n && (atSec[j + 1] - atSec[j]) <= maxGapSec) {
+                if (still[j + 1]) { missed = 0; last = j + 1; }
+                else if (++missed > tolerate) break;
+                j++;
+            }
+            if (atSec[last] - atSec[i] >= minBoutSec) out.add(new int[]{i, last});
+            i = (last > i ? last : i) + 1;
         }
         return out;
     }
