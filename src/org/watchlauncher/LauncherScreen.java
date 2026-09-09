@@ -32,10 +32,12 @@ public class LauncherScreen extends ListScreen {
      *  in one method and a switch in another, so a row can never open the app
      *  above it. */
     private static final String[] NAMES =
-            {"Map", "Rain", "Music", "Sports", "Bluetooth", "Camera", "Call", "Terminal"};
+            {"Map", "Rain", "Music", "Sports", "Sleep", "Bluetooth", "Camera",
+             "Call", "Messages", "Terminal"};
     private static final int[] GLYPHS = {
-        AppIcons.MAP, AppIcons.RAIN, AppIcons.MUSIC, AppIcons.HEART, AppIcons.BLUETOOTH,
-        AppIcons.CAMERA, AppIcons.CALL, AppIcons.TERMINAL,
+        AppIcons.MAP, AppIcons.RAIN, AppIcons.MUSIC, AppIcons.HEART, AppIcons.WATCH,
+        AppIcons.BLUETOOTH, AppIcons.CAMERA, AppIcons.CALL, AppIcons.CONTACT,
+        AppIcons.TERMINAL,
     };
 
     /**
@@ -87,7 +89,9 @@ public class LauncherScreen extends ListScreen {
         if (name.equals("Sports")) return new SportsScreen();
         if (name.equals("Bluetooth")) return new BtScreen();
         if (name.equals("Camera")) return new CameraScreen();
+        if (name.equals("Sleep")) return new SleepScreen();
         if (name.equals("Call")) return new CallScreen();
+        if (name.equals("Messages")) return new MessagesScreen();
         if (name.equals("Terminal")) return new TermScreen();
         return null;
     }

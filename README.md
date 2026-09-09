@@ -51,6 +51,8 @@ buttons.
 | **Bluetooth** | Scan, pair, connect, forget. Pairs headphones over A2DP and keyboards over HID. Names devices that will not name themselves — see below. |
 | **Camera** | Viewfinder, shutter, self-timer, review. Saves to `/sdcard/DCIM/Camera`. |
 | **Call** | Dials from `contacts.txt`, answers incoming calls, and reads the system call log. |
+| **Messages** | Texts that have arrived. Nothing on the watch showed them before: `com.android.mms` is installed and enabled but ships with no launcher category, so it has no icon — see below. |
+| **Sleep** | Last night, scored on the watch rather than only on the tracker website. |
 | **Terminal** | A root shell, typed on a Bluetooth keyboard. |
 
 ## Controls
@@ -187,6 +189,56 @@ what makes it conclusive.
 
 So: a Bluetooth **Classic** mouse or keyboard works here. Anything sold as
 "Bluetooth 4.0 LE" does not, and no app-side change can alter that.
+
+## Messages, and what the vendor pushes over SMS
+
+Texts were arriving and being stored the whole time — the inbox held forty-nine of them — and
+nothing on the watch could show one. `com.android.mms` is installed and enabled but ships with no
+`LAUNCHER` category, so it has no icon and no way in, and this launcher builds its menu from a
+fixed table rather than from `queryIntentActivities`. A message arrived, went into the provider,
+and was never seen again.
+
+Two things about that inbox shape the screen.
+
+**The `date` column is not usable.** One message is stamped 2035, a dozen are stamped 1997 and
+several are negative — the modem's clock before the network sets it, written straight through.
+Ordering by date interleaves this week with 1997, so the order comes from the row id, which is
+monotonic, and a date is shown only when it falls inside a range the watch could have been
+running in.
+
+**Most of it is not correspondence.** Forty of the forty-nine were remote-control commands.
+`SmsControl` aborts those so they never reach the inbox, but the abort only runs on an ordered
+broadcast and `SMS_RECEIVED` is not ordered here, so they accumulate. They are filtered out of the
+list by shape — see `SmsFilter` — rather than by matching the configured password, because a
+command sent with the *wrong* password is what an attempt on this watch looks like and should not
+be the only kind of message that shows up.
+
+### ServerPushTxt
+
+The vendor's server sends messages to the watch as SMS from the sender `ServerPushTxt`, in three
+forms. The body is either plain text, or a single URL wrapped in brackets that say what it is:
+
+| body | meaning |
+|---|---|
+| `Hi` | a text message, shown as-is |
+| `{http://files.5gcity.com/photo_message/<epoch-ms>.png}` | a photo, in braces |
+| `[http://voicefile.5gcity.com/<epoch-ms>.mp3]` | a voice message, in square brackets |
+
+The filename is the server's millisecond timestamp. Both hosts are plain HTTP with no
+authentication of any kind: the URL is the only secret, it travels in an SMS, and anything that
+can guess a timestamp can read somebody's voice message. They were still serving files from
+January 2025 when this was written — a PNG of 12,748 bytes and an MP3 of 114,444 bytes came back
+with HTTP 200 — so this is not a dead endpoint that has been left in a table.
+
+Specific URLs are deliberately not written down here. They are live, unauthenticated links to
+somebody's photographs and voice recordings, and this file is public.
+
+**What supports them.** This launcher shows the text of all three, including the URL, but does not
+fetch the image or play the audio. `com.enqualcomm.imessage` is installed and enabled and is the
+vendor's app for exactly this — it registers `com.enqualcomm.imessage.PICTURE`, `MicroChat` and
+`VideoChat` activities — so the watch does support them, through an app this launcher gives no way
+to reach. Rendering them here would mean fetching an unauthenticated URL out of an SMS, which is a
+decision worth making deliberately rather than by default.
 
 ## Contacts
 
