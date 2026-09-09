@@ -59,9 +59,16 @@ public class SleepScreen extends Screen {
     @Override
     public void onShow() { refresh(); }
 
-    /** A tap rescores, because a night that ended while the watch was out of signal is common. */
+    /**
+     * A tap rescores, because a night that ended while the watch was out of signal is common.
+     *
+     * Only a tap. Returning true for everything took the hold with it, and the hold is the only
+     * way off a screen - so this scored the night beautifully and then would not let go of the
+     * watch. Anything that is not a tap goes back to the activity, which backs out of the screen.
+     */
     @Override
     public boolean onGesture(int button, int kind) {
+        if (button != ShellActivity.BTN_A || kind != ShellActivity.TAP) return false;
         if (working) return true;
         working = true;
         scored = "reading the night...";
