@@ -231,6 +231,20 @@ if javac -nowarn -d "$TD_STEP" $SF 2>/dev/null && javac -nowarn -cp "$TD_STEP" -
 fi
 rm -rf "$TD_STEP"
 
+# Which texts are the control channel and which are correspondence. SmsFilter touches no Android
+# class, so the inbox that prompted it - forty commands burying nine messages - drives the test.
+TD_SMS=$(mktemp -d)
+if javac -nowarn -d "$TD_SMS" "$HERE/src/org/watchlauncher/SmsFilter.java" 2>/dev/null && javac -nowarn -cp "$TD_SMS" -d "$TD_SMS" "$HERE/test/SmsFilterTest.java" 2>/dev/null; then
+    if ! java -cp "$TD_SMS" SmsFilterTest > "$TD_SMS/out"; then
+        echo "sms filter test FAILED:" >&2
+        cat "$TD_SMS/out" >&2
+        rm -rf "$TD_SMS"
+        exit 1
+    fi
+    tail -1 "$TD_SMS/out"
+fi
+rm -rf "$TD_SMS"
+
 # Speed and time to arrival. Drive touches no Android class so that the cases
 # that actually bite - stopped at a light, a fix that teleports, the watch
 # waking an hour later - can be driven here rather than discovered on a road.

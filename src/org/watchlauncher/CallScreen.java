@@ -42,6 +42,7 @@ public class CallScreen extends ListScreen {
                     null, AppIcons.NONE, Ui.WARN));
         }
         l.add(new Item("Call log", null, AppIcons.CALL));
+        l.add(new Item("Messages", null, AppIcons.CONTACT));
         l.add(new Item("Reload contacts", null, AppIcons.GEAR));
         addBack(l);
         return l;
@@ -75,7 +76,8 @@ public class CallScreen extends ListScreen {
         }
         switch (extra) {
             case 0: shell.push(new CallLogScreen()); break;
-            case 1:
+            case 1: shell.push(new MessagesScreen()); break;
+            case 2:
                 entries = Contacts.load();
                 shell.toast(entries.size() + " contacts");
                 render();
