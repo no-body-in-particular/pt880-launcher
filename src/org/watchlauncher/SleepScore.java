@@ -365,11 +365,44 @@ public class SleepScore {
      * whether to record at all - see {@link SleepRules#STILL_ENMO} for where the value comes
      * from. Reading it here costs nothing and is the difference between a number and a claim.
      */
+    /**
+     * Whether the arm-angle test means anything at this epoch length.
+     *
+     * Van Hees watches the angle over five-second epochs and calls a change under 0.13 degrees
+     * still. The threshold belongs to the interval: over five seconds a sleeping arm barely
+     * moves, and over a minute it drifts that far without anybody waking. This watch logs at
+     * about sixty seconds - twelve times the interval the number was calibrated for - and the
+     * test then measures the gap rather than the sleeper.
+     *
+     * Measured on two nights, against the stretch the wearer plainly slept through:
+     *
+     *     12-13 Sep, raw log 00:56-09:30 at 81% still by movement
+     *       angle and movement    00:56-09:30   TST 276 min   efficiency 56%
+     *       movement alone        00:56-09:30   TST 448 min   efficiency 87%
+     *
+     * Same window either way; the angle test removed a hundred and seventy minutes of sleep
+     * from inside it. Scaling the threshold with the epoch does not rescue it - at 0.46 degrees,
+     * what the square root of the interval ratio asks for, the same night reaches 334 minutes
+     * and 65%, and loosening further only stretches the period as fast as it adds sleep.
+     *
+     * The pulse was tried in its place, since every epoch now carries one. It is worse: a rate
+     * rises in REM and the reading attached to an epoch can be three minutes old, so it cut the
+     * same night to 319 minutes at ten beats of margin and 115 at five.
+     *
+     * So the test is used where its threshold means what it says and not otherwise. Fifteen
+     * seconds is three times the interval it was calibrated at, which is as far as a number like
+     * that stretches; past it, movement decides alone.
+     */
+    private static boolean angleUsable(int epochSec) {
+        return epochSec > 0 && epochSec <= 15;
+    }
+
     private static List<int[]> bouts(double[] change, double[] enmo, boolean[] still, double t,
                                      long[] atSec, int minBoutSec, int maxGapSec, int epochSec) {
         int n = change.length;
         for (int i = 0; i < n; i++)
-            still[i] = change[i] < t && enmo[i] < SleepRules.STILL_ENMO;
+            still[i] = enmo[i] < SleepRules.STILL_ENMO
+                    && (!angleUsable(epochSec) || change[i] < t);
 
         /* A bout survives movement shorter than an awakening.
          *
