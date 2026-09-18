@@ -70,6 +70,21 @@ public class SleepScreen extends Screen {
     public boolean onGesture(int button, int kind) {
         if (button != ShellActivity.BTN_A || kind != ShellActivity.TAP) return false;
         if (working) return true;
+
+        // A screen that says tracking is off should be able to turn it back on.
+        //
+        // Nothing on the watch could. The flag lived in preferences and the only writer that ever
+        // cleared it did so from a failed sensor lookup, so a watch that lost tracking stayed that
+        // way until somebody noticed the numbers had stopped and reached for a shell - two nights,
+        // the time it happened. The tap already means "do the sleep thing on this screen"; when
+        // tracking is off, the sleep thing is to start it.
+        if (!SleepLog.enabled(shell)) {
+            SleepLog.setEnabled(shell, true);
+            SleepService.schedule(shell, SleepService.WATCH_INTERVAL_MS);
+            scored = "tracking on; first burst within five minutes";
+            refresh();
+            return true;
+        }
         working = true;
         scored = "reading the night...";
         refresh();

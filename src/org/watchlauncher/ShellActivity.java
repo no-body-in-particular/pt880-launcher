@@ -12,6 +12,7 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.view.Gravity;
 import android.view.InputDevice;
+import android.util.Log;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
@@ -73,6 +74,7 @@ public class ShellActivity extends Activity {
     /** Auto-repeats seen before a hold counts as the "extra long" gesture. */
     private static final int XLONG_REPEATS = 60;
 
+
     /** How far a mouse has to travel, in pixels, to step the selection once.
      *  A row is about 28px, so this is a little under one row of movement per
      *  step -- fast enough to cross the launcher in a flick, slow enough to
@@ -119,7 +121,6 @@ public class ShellActivity extends Activity {
     // key state
     private int downKey = -1;
     private boolean longFired = false;
-    private int holdRepeats = 0;
     private Runnable longTask;
 
     // ---------------------------------------------------------------- lifecycle
@@ -545,6 +546,20 @@ public class ShellActivity extends Activity {
 
     // ---------------------------------------------------------------- keys
 
+    /*
+     * The two keys are swapped, at the wearer's request.
+     *
+     * BTN_A and BTN_B are roles rather than positions: A selects and, held, backs out; B moves
+     * to the next item. Which physical key plays which is decided here and nowhere else, so the
+     * swap is three lines at the points where a key press becomes a role - the screens, and the
+     * mouse and trackball emulation below, go on asking for the role they want and do not know
+     * anything moved.
+     *
+     * The two keys do not arrive alike, which is why this is not one line. The top key reaches
+     * the activity as KEYCODE_BACK and reports a hold through the repeat count; the lower one
+     * arrives as one of the codes isButtonB lists and is timed here with a delayed task. Each
+     * keeps its own mechanism and only the role it emits changes.
+     */
     private boolean isButtonA(int k) {
         return k == KeyEvent.KEYCODE_DPAD_CENTER || k == KeyEvent.KEYCODE_ENTER;
     }
@@ -637,12 +652,35 @@ public class ShellActivity extends Activity {
         // Repeats are honoured so holding the bud button ramps.
         if (isVolumeKey(keyCode)) { bumpVolume(keyCode); return true; }
 
-        if (keyCode == KeyEvent.KEYCODE_BACK) return true;      // acted on in onKeyUp
+        // The synthetic BACK is not trustworthy, so the real key is used instead.
+        //
+        // One press of the top key reaches the app twice: as keyCode 23 from device 0 with
+        // scanCode 28, which is the KEY_ENTER the kernel actually reported, and as keyCode 4
+        // from device -1, which nothing in the key layout produces and the system makes up. This
+        // acted on the made-up one and swallowed the real one.
+        //
+        // It is made up unreliably. Measured on one run of quick taps, getevent on the keypad
+        // recorded eight clean KEY_ENTER down/up pairs at eighty to a hundred and forty
+        // milliseconds apart, and the app saw five BACKs - so about a third of the presses never
+        // produced one. Slow presses did, which is exactly the report: only the slow ones
+        // scrolled.
+        //
+        // So the real key drives the button now, timed the same way the other one is: a delayed
+        // task marks a hold, and a release before it fires is a tap. The synthetic BACK is
+        // dropped where it arrives, so a press cannot count twice.
 
-        if (isButtonA(keyCode)) {
-            // Auto-repeats are the only part of the hold the app is allowed to
-            // see, so their count is the length of the press.
-            if (event.getRepeatCount() > holdRepeats) holdRepeats = event.getRepeatCount();
+        if (isButtonA(keyCode) || keyCode == KeyEvent.KEYCODE_BACK) {
+            if (event.getRepeatCount() > 0) return true;
+            downKey = keyCode;
+            longFired = false;
+            cancel(longTask);
+            longTask = new Runnable() {
+                public void run() {
+                    longFired = true;
+                    act(BTN_B, HOLD);
+                }
+            };
+            ui.postDelayed(longTask, LONG_MS);
             return true;
         }
         if (!isButtonB(keyCode)) return super.onKeyDown(keyCode, event);
@@ -654,7 +692,7 @@ public class ShellActivity extends Activity {
         longTask = new Runnable() {
             public void run() {
                 longFired = true;
-                act(BTN_B, HOLD);
+                act(BTN_A, HOLD);   // swapped: see the note on the two keys
             }
         };
         ui.postDelayed(longTask, LONG_MS);
@@ -665,14 +703,15 @@ public class ShellActivity extends Activity {
     public boolean onKeyUp(int keyCode, KeyEvent event) {
         if (isVolumeKey(keyCode)) return true;                  // handled on the way down
 
-        if (keyCode == KeyEvent.KEYCODE_BACK) {
-            int reps = holdRepeats;
-            holdRepeats = 0;
-            int kind = (reps == 0) ? TAP : (reps < XLONG_REPEATS ? HOLD : XHOLD);
-            act(BTN_A, kind);
+        // Either keycode of the top key ends the press; downKey says which one opened it, so the
+        // twin that did not is ignored rather than counted a second time.
+        if (isButtonA(keyCode) || keyCode == KeyEvent.KEYCODE_BACK) {
+            cancel(longTask);
+            if (longFired || downKey != keyCode) { downKey = -1; return true; }
+            downKey = -1;
+            act(BTN_B, TAP);
             return true;
         }
-        if (isButtonA(keyCode)) return true;                    // BACK is authoritative
 
         if (!isButtonB(keyCode)) return super.onKeyUp(keyCode, event);
         cancel(longTask);
@@ -684,7 +723,7 @@ public class ShellActivity extends Activity {
             prefs.edit().putBoolean("twoButtons", true).commit();
             renderHint();
         }
-        act(BTN_B, TAP);
+        act(BTN_A, TAP);   // swapped: see the note on the two keys
         return true;
     }
 

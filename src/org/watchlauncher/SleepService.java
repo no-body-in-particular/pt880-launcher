@@ -280,8 +280,22 @@ public class SleepService extends Service implements SensorEventListener {
         sensors = (SensorManager) getSystemService(Context.SENSOR_SERVICE);
         accel = (sensors == null) ? null
                 : sensors.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
+        /* No accelerometer this time is not the same as no accelerometer.
+         *
+         * This turned sleep tracking off, permanently, the first time getDefaultSensor came back
+         * null - and nothing in the watch turns it on again. The screen offers no switch; the only
+         * way back is a shell. It cost two nights before anyone noticed: at 16:43 on 14 September
+         * one burst found no sensor, the flag went false, and every alarm after that returned
+         * without doing anything. The accelerometer was there the whole time, a QST QMAX981 the
+         * sensor service lists at 200 Hz; the reading that failed was taken across a reboot.
+         *
+         * So a null is a burst to skip, not a feature to end. The alarm for the next one was armed
+         * above, before this test, so skipping costs a single epoch. A watch that genuinely has no
+         * accelerometer wakes every five minutes and finds none, which is a cost worth paying to
+         * not lose the nights of every watch that has one.
+         */
         if (accel == null) {
-            SleepLog.setEnabled(this, false);
+            Log.i(TAG, "no accelerometer for this burst; trying again at the next alarm");
             finishBurst();
             return START_NOT_STICKY;
         }
