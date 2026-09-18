@@ -487,6 +487,12 @@ public class SleepService extends Service implements SensorEventListener {
         }
 
         sampling = false;
+        // To a file, not to the log. The GPS layer writes thousands of lines a minute, so
+        // logcat rotates long before anyone reads it - three diagnostics have already been
+        // lost that way and read as "the code never ran".
+        CadenceLog.append(now, samplingAt, n,
+                n > 0 ? sx / n : 0, n > 0 ? sy / n : 0, n > 0 ? sz / n : 0,
+                next, SleepLog.state(this));
         if (SleepLog.enabled(this)) schedule(this, next);
         releaseWakeLock();
         stopSelf();
