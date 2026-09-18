@@ -361,6 +361,34 @@ public class SleepLog {
                 at, x, y, z, sd, enmo, range, samples, bpm, tempC);
     }
 
+    /**
+     * Every session the scorer considered, with what it decided and why.
+     *
+     * The measure that tells sleep from sitting still - the median within-burst range - was
+     * settled on from two nights, and a threshold drawn from two nights is a guess with a
+     * decimal point on it. This keeps the value for every session, passed or refused, so the
+     * guess can be checked against a week of real ones rather than re-argued from memory.
+     */
+    public static synchronized void appendSessions(String night, java.util.List<String> lines) {
+        if (lines == null || lines.isEmpty()) return;
+        FileWriter w = null;
+        try {
+            File dir = new File(DIR);
+            if (!dir.isDirectory() && !dir.mkdirs()) return;
+            File f = new File(DIR, "sessions.csv");
+            boolean fresh = !f.exists();
+            w = new FileWriter(f, true);
+            if (fresh) w.write("# night,startMillis,endMillis,sleepMin,medRange,verdict\n");
+            for (int i = 0; i < lines.size(); i++) {
+                w.write(night + "," + lines.get(i) + "\n");
+            }
+        } catch (Exception e) {
+            // a diagnostic, not the night itself
+        } finally {
+            try { if (w != null) w.close(); } catch (Exception e) { }
+        }
+    }
+
     private static synchronized void appendTo(File f, long at,
             double x, double y, double z, double sd, double enmo,
             double range, int samples, int bpm, double tempC) {

@@ -723,6 +723,11 @@ public class SleepService extends Service implements SensorEventListener {
                     if (minutes < MIN_SCORABLE_MIN) return;   // a nap, not a night
 
                     SleepScore.Result r = SleepScore.score(epochs);
+
+                    // Written before the validity test, because a night that scored nothing is
+                    // exactly the one worth being able to look at afterwards.
+                    SleepLog.appendSessions(night, r.sessionLog);
+
                     if (!r.valid) return;
 
                     // A night may be scored more than once, but only upwards.
