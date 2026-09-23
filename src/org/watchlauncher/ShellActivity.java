@@ -10,6 +10,7 @@ import android.media.AudioManager;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
+import android.os.SystemClock;
 import android.view.Gravity;
 import android.view.InputDevice;
 import android.util.Log;
@@ -122,6 +123,22 @@ public class ShellActivity extends Activity {
     private int downKey = -1;
     private boolean longFired = false;
     private Runnable longTask;
+
+    /** Whether a press of the top key is open. Not which code opened it: either of its two
+     *  codes may, and the one that did not must not be able to close it or open a second. */
+    private boolean topDown = false;
+
+    /** When the top key last produced a tap, so its twin arriving late is not a second press. */
+    private long topTapAt = 0;
+
+    /**
+     * Inside this many milliseconds of a tap, another top-key press is the same press.
+     *
+     * The twin arrives within a millisecond or two of the real key; the wearer's own quick taps
+     * were measured at eighty to a hundred and forty apart. Forty sits well clear of both, so
+     * this refuses the duplicate without refusing anybody's second press.
+     */
+    private static final int TWIN_MS = 40;
 
     // ---------------------------------------------------------------- lifecycle
 
@@ -564,6 +581,34 @@ public class ShellActivity extends Activity {
         return k == KeyEvent.KEYCODE_DPAD_CENTER || k == KeyEvent.KEYCODE_ENTER;
     }
 
+    /**
+     * The top key, under either of the two codes one press of it can produce.
+     *
+     * The real one is KEYCODE_ENTER, from the keypad, scan code 28, on every press. The other is
+     * KEYCODE_BACK from device -1, which nothing in the key layout produces and the system makes
+     * up on about two presses in three. Both are the same key and both have to be recognised,
+     * because the made-up one is the only thing that arrives if the layout is ever missing - it
+     * is what the button ran on before /system/usr/keylayout/sprd-keypad.kl existed.
+     *
+     * Recognising both is not the same as acting on both, and the difference is the whole bug.
+     * The code here used to remember which of the two opened the press and require the same one
+     * to close it, which produces one tap only if exactly one of the orderings happens:
+     *
+     *     ENTER down, ENTER up, BACK down, BACK up     two taps - it scrolls twice
+     *     ENTER down, BACK down, ENTER up, BACK up     none - the release matches neither
+     *
+     * Both were live. It behaved because the key layout had just been written and the made-up
+     * BACK had stopped arriving at all, so neither ordering occurred - the fix was one input
+     * event away from failing and nothing in it said so.
+     *
+     * So the press is tracked as a press rather than as a code: the first of the two opens it,
+     * the second is ignored, the first release is the tap and the second is ignored. Exactly one
+     * tap per press whichever codes arrive, in whichever order, and whether one or both.
+     */
+    private boolean isTopKey(int k) {
+        return isButtonA(k) || k == KeyEvent.KEYCODE_BACK;
+    }
+
     /** The watch's second key -- the former power key, remapped to DPAD_DOWN.
      *  Deliberately not the volume keys: those belong to the headphones' own
      *  volume buttons over AVRCP. */
@@ -648,6 +693,8 @@ public class ShellActivity extends Activity {
      */
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
+        KeyLog.append("down", keyCode, event);
+
         // Volume from the headphones (AVRCP) or anywhere else, on every screen.
         // Repeats are honoured so holding the bud button ramps.
         if (isVolumeKey(keyCode)) { bumpVolume(keyCode); return true; }
@@ -669,9 +716,12 @@ public class ShellActivity extends Activity {
         // task marks a hold, and a release before it fires is a tap. The synthetic BACK is
         // dropped where it arrives, so a press cannot count twice.
 
-        if (isButtonA(keyCode) || keyCode == KeyEvent.KEYCODE_BACK) {
+        if (isTopKey(keyCode)) {
             if (event.getRepeatCount() > 0) return true;
-            downKey = keyCode;
+            // Either code may open the press; whichever arrives second is the same press.
+            if (topDown) return true;
+            if (SystemClock.uptimeMillis() - topTapAt < TWIN_MS) return true;
+            topDown = true;
             longFired = false;
             cancel(longTask);
             longTask = new Runnable() {
@@ -701,14 +751,19 @@ public class ShellActivity extends Activity {
 
     @Override
     public boolean onKeyUp(int keyCode, KeyEvent event) {
+        KeyLog.append("up", keyCode, event);
+
         if (isVolumeKey(keyCode)) return true;                  // handled on the way down
 
-        // Either keycode of the top key ends the press; downKey says which one opened it, so the
-        // twin that did not is ignored rather than counted a second time.
-        if (isButtonA(keyCode) || keyCode == KeyEvent.KEYCODE_BACK) {
+        // Either code of the top key ends the press, and exactly one tap comes out of it.
+        if (isTopKey(keyCode)) {
+            if (!topDown) return true;              // the twin's release; the press is spent
+            topDown = false;
             cancel(longTask);
-            if (longFired || downKey != keyCode) { downKey = -1; return true; }
-            downKey = -1;
+            if (longFired) return true;
+            long now = SystemClock.uptimeMillis();
+            if (now - topTapAt < TWIN_MS) return true;
+            topTapAt = now;
             act(BTN_B, TAP);
             return true;
         }
