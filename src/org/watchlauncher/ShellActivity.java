@@ -604,6 +604,17 @@ public class ShellActivity extends Activity {
      * So the press is tracked as a press rather than as a code: the first of the two opens it,
      * the second is ignored, the first release is the tap and the second is ignored. Exactly one
      * tap per press whichever codes arrive, in whichever order, and whether one or both.
+     *
+     * What the first capture after this actually showed, and it is worth being straight about:
+     * twenty presses, every one of them keyCode 66 on scan code 28 from device 0, and not a
+     * single invented BACK among them. So the account above of why the button stopped - that the
+     * made-up code had started arriving again - is not evidence, it is the theory that fitted.
+     * The reinstall alone may have been what fixed it. The two orderings are still real and the
+     * handler is still wrong without this, which is reason enough to keep it; it is not reason
+     * to believe it was the cause.
+     *
+     * The same capture does settle one older question: repeat count was zero on all forty
+     * events, so this key does not auto-repeat. That was assumed once and acted on once.
      */
     private boolean isTopKey(int k) {
         return isButtonA(k) || k == KeyEvent.KEYCODE_BACK;
