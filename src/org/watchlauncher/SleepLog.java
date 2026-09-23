@@ -378,7 +378,7 @@ public class SleepLog {
             File f = new File(DIR, "sessions.csv");
             boolean fresh = !f.exists();
             w = new FileWriter(f, true);
-            if (fresh) w.write("# night,startMillis,endMillis,sleepMin,medRange,verdict\n");
+            if (fresh) w.write("# night,startMillis,endMillis,sleepMin,medRange,medAngleDeg,verdict\n");
             for (int i = 0; i < lines.size(); i++) {
                 w.write(night + "," + lines.get(i) + "\n");
             }

@@ -171,6 +171,64 @@ public class SleepRulesTest {
         check("a watch face down on a table is kept",
                 SleepRules.measuredAWrist(0.02, -0.01, -0.999), "still a wrist reading");
 
+        // --- a session is sleep by how far the arm turns, not by how much one burst spread ---
+        //
+        // Every figure below is a real session's median, measured over five nights on the pairs
+        // where the quantity means what van Hees's threshold says. The four unambiguous nights
+        // sit an order of magnitude inside the line; the desk sessions sit from twice to a
+        // hundred and fifty times outside it.
+        check("a night at 0.019 is sleep",
+                SleepRules.angleSaysSleep(0.019), "22 Sep 17:22-21:51");
+        check("a night at 0.049 is sleep",
+                SleepRules.angleSaysSleep(0.049), "19 Sep 22:44-05:13");
+        check("a night at 0.052 is sleep",
+                SleepRules.angleSaysSleep(0.052), "20 Sep 23:42-03:57, which the range refused");
+        check("a night at 0.063 is sleep",
+                SleepRules.angleSaysSleep(0.063), "22 Sep 22:48-05:52");
+        check("a desk afternoon at 0.231 is not",
+                !SleepRules.angleSaysSleep(0.231), "21 Sep 12:03-16:21");
+        check("nor one at 18.536",
+                !SleepRules.angleSaysSleep(18.536), "20 Sep 13:49-16:07, which the range admitted");
+        check("nor one at 20.429",
+                !SleepRules.angleSaysSleep(20.429), "22 Sep 10:46-12:22");
+
+        // An evening of sitting joined to the night that followed it: 1.4, 2.3, 2.6, 9.9 by the
+        // hour and then 0.04, 0.09, 0.04. Refusing the session as built is the right answer to
+        // the question actually asked of it.
+        check("an evening blended into a night is refused",
+                !SleepRules.angleSaysSleep(0.159), "21 Sep 19:30-02:06");
+
+        // --- a session nothing comparable covered cannot be judged ----------------------------
+        check("no comparable pair is not sleep",
+                !SleepRules.angleSaysSleep(Double.NaN), "refused rather than assumed");
+        check("a negative median is not sleep",
+                !SleepRules.angleSaysSleep(-1.0), "");
+
+        // --- which pairs may be compared at all -----------------------------------------------
+        // Both of these traps cost a real night. Five minutes apart the arm has had five minutes
+        // to move, and a vitals window averages its angle over eighty seconds rather than five.
+        check("two bursts one logging step apart may be compared",
+                SleepRules.anglePairUsable(35, 80, 80), "30s alarm plus a 5s burst");
+        check("one delayed alarm is still a pair",
+                SleepRules.anglePairUsable(60, 80, 80), "");
+        check("two bursts at the watching cadence may not",
+                !SleepRules.anglePairUsable(300, 80, 80), "five minutes is not one step");
+        check("a vitals window may not be compared to a burst",
+                !SleepRules.anglePairUsable(35, 80, 3885), "its angle spans eighty seconds");
+        check("nor two vitals windows to each other",
+                !SleepRules.anglePairUsable(35, 2957, 3764), "");
+        check("a row with no samples is not a measurement",
+                !SleepRules.anglePairUsable(35, 80, 0), "");
+        check("nor is a pair with no time between them",
+                !SleepRules.anglePairUsable(0, 80, 80), "");
+
+        // --- the median, since the gate is one -------------------------------------------------
+        check("the median of the used entries ignores the rest",
+                SleepRules.median(new double[]{0.05, 0.01, 0.09, 999.0}, 3) == 0.05,
+                "a scratch array is only filled as far as k");
+        check("no entries at all is not a number",
+                Double.isNaN(SleepRules.median(new double[]{1.0}, 0)), "");
+
         System.out.println(fails == 0 ? "sleep rules: all checks passed"
                                       : "sleep rules: " + fails + " FAILED");
         if (fails > 0) System.exit(1);

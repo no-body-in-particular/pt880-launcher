@@ -181,4 +181,92 @@ public final class SleepRules {
         int next = still ? movedSec - stepSec : movedSec + stepSec;
         return next < 0 ? 0 : next;
     }
+    /**
+     * Above this median change in arm angle from one epoch to the next, a session is somebody
+     * sitting still rather than sleeping. Degrees.
+     *
+     * This replaces a gate on the within-burst range, which did not survive a fifth night. Its
+     * comment recorded a clean split on two - the nights at 0.0182 and 0.0183, everything else
+     * from 0.0293 up - and the split was an artefact. Range is the spread of the magnitude
+     * inside one burst, so it grows with the length of the burst, and the night log has two
+     * writers with windows that differ by a factor of forty: the recorder's five second bursts
+     * and the vitals path's thirty to eighty second ones. Over four nights the same wrist reads
+     *
+     *     five second bursts     median range 0.0118
+     *     vitals windows         median range 0.0625
+     *
+     * so a session's median said mostly which writer covered it. What covered a session tracks
+     * the recorder's state, which tracks whether it is night - which is why two nights looked
+     * separable. By the fifth the gate was inverted: it refused three real nights at 0.0230,
+     * 0.0231 and 0.0303 and admitted a desk afternoon at 0.0219.
+     *
+     * The angle change does not have that defect - it is a difference between two epochs rather
+     * than a spread inside one - and 0.13 is van Hees's own figure for five second epochs, which
+     * is what the bursts are. Measured across five nights, on the pairs where it means what it
+     * says:
+     *
+     *     asleep      0.019  0.049  0.052  0.063
+     *     at a desk   0.231  6.320  6.518  11.289  15.925  18.536  20.429
+     *
+     * The nearest thing between them is 0.159, a session running 19:30 to 02:06 whose own hours
+     * read 1.4, 2.3, 2.6, 9.9 and then 0.04, 0.09, 0.04 - an evening of sitting that the session
+     * builder joined to the night that followed it. It is on the right side of the line for the
+     * right reason.
+     */
+    public static final double SLEEP_ANGLE_CHANGE_MAX = 0.13;
+
+    /**
+     * Two epochs further apart than this are not neighbours and their angles cannot be compared.
+     *
+     * The same trap as the range, one level up. Five minutes apart the arm has had five minutes
+     * to move, so the change between two bursts at the watching cadence is not the change
+     * between two at the logging cadence, and a session that spans both would be judged mostly
+     * on which it spent longer in. Sixty seconds takes the logging cadence's own interval -
+     * thirty seconds plus a five second burst, or about thirty-five - with room for one delayed
+     * alarm, and refuses everything else.
+     */
+    public static final int ANGLE_PAIR_MAX_SEC = 60;
+
+    /**
+     * An epoch gathered from more samples than this is not a five second burst.
+     *
+     * The vitals path writes what its own measurement watched, which is thirty to eighty seconds
+     * and about three thousand samples. Its angle is a mean over that whole window, so it is not
+     * the quantity van Hees's threshold describes. Eighty samples is a burst; two hundred leaves
+     * room for a slow one without admitting a vitals window.
+     */
+    public static final int ANGLE_MAX_SAMPLES = 200;
+
+    /**
+     * Can these two epochs be compared? They must be neighbours in time and both five second
+     * bursts, or the difference between their angles measures the cadence rather than the wrist.
+     */
+    public static boolean anglePairUsable(long gapSec, int samplesA, int samplesB) {
+        if (gapSec <= 0 || gapSec > ANGLE_PAIR_MAX_SEC) return false;
+        if (samplesA <= 0 || samplesA > ANGLE_MAX_SAMPLES) return false;
+        if (samplesB <= 0 || samplesB > ANGLE_MAX_SAMPLES) return false;
+        return true;
+    }
+
+    /**
+     * Does a session's median angle change say its wearer was asleep?
+     *
+     * NaN - no comparable pair anywhere in the session - is not sleep. A session the recorder
+     * never entered its fine cadence for is one the vitals path alone covered, and judging it
+     * from a statistic that does not apply is how a desk afternoon was called a night. Refusing
+     * it loses a nap nothing else saw; admitting it loses the distinction entirely.
+     */
+    public static boolean angleSaysSleep(double medianChangeDeg) {
+        if (Double.isNaN(medianChangeDeg) || medianChangeDeg < 0) return false;
+        return medianChangeDeg < SLEEP_ANGLE_CHANGE_MAX;
+    }
+
+    /** The median of the first {@code n} entries, which this sorts. NaN if there are none. */
+    public static double median(double[] v, int n) {
+        if (v == null || n <= 0) return Double.NaN;
+        double[] c = new double[n];
+        System.arraycopy(v, 0, c, 0, n);
+        java.util.Arrays.sort(c);
+        return c[n / 2];
+    }
 }

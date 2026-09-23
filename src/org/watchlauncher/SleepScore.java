@@ -77,15 +77,10 @@ public class SleepScore {
     /** Bouts further apart than this belong to separate sleeps rather than one broken night. */
     private static final int SESSION_GAP_MIN = 45;
 
-    /**
-     * Above this median within-burst range a session is somebody sitting still, not sleeping.
-     *
-     * 0.022 sits between the two nights measured, at 0.0183, and the nearest thing to them,
-     * a desk afternoon at 0.0246 over its own window. That is about a third of headroom on two
-     * nights of evidence, which is thin - so every session is logged with its value whether it
-     * passes or not, and the number should be argued with once a week of them exists.
-     */
-    private static final double SLEEP_RANGE_MAX = 0.022;
+    /* The session gate - is this stretch sleep, or somebody sitting still - is now
+     * SleepRules.SLEEP_ANGLE_CHANGE_MAX, which carries the reasoning that got it there. It used
+     * to be a threshold on the within-burst range, and that measure does not survive five
+     * nights. */
 
     /** An awakening has to last this long to be counted as one. Movement
      *  flickers either side of the threshold, so without this a single trip to
@@ -157,8 +152,23 @@ public class SleepScore {
      *     the two real nights     0.0182  0.0183
      *     everything else         0.0293  0.0506  0.0967  0.1219  0.1310  0.1788  0.1906
      *
-     * That is the only clean split any measure here produced, and the nights agreeing with each
-     * other to four decimal places is what makes it worth believing.
+     * That looked like the only clean split any measure here produced. It was not a split in
+     * the wrist. Range is the spread of the magnitude inside one burst, so it grows with the
+     * length of the burst - and the night log is written by two things whose windows differ by
+     * forty times: this recorder's five second bursts, and the thirty to eighty second ones the
+     * vitals path keeps from a measurement it was making anyway. Over four nights, one wrist:
+     *
+     *     five second bursts     median range 0.0118
+     *     vitals windows         median range 0.0625
+     *
+     * So a session's median said mostly which of the two had covered it. Which one did follows
+     * the recorder's state, and that follows the time of day, which is why two nights looked
+     * separable and why the third decimal place agreed. By the fifth night it had inverted:
+     * three real nights refused at 0.0230, 0.0231 and 0.0303, and a desk afternoon admitted at
+     * 0.0219.
+     *
+     * It is still computed, and still written to the sessions file beside the measure that
+     * replaced it, because a number that was wrong in a legible way is worth being able to see.
      */
     private static double medianRange(List<SleepLog.Epoch> epochs, int from, int to) {
         int n = to - from + 1;
@@ -167,6 +177,28 @@ public class SleepScore {
         for (int i = 0; i < n; i++) v[i] = epochs.get(from + i).range;
         java.util.Arrays.sort(v);
         return v[n / 2];
+    }
+
+    /**
+     * The median change in arm angle between neighbouring epochs of a session, in degrees.
+     *
+     * Only pairs the change means something for: both of them five second bursts, and close
+     * enough together to be one step of the same cadence. Everything else is skipped rather
+     * than approximated, because approximating it is exactly what the measure this replaces
+     * did wrong. A session with no such pair anywhere in it returns NaN, which
+     * SleepRules.angleSaysSleep reads as "not sleep" rather than as "no objection".
+     */
+    private static double medianAngleChange(List<SleepLog.Epoch> epochs, int from, int to) {
+        int n = to - from;
+        if (n <= 0) return Double.NaN;
+        double[] v = new double[n];
+        int k = 0;
+        for (int i = from; i < to; i++) {
+            SleepLog.Epoch p = epochs.get(i), q = epochs.get(i + 1);
+            if (!SleepRules.anglePairUsable((q.at - p.at) / 1000L, p.samples, q.samples)) continue;
+            v[k++] = Math.abs(q.zAngle() - p.zAngle());
+        }
+        return SleepRules.median(v, k);
     }
 
     private static long sleepSecIn(boolean[] still, long[] atSec, int from, int to, int epochSec) {
@@ -291,19 +323,23 @@ public class SleepScore {
             int a = sessions.get(k)[0], b = sessions.get(k)[1];
             long sleep = sleepSecIn(still, atSec, a, b, r.epochSec);
             double rng = medianRange(epochs, a, b);
-            boolean asleep = rng > 0 && rng < SLEEP_RANGE_MAX;
+            double dAng = medianAngleChange(epochs, a, b);
+            boolean asleep = SleepRules.angleSaysSleep(dAng);
 
-            // Every session is written down, passed or not, because the threshold above is a
-            // hypothesis drawn from two nights and wants a week of real ones to argue with.
+            // Every session is written down, passed or not, and now with both measures: the one
+            // deciding, and the one that used to. Five nights are what caught the first, from
+            // this file. The second is owed the same chance to be argued with.
             r.sessionLog.add(epochs.get(a).at + "," + epochs.get(b).at + ","
                     + (sleep / 60) + "," + String.format(java.util.Locale.US, "%.4f", rng)
+                    + "," + (Double.isNaN(dAng) ? "nodata"
+                            : String.format(java.util.Locale.US, "%.4f", dAng))
                     + "," + (asleep ? "sleep" : "not"));
 
             if (asleep) r.allSleepMin += (int) (sleep / 60);
             if (asleep && sleep > bestSleep) { bestSleep = sleep; from = a; to = b; }
         }
         // Nothing looked like sleep. Rather than report the day, report nothing.
-        if (bestSleep < 0) { r.why = "no session settled enough to be sleep"; return r; }
+        if (bestSleep < 0) { r.why = "no session still enough by arm angle to be sleep"; return r; }
 
         // Inside the period, still is sleep and moving is wake.
         int sleepEpochs = 0, wakeEpochs = 0;
