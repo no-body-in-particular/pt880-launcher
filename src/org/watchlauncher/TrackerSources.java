@@ -600,6 +600,22 @@ public final class TrackerSources {
     /** A pulse older than this says nothing about what the wrist was doing while it counted. */
     private static final long BPM_FOR_STEPS_MS = 12 * 60 * 1000;
 
+    /**
+     * The raw counter as this class last saw it, or -1.
+     *
+     * A read of what is already cached rather than a read of the sensor: the step counter is
+     * on-demand and answers through a callback, so asking it directly from inside a burst means
+     * registering a listener and waiting, which is the one thing a burst must not do.
+     */
+    public static int lastRawSteps(Context app) {
+        try {
+            return app.getSharedPreferences("tracker", Context.MODE_PRIVATE)
+                      .getInt(KEY_STEP_RAW, -1);
+        } catch (Throwable t) {
+            return -1;
+        }
+    }
+
     private static synchronized int stepsToday(Context app, int rawNow) {
         SharedPreferences p;
         try {

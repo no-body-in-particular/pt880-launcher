@@ -48,6 +48,14 @@ import android.os.SystemClock;
  */
 public class SleepService extends Service implements SensorEventListener {
 
+    /** The raw step counter at the previous burst, or -1.
+     *
+     *  Static because this service is started fresh for each burst and stops itself at the end
+     *  of one, so an instance field would be -1 every time and never produce an increment. The
+     *  process outlives the service; a reboot loses one reading, which StepFilter.rise already
+     *  treats as nothing to credit rather than as the counter's whole history. */
+    private static int lastRawSteps = -1;
+
     private static final String TAG = "SleepService";
 
     /** How soon to try again after the accelerometer hands back an empty buffer. */
@@ -490,6 +498,21 @@ public class SleepService extends Service implements SensorEventListener {
         // To a file, not to the log. The GPS layer writes thousands of lines a minute, so
         // logcat rotates long before anyone reads it - three diagnostics have already been
         // lost that way and read as "the code never ran".
+        // Steps since the previous burst, for the same reason as the screen: it is the one other
+        // thing that says "awake" without asking the accelerometer, and nobody was writing it
+        // down. The counter is a separate chip that is already counting, so this is a read.
+        try {
+            int rawNow = TrackerSources.lastRawSteps(this);
+            if (rawNow >= 0) {
+                if (lastRawSteps >= 0) {
+                    AwakeLog.append("steps", StepFilter.rise(lastRawSteps, rawNow));
+                }
+                lastRawSteps = rawNow;
+            }
+        } catch (Throwable t) {
+            // a diagnostic; it must not cost the burst
+        }
+
         CadenceLog.append(now, samplingAt, n,
                 n > 0 ? sx / n : 0, n > 0 ? sy / n : 0, n > 0 ? sz / n : 0,
                 next, SleepLog.state(this));

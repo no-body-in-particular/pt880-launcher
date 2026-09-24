@@ -126,6 +126,14 @@ public class ShellActivity extends Activity {
 
     /** Whether a press of the top key is open. Not which code opened it: either of its two
      *  codes may, and the one that did not must not be able to close it or open a second. */
+    /**
+     * Screen on and off, written down for the sleep watcher to learn from later.
+     *
+     * ACTION_SCREEN_ON and _OFF are the two broadcasts Android refuses to deliver to a manifest
+     * receiver, so this has to be registered by something long-lived. The home activity is that.
+     */
+    private android.content.BroadcastReceiver screenWatch;
+
     private boolean topDown = false;
 
     /** When the top key last produced a tap, so its twin arriving late is not a second press. */
@@ -150,6 +158,21 @@ public class ShellActivity extends Activity {
         // as the home screen it is relaunched immediately, so a failure looks
         // like the app navigating rather than dying. Record it on the card.
         Crash.install(this);
+
+        // Screen on and off, for the sleep watcher to learn from. Nothing reads it yet: every
+        // signal the watcher has is the accelerometer asked a different way, and against a
+        // labelled desk afternoon none of them separates it from a night. This one is not the
+        // accelerometer, and it costs nothing - the broadcast is sent whether anyone listens.
+        screenWatch = new android.content.BroadcastReceiver() {
+            public void onReceive(android.content.Context c, android.content.Intent i) {
+                AwakeLog.append("screen",
+                        android.content.Intent.ACTION_SCREEN_ON.equals(i.getAction()) ? 1 : 0);
+            }
+        };
+        android.content.IntentFilter screens = new android.content.IntentFilter();
+        screens.addAction(android.content.Intent.ACTION_SCREEN_ON);
+        screens.addAction(android.content.Intent.ACTION_SCREEN_OFF);
+        registerReceiver(screenWatch, screens);
 
         // And say so, once, if the last run ended badly. A crash that only
         // happens in the field is otherwise invisible: the watch relaunches
@@ -347,6 +370,10 @@ public class ShellActivity extends Activity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        if (screenWatch != null) {
+            try { unregisterReceiver(screenWatch); } catch (Exception e) { /* already gone */ }
+            screenWatch = null;
+        }
         for (int i = stack.size() - 1; i >= 0; i--) stack.get(i).onHide();
         if (bt != null) bt.stop();
         if (root != null) root.close();
