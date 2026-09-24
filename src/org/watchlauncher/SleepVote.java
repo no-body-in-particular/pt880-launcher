@@ -40,12 +40,24 @@ public final class SleepVote {
      *     pulse    p10 49     med 53     p90 55      p10 56     med 58    p90 67
      *     enmo     p25 0      med 0      p75 0       p25 0      med 0.012 p75 0.056
      *
-     * Which is also the order of their weight. The pulse divides the two almost exactly at
-     * resting plus four. The angle is the only measure that has been shown to tell a desk from
-     * a bed on this wrist, and below van Hees's 0.13 it is three awake bursts in a hundred.
-     * Movement is the weakest of the three and had the most weight: a wrist at a desk is
-     * perfectly still for three quarters of its bursts, which is the complaint this all started
-     * from.
+     * Those figures are a night against the morning after it, and they flatter every signal
+     * here, because being up and about is not the thing the watcher has to rule out. Asked
+     * instead of the sessions the wearer has labelled - 796 sleeping bursts against 28 at a
+     * desk, which is the comparison that matters:
+     *
+     *                  asleep                     at a desk
+     *     |dAng|   p25 0.016  med 0.047       p25 0.071  med 0.231
+     *     pulse    p10 51     med 56          p10 52     med 53
+     *     enmo     med 0      p90 0.0155      med 0      p90 0.0374
+     *
+     * Only the angle survives that, and only by a factor of five with the distributions well
+     * overlapped. The desk is stiller than the bed and its pulse is lower. So the weights below
+     * are the angle's, with movement as weak support and the pulse reduced to saying when
+     * somebody is plainly moving about.
+     *
+     * Twenty-eight bursts of one afternoon is not a calibration. It is enough to rule things
+     * out and not enough to set a threshold on, which is why nothing here is wired into the
+     * service yet.
      */
 
     public static final int FOR = 1;
@@ -94,28 +106,40 @@ public final class SleepVote {
     /**
      * At or below its resting rate plus this, a pulse is positive evidence of sleep.
      *
-     * Four, against a resting estimate of 51. Per burst across the night of 23-24 September
-     * the sleeping rate ran to a 90th percentile of 55 and the waking one started at a 10th of
-     * 56, so resting plus four sits in the gap rather than inside either distribution. Two, the
-     * first guess here, was inside the sleeping one and threw away half of its own evidence.
+     * There is no such rate on this wearer, and the margin is gone.
+     *
+     * It was four, from a night against the waking morning after it - asleep reached 55 and
+     * awake began at 56, which looked like a clean division and was one. It was a division
+     * between sleeping and being up and about, not between sleeping and sitting still, and the
+     * watcher only ever has to make the second one.
+     *
+     * Asked of the sessions the wearer has since labelled, over 796 sleeping bursts and 28 at a
+     * desk:
+     *
+     *     asleep    p10 51   med 56   p90 62
+     *     at desk   p10 52   med 53   p90 58
+     *
+     * The desk is the lower of the two. A rate near resting was being read as evidence of
+     * sleep, and on this wearer it is marginally evidence against. Nothing here votes for sleep
+     * on the pulse any more.
      */
-    public static final int PULSE_SLEEP_MARGIN = 4;
 
     /**
      * Above resting plus this, a pulse is evidence against.
      *
-     * Seven rather than the veto's five, because this one has to survive being wrong. A rate
-     * three or four above resting is where sleeping and sitting still genuinely overlap on this
-     * wearer - asleep reaches 55 and sedentary sits about 54 - and a signal that cannot tell
-     * them apart should say so rather than pick.
+     * Fifteen, which is above the 90th percentile of every sleeping burst measured here (62
+     * against a resting 51) and above the desk's too (58). What is left to it is the rate of
+     * somebody moving about, which is the only thing it has been shown to tell apart. Seven
+     * would have called a fifth of real sleep awake for nothing.
      */
-    public static final int PULSE_AWAKE_MARGIN = 7;
+    public static final int PULSE_AWAKE_MARGIN = 15;
 
-    public static final int W_PULSE = 2;
+    /** Low, because all it can now say is that the wearer is plainly active, which movement and
+     *  the angle will both be saying at the same time. */
+    public static final int W_PULSE = 1;
 
     public static int pulse(int bpm, int restingBpm) {
         if (bpm <= 0 || restingBpm <= 0) return ABSTAIN;
-        if (bpm <= restingBpm + PULSE_SLEEP_MARGIN) return FOR;
         if (bpm > restingBpm + PULSE_AWAKE_MARGIN) return AGAINST;
         return ABSTAIN;
     }

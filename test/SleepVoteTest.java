@@ -32,19 +32,19 @@ public class SleepVoteTest {
         check("a shift in between says nothing",
                 SleepVote.movement(0.020) == SleepVote.ABSTAIN, "sleepers turn over");
 
-        // --- pulse: the cleanest divider, and still not clean ----------------------------------
-        // Per burst: asleep p90 55, awake p10 56, against a resting of 51.
-        check("the sleeping 90th percentile votes for sleep",
-                SleepVote.pulse(55, RESTING) == SleepVote.FOR, "55 = resting + 4");
-        check("a deep sleeping rate does too",
-                SleepVote.pulse(49, RESTING) == SleepVote.FOR, "");
-        check("the waking 10th percentile does not vote for sleep",
-                SleepVote.pulse(56, RESTING) != SleepVote.FOR, "56 = resting + 5");
-        check("a plainly active rate votes against",
-                SleepVote.pulse(67, RESTING) == SleepVote.AGAINST, "awake p90");
-        check("the overlap says nothing rather than picking",
-                SleepVote.pulse(57, RESTING) == SleepVote.ABSTAIN,
-                "asleep reaches 55, sedentary sits about 54");
+        // --- pulse: it does not divide sleep from sitting still, so it no longer tries ---------
+        // Labelled bursts: asleep p10 51 med 56 p90 62, at a desk p10 52 med 53 p90 58. The
+        // desk is the lower of the two, so a low rate cannot be evidence of sleep here.
+        check("a sleeping rate does not vote for sleep",
+                SleepVote.pulse(53, RESTING) != SleepVote.FOR, "the desk's own median is 53");
+        check("nor does one at resting",
+                SleepVote.pulse(51, RESTING) != SleepVote.FOR, "");
+        check("the sleeping 90th percentile is not called awake",
+                SleepVote.pulse(62, RESTING) == SleepVote.ABSTAIN, "62, and it is asleep");
+        check("nor is the desk's",
+                SleepVote.pulse(58, RESTING) == SleepVote.ABSTAIN, "");
+        check("a rate that means moving about votes against",
+                SleepVote.pulse(70, RESTING) == SleepVote.AGAINST, "all it can still tell apart");
         check("no pulse abstains rather than voting awake",
                 SleepVote.pulse(0, RESTING) == SleepVote.ABSTAIN, "the whole point");
         check("no resting estimate abstains too",
@@ -73,11 +73,16 @@ public class SleepVoteTest {
         // The night of 23-24 September, from 04:33: still, pulse 49 against a resting 51, angle
         // inside van Hees's figure. The shipped watcher gave up on this and never came back.
         check("a sleeping burst nets strongly for sleep",
-                SleepVote.net(0.000, 0.05, true, 49, RESTING, -1) == SleepVote.FULL, "");
-        // And the same wearer turning over, which used to cancel the night outright.
+                SleepVote.net(0.000, 0.05, true, 49, RESTING, -1) == SleepVote.FULL,
+                "movement and angle agree; the pulse abstains");
+        // The same wearer turning over. With the pulse demoted there is nothing left to
+        // moderate it: movement and angle both vote against and both are all there is, so one
+        // turn now counts as hard against sleep as stillness counts for it. That is a real loss
+        // and it is recorded here rather than papered over - it is why the configuration below
+        // does not yet reach the bar on a night it has to.
         int turning = SleepVote.net(0.089, 8.0, true, 49, RESTING, -1);
-        check("turning over counts against but not fatally",
-                turning < 0 && turning > -SleepVote.FULL, turning + "");
+        check("turning over now counts fully against",
+                turning == -SleepVote.FULL, turning + ", where the pulse used to soften it");
 
         // --- a watch on a bedside table outvotes the rest -------------------------------------
         check("off the wrist outvotes every other signal",
@@ -113,19 +118,30 @@ public class SleepVoteTest {
                 SleepWatcher.afterChange() == 0,
                 "or a long night has to be undone before it can end");
 
-        // --- the case the whole thing exists for ------------------------------------------------
-        // 60% still and 40% moving, asleep, pulse at resting. The shipped rule wants about three
-        // to one and stalls here for ever; this has to reach the bar.
-        int lean = 0;
-        for (int i = 0; i < 200; i++) {
+        // --- the case the whole thing exists for, and does not yet solve -----------------------
+        //
+        // 60% still to 40% moving, asleep: the small hours of 23 September, which the shipped
+        // watcher abandoned with three hours left in it. At +/-FULL either way that is a net of
+        // 200, so the half-hour bar takes two and a half hours to reach and the night is most of
+        // the way over before it starts.
+        //
+        // This is the measurement that says the wearer's own signals do not separate their desk
+        // from their bed: asleep and at a desk differ by a factor of five on the angle with the
+        // distributions overlapped, the desk is the stiller of the two, and its pulse is lower.
+        // Every weighting that catches this night also logs that afternoon. The number is here
+        // so that a change which claims to fix it has to show it.
+        int lean = 0, steps = 0;
+        for (int i = 0; i < 400; i++) {
             boolean still = (i % 5) < 3;
             int net = still ? SleepVote.net(0.000, 0.05, true, 50, RESTING, -1)
                             : SleepVote.net(0.060, 8.0, true, 50, RESTING, -1);
             lean = SleepWatcher.lean(lean, 35, net);
+            steps++;
             if (SleepWatcher.onset(lean)) break;
         }
-        check("a night that is three parts still to two reaches the bar",
-                SleepWatcher.onset(lean), "23 September, from 04:33");
+        check("three parts still to two still takes hours to start a night",
+                SleepWatcher.onset(lean) && steps * 35 > 2 * 3600,
+                (steps * 35 / 60) + " min of evidence for a 30 min bar");
 
         System.out.println(fails == 0 ? "sleep vote: all checks passed"
                                       : "sleep vote: " + fails + " FAILED");
