@@ -216,6 +216,22 @@ if javac -nowarn -d "$TD_SLEEP" "$HERE/src/org/watchlauncher/SleepRules.java" 2>
 fi
 rm -rf "$TD_SLEEP"
 
+# Which signals think a burst is sleep, and what they think together. The thresholds are
+# percentiles of measured bursts and the weights follow from how well each one separates them,
+# so both are worth a test that states the distribution they came from.
+TD_VOTE=$(mktemp -d)
+VF="$HERE/src/org/watchlauncher/SleepRules.java $HERE/src/org/watchlauncher/SleepVote.java $HERE/src/org/watchlauncher/SleepWatcher.java"
+if javac -nowarn -d "$TD_VOTE" $VF 2>/dev/null && javac -nowarn -cp "$TD_VOTE" -d "$TD_VOTE" "$HERE/test/SleepVoteTest.java" 2>/dev/null; then
+    if ! java -cp "$TD_VOTE" SleepVoteTest > "$TD_VOTE/out"; then
+        echo "sleep vote test FAILED:" >&2
+        cat "$TD_VOTE/out" >&2
+        rm -rf "$TD_VOTE"
+        exit 1
+    fi
+    tail -1 "$TD_VOTE/out"
+fi
+rm -rf "$TD_VOTE"
+
 # Which of the pedometer's steps the wearer actually took. StepFilter touches no Android class,
 # so the day that prompted it - half its steps counted from a car seat - drives the test.
 TD_STEP=$(mktemp -d)
