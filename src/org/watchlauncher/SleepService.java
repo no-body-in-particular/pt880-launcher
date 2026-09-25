@@ -56,6 +56,10 @@ public class SleepService extends Service implements SensorEventListener {
      *  treats as nothing to credit rather than as the counter's whole history. */
     private static int lastRawSteps = -1;
 
+    /** When that reading was taken. StepFilter.credit needs the elapsed time to judge a cadence,
+     *  and a burst's own interval is not it once bursts start being dropped. */
+    private static long lastRawStepsAt = 0;
+
     private static final String TAG = "SleepService";
 
     /** How soon to try again after the accelerometer hands back an empty buffer. */
@@ -504,10 +508,23 @@ public class SleepService extends Service implements SensorEventListener {
         try {
             int rawNow = TrackerSources.lastRawSteps(this);
             if (rawNow >= 0) {
-                if (lastRawSteps >= 0) {
-                    AwakeLog.append("steps", StepFilter.rise(lastRawSteps, rawNow));
+                if (lastRawSteps >= 0 && lastRawStepsAt > 0) {
+                    int inc = StepFilter.rise(lastRawSteps, rawNow);
+                    AwakeLog.append("steps", inc);
+                    // And what the filter believes of them. The first night of this said 419
+                    // raw steps during 396 minutes of sleep and 245 during a waking afternoon,
+                    // which is the counter's own overcounting rather than a wearer who walks
+                    // more asleep than awake - the day that prompted StepFilter read 7,310 raw
+                    // against 2,730 real. The filter refuses an increment whose cadence is
+                    // impossible or whose pulse says the body was at rest, and that refusal is
+                    // exactly the difference between a night and an afternoon. Logged beside
+                    // the raw figure rather than instead of it, so the two can be compared.
+                    AwakeLog.append("walked", StepFilter.credit(inc, now - lastRawStepsAt,
+                            TrackerLog.recentBpm(this, BPM_FRESH_MS),
+                            SleepLog.restingBpm(this)));
                 }
                 lastRawSteps = rawNow;
+                lastRawStepsAt = now;
             }
         } catch (Throwable t) {
             // a diagnostic; it must not cost the burst
