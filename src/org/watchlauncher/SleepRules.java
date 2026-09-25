@@ -248,17 +248,38 @@ public final class SleepRules {
         return true;
     }
 
+    /** Above this the arm is being carried about, which is the one thing a session's median
+     *  angle change can still be trusted to say. Measured per burst: 64% of waking bursts are
+     *  above it against 16% of sleeping ones. */
+    public static final double ANGLE_CARRIED_DEG = 5.0;
+
     /**
-     * Does a session's median angle change say its wearer was asleep?
+     * What to make of a session, from the median change in arm angle across it.
      *
-     * NaN - no comparable pair anywhere in the session - is not sleep. A session the recorder
-     * never entered its fine cadence for is one the vitals path alone covered, and judging it
-     * from a statistic that does not apply is how a desk afternoon was called a night. Refusing
-     * it loses a nap nothing else saw; admitting it loses the distinction entirely.
+     * This was a yes or a no, and the wearer's labels have shown there is no line to draw. Real
+     * sleep runs 0.019 to 0.2709 and the one labelled desk afternoon sits at 0.231, inside it.
+     * Movement, pulse, posture and the spread of posture were all measured against the same
+     * labels and none of them divides the two either.
+     *
+     * So: below van Hees's figure, say sleep and mean it. Above the angle at which the arm is
+     * plainly being carried about, refuse. Between them, and when the measure could not be
+     * computed at all, count it as sleep and mark it doubtful - refusing those was costing about
+     * three hours a day of real naps against roughly one desk afternoon a week wrongly counted,
+     * and the wearer would rather correct a marked number than be handed a quiet one.
+     *
+     * @return "sleep", "doubtful" or "not"
      */
-    public static boolean angleSaysSleep(double medianChangeDeg) {
-        if (Double.isNaN(medianChangeDeg) || medianChangeDeg < 0) return false;
-        return medianChangeDeg < SLEEP_ANGLE_CHANGE_MAX;
+    public static String sessionVerdict(double medianChangeDeg) {
+        if (Double.isNaN(medianChangeDeg) || medianChangeDeg < 0) return "doubtful";
+        if (medianChangeDeg > ANGLE_CARRIED_DEG) return "not";
+        if (medianChangeDeg < SLEEP_ANGLE_CHANGE_MAX) return "sleep";
+        return "doubtful";
+    }
+
+    /** Whether a verdict's minutes go into the day's total. Doubtful ones do; that is the point
+     *  of counting them and marking them rather than choosing between the two. */
+    public static boolean countsAsSleep(String verdict) {
+        return "sleep".equals(verdict) || "doubtful".equals(verdict);
     }
 
     /** The median of the first {@code n} entries, which this sorts. NaN if there are none. */

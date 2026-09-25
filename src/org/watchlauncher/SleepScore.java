@@ -77,10 +77,28 @@ public class SleepScore {
     /** Bouts further apart than this belong to separate sleeps rather than one broken night. */
     private static final int SESSION_GAP_MIN = 45;
 
-    /* The session gate - is this stretch sleep, or somebody sitting still - is now
-     * SleepRules.SLEEP_ANGLE_CHANGE_MAX, which carries the reasoning that got it there. It used
-     * to be a threshold on the within-burst range, and that measure does not survive five
-     * nights. */
+    /*
+     * There is no gate any more, because there is nothing left to gate on.
+     *
+     * This was a threshold on the within-burst range, then on the median change in arm angle,
+     * and the wearer's own labels have now put real sleep on both sides of the second one:
+     *
+     *     asleep   0.019  0.049  0.062  0.064  0.068  0.145  0.157  0.2709
+     *     at desk                      0.231
+     *
+     * Everything else available has been measured against those labels and none of it divides
+     * them either - the desk is the stiller of the two by movement, the lower by pulse, and its
+     * posture and the spread of it sit inside the range the nights cover. A wrist at a desk and
+     * a wrist in a bed are doing the same thing, and no threshold on a wrist will say otherwise.
+     *
+     * So the verdict is three-valued and the doubt is written down rather than resolved by
+     * guessing. Below van Hees's figure a session is sleep and said to be. Above the angle at
+     * which the arm is plainly being carried about it is not, and is refused. Everything between
+     * - and everything the measure could not be computed for at all - is counted as sleep and
+     * marked doubtful, because refusing those was costing about three hours a day of real naps
+     * against one desk afternoon a week wrongly admitted, and because a number nobody can check
+     * is worse than one that says which parts of it were a judgement call.
+     */
 
     /** An awakening has to last this long to be counted as one. Movement
      *  flickers either side of the threshold, so without this a single trip to
@@ -186,7 +204,7 @@ public class SleepScore {
      * enough together to be one step of the same cadence. Everything else is skipped rather
      * than approximated, because approximating it is exactly what the measure this replaces
      * did wrong. A session with no such pair anywhere in it returns NaN, which
-     * SleepRules.angleSaysSleep reads as "not sleep" rather than as "no objection".
+     * SleepRules.sessionVerdict reads as doubtful - counted, and marked as a judgement call.
      */
     private static double medianAngleChange(List<SleepLog.Epoch> epochs, int from, int to) {
         int n = to - from;
@@ -324,7 +342,8 @@ public class SleepScore {
             long sleep = sleepSecIn(still, atSec, a, b, r.epochSec);
             double rng = medianRange(epochs, a, b);
             double dAng = medianAngleChange(epochs, a, b);
-            boolean asleep = SleepRules.angleSaysSleep(dAng);
+            String verdict = SleepRules.sessionVerdict(dAng);
+            boolean asleep = SleepRules.countsAsSleep(verdict);
 
             // Every session is written down, passed or not, and now with both measures: the one
             // deciding, and the one that used to. Five nights are what caught the first, from
@@ -333,13 +352,13 @@ public class SleepScore {
                     + (sleep / 60) + "," + String.format(java.util.Locale.US, "%.4f", rng)
                     + "," + (Double.isNaN(dAng) ? "nodata"
                             : String.format(java.util.Locale.US, "%.4f", dAng))
-                    + "," + (asleep ? "sleep" : "not"));
+                    + "," + verdict);
 
             if (asleep) r.allSleepMin += (int) (sleep / 60);
             if (asleep && sleep > bestSleep) { bestSleep = sleep; from = a; to = b; }
         }
         // Nothing looked like sleep. Rather than report the day, report nothing.
-        if (bestSleep < 0) { r.why = "no session still enough by arm angle to be sleep"; return r; }
+        if (bestSleep < 0) { r.why = "every session was the arm being carried about"; return r; }
 
         // Inside the period, still is sleep and moving is wake.
         int sleepEpochs = 0, wakeEpochs = 0;

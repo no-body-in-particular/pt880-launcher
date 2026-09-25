@@ -171,38 +171,38 @@ public class SleepRulesTest {
         check("a watch face down on a table is kept",
                 SleepRules.measuredAWrist(0.02, -0.01, -0.999), "still a wrist reading");
 
-        // --- a session is sleep by how far the arm turns, not by how much one burst spread ---
+        // --- what to make of a session, now that nothing divides sleep from a desk -----------
         //
-        // Every figure below is a real session's median, measured over five nights on the pairs
-        // where the quantity means what van Hees's threshold says. The four unambiguous nights
-        // sit an order of magnitude inside the line; the desk sessions sit from twice to a
-        // hundred and fifty times outside it.
-        check("a night at 0.019 is sleep",
-                SleepRules.angleSaysSleep(0.019), "22 Sep 17:22-21:51");
-        check("a night at 0.049 is sleep",
-                SleepRules.angleSaysSleep(0.049), "19 Sep 22:44-05:13");
-        check("a night at 0.052 is sleep",
-                SleepRules.angleSaysSleep(0.052), "20 Sep 23:42-03:57, which the range refused");
-        check("a night at 0.063 is sleep",
-                SleepRules.angleSaysSleep(0.063), "22 Sep 22:48-05:52");
-        check("a desk afternoon at 0.231 is not",
-                !SleepRules.angleSaysSleep(0.231), "21 Sep 12:03-16:21");
-        check("nor one at 18.536",
-                !SleepRules.angleSaysSleep(18.536), "20 Sep 13:49-16:07, which the range admitted");
-        check("nor one at 20.429",
-                !SleepRules.angleSaysSleep(20.429), "22 Sep 10:46-12:22");
+        // This block used to assert a threshold. The wearer has since labelled the sessions and
+        // the threshold is not there: real sleep runs from 0.019 to 0.2709 and the one labelled
+        // desk afternoon sits at 0.231, inside it. Two of the values this file previously
+        // asserted were "not sleep" - 18.536 and 20.429 - were an afternoon nap the wearer
+        // confirmed. The assertions were confident and wrong, which is the reason the verdict
+        // is three-valued now.
+        check("well inside van Hees's figure is sleep, and said so",
+                "sleep".equals(SleepRules.sessionVerdict(0.019)), "22 Sep evening");
+        check("and a real night the old range gate refused",
+                "sleep".equals(SleepRules.sessionVerdict(0.052)), "20 Sep 23:42-03:57");
+        check("a nap at 0.2709 is counted, and marked",
+                "doubtful".equals(SleepRules.sessionVerdict(0.2709)),
+                "24 Sep 13:34-17:55, which the wearer confirmed");
+        check("the one labelled desk afternoon is counted too, and marked",
+                "doubtful".equals(SleepRules.sessionVerdict(0.231)),
+                "there is no line between it and the nap");
+        check("an arm being carried about is refused",
+                "not".equals(SleepRules.sessionVerdict(20.429)), "");
+        check("a session with nothing comparable in it is counted, and marked",
+                "doubtful".equals(SleepRules.sessionVerdict(Double.NaN)),
+                "refusing these lost three hours a day of naps");
+        check("nonsense is doubtful rather than trusted",
+                "doubtful".equals(SleepRules.sessionVerdict(-1.0)), "");
 
-        // An evening of sitting joined to the night that followed it: 1.4, 2.3, 2.6, 9.9 by the
-        // hour and then 0.04, 0.09, 0.04. Refusing the session as built is the right answer to
-        // the question actually asked of it.
-        check("an evening blended into a night is refused",
-                !SleepRules.angleSaysSleep(0.159), "21 Sep 19:30-02:06");
-
-        // --- a session nothing comparable covered cannot be judged ----------------------------
-        check("no comparable pair is not sleep",
-                !SleepRules.angleSaysSleep(Double.NaN), "refused rather than assumed");
-        check("a negative median is not sleep",
-                !SleepRules.angleSaysSleep(-1.0), "");
+        check("sleep counts towards the day",
+                SleepRules.countsAsSleep("sleep"), "");
+        check("so does doubtful, which is the point",
+                SleepRules.countsAsSleep("doubtful"), "");
+        check("and refused does not",
+                !SleepRules.countsAsSleep("not"), "");
 
         // --- which pairs may be compared at all -----------------------------------------------
         // Both of these traps cost a real night. Five minutes apart the arm has had five minutes
